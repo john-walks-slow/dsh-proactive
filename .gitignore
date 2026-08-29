@@ -1,0 +1,9 @@
+# dependencies
+node_modules/
+
+# build outputs
+packages/dsh-proactive/lib/
+packages/dsh-proactive/dist/
+
+# logs
+*.log

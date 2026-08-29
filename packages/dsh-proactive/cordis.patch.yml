@@ -1,0 +1,4 @@
+# dsh-proactive — bundle patch layer（一行 insert；profile 的 dsh.profile.bundles 里列了本包即整层生效）
+- insert:
+    - id: dsh-proactive
+      name: dsh-proactive
