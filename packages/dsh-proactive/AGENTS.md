@@ -32,4 +32,3 @@
 - 本地改完要跑 `tsc -p tsconfig.json`（src+test 一起查）再 `node --test 'dist/test/*.test.js'`；node --test dist/test/ 目录形式在 Node 22 会 MODULE_NOT_FOUND
 - tools 的 output.schema 每个属性都要带 `required: true`（dsh-tools 的 per-property 约定，不是 JSON Schema 顶层 required 数组）
 - notice 来源必须带 `summary`（≤120 字符），否则 MessageSource 类型不满足
-- 本沙箱 /dev 是 rootfs f2fs bind 且无设备节点：git 2.43 的临时文件种子会硬性 open(/dev/urandom)（getrandom(2) 成功了也没用）→ git add/commit 报 unable to get random bytes for temporary file（exit 128）。铁律：不得往 /dev 里 mknod 或建文件（SELinux app_data_file 标签中毒，见 chroot-devfs-pitfall）。合规解法：LD_PRELOAD 垫片把 /dev/urandom|/dev/random 的 open 重定向到 getrandom 填充的 memfd（零落盘痕迹），用法 export LD_PRELOAD=/root/.git-rnd-shim.so 再跑 git 命令；永不删 /dev/null（普通文件，删了 spawn ENOENT）
