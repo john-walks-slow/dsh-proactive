@@ -32,7 +32,7 @@ const BASE_NOW = Date.parse("2026-09-01T09:00:00.000Z");
 
 interface Outcome {
   outcome: "ok" | "busy" | "failed";
-  analysis?: { decision: RunDecision; budgetDelta: number; note?: string };
+  analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string };
 }
 
 interface Harness {
@@ -88,6 +88,39 @@ test("due one-shot fires and completes; run record written", async (tctx) => {
   assert.match(runs, /"decision":"no_reply"/);
 });
 
+test("wake summaries round-trip from analysis to runs.jsonl and listRecentRuns", async (tctx) => {
+  const h = await harness();
+  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  h.outcomes.push({
+    outcome: "ok",
+    analysis: { decision: "no_reply", budgetDelta: 0, reasoningSummary: "该提醒昨天已处理过，静默收尾。", replySummary: "" }
+  });
+  h.store.addAlarm(alarm("s1"));
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("s1")?.status === "completed");
+  const runs = readFileSync(join(h.dir, "runs.jsonl"), "utf8");
+  assert.match(runs, /"reasoningSummary":"该提醒昨天已处理过，静默收尾。"/);
+  const rows = await h.store.listRecentRuns(10);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.reasoningSummary, "该提醒昨天已处理过，静默收尾。");
+  assert.equal(rows[0]!.decision, "no_reply");
+});
+
+test("skipped runs carry no summary fields", async (tctx) => {
+  const h = await harness();
+  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  // Budget exhausted → non-alarm (heartbeat) wakes are skipped via recordSkip (no analysis summaries).
+  h.store.addAlarm(alarm("k1", { wakeReason: "heartbeat" }));
+  h.config.maxDeliveriesPerDay = 1;
+  await h.store.spendBudget("2026-09-01", 1);
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("k1")?.runCount === 1);
+  const rows = await h.store.listRecentRuns(10);
+  assert.equal(rows[0]!.decision, "skipped");
+  assert.equal(rows[0]!.reasoningSummary, undefined);
+  assert.equal(rows[0]!.replySummary, undefined);
+});
+
 test("repeat advances to the next anchor", async (tctx) => {
   const h = await harness();
   tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
@@ -112,7 +145,7 @@ test("busy defers and advances after maxRetriesPerFire", async (tctx) => {
   // advance the clock past the retry window: second busy attempt hits maxRetriesPerFire=2
   h.clock.t += 31_000;
   h.scheduler.requestDrive();
-  await h.flush();
+  await h.flush(() => h.store.getAlarm("b1")?.status === "completed");
   assert.equal(h.fired.length, 2);
   assert.equal(h.store.getAlarm("b1")?.status, "completed"); // max retries reached -> skip+advance
 });
@@ -131,11 +164,11 @@ test("quiet hours defer non-alarm wakes; user alarms are exempt", async (tctx) =
   const h = await harness({ quietHours: { start: "00:00", end: "23:59", timeZone: "UTC" } });
   tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
   h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
-  h.store.addAlarm(alarm("q1", { wakeReason: "check_in" }));
+  h.store.addAlarm(alarm("q1", { wakeReason: "heartbeat" }));
   h.store.addAlarm(alarm("q2", { wakeReason: "alarm" }));
   h.scheduler.start();
   await h.flush(() => h.fired.length >= 1);
-  // check_in deferred, alarm fired
+  // heartbeat deferred, alarm fired
   assert.equal(h.fired.length, 1);
   assert.equal(h.fired[0]?.id, "q2");
   assert.ok(Date.parse(h.store.getAlarm("q1")!.nextDueAt) > BASE_NOW);
@@ -145,7 +178,7 @@ test("daily budget gate skips non-alarm wakes at the cap", async (tctx) => {
   const h = await harness();
   tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
   await h.store.spendBudget("2026-09-01", 3);
-  h.store.addAlarm(alarm("c1", { wakeReason: "check_in" }));
+  h.store.addAlarm(alarm("c1", { wakeReason: "heartbeat" }));
   h.scheduler.start();
   await h.flush(() => h.store.getAlarm("c1")?.runCount === 1);
   assert.equal(h.fired.length, 0);

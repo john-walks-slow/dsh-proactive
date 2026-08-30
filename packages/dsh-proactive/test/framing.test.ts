@@ -45,6 +45,21 @@ test("renderFraming exposes rules, budget, and alarm facts", () => {
   assert.match(text, /outside 23:00\u201308:00/);
 });
 
+test("renderFraming falls back for legacy wake reasons (check_in/interval/companion)", () => {
+  for (const legacy of ["check_in", "interval", "companion"]) {
+    const text = renderFraming(ctx({ alarm: { ...alarm, wakeReason: legacy as Alarm["wakeReason"] } }));
+    assert.ok(text.includes("wake_reason: " + legacy + " (" + legacy + ")"), "legacy: " + legacy);
+    assert.ok(!text.includes("undefined"), "legacy: " + legacy);
+  }
+});
+
+test("renderFraming allows no_reply on every wake reason", () => {
+  const text = renderFraming(ctx());
+  assert.match(text, /available on EVERY wake/);
+  const alarmText = renderFraming(ctx({ alarm: { ...alarm, wakeReason: "heartbeat" } }));
+  assert.match(alarmText, /available on EVERY wake/);
+});
+
 test("renderFraming flags quiet hours when inside the window", () => {
   const text = renderFraming(ctx({ quiet: true }));
   assert.match(text, /INSIDE 23:00\u201308:00 Asia\/Shanghai/);

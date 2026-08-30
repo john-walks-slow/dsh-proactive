@@ -21,6 +21,9 @@ import { ProactiveStore } from "./store.js";
 import { ProactiveScheduler } from "./scheduler.js";
 import { WakeDriver } from "./wake.js";
 import { registerProactiveTools } from "./tools.js";
+import { ProactivePanelService } from "./panel/service.js";
+import { installPanelRoutes } from "./panel/routes.js";
+import { wireSettings } from "./settings.js";
 import { PROACTIVE_PLUGIN } from "./domain.js";
 
 export const name = PROACTIVE_PLUGIN;
@@ -50,6 +53,7 @@ function currentModelSelection(ctx: Context): { provider?: string; model?: strin
 }
 
 export async function apply(ctx: Context): Promise<() => Promise<void>> {
+  ctx.logger.info("dsh-proactive: applying (trace).");
   const config = resolveConfig();
   if (!config.enabled) {
     ctx.logger.info("dsh-proactive disabled by config.");
@@ -101,6 +105,24 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     registerOne(existing);
   }
 
+  const panel = new ProactivePanelService({
+    store,
+    config,
+    scheduler,
+    dataDir: config.dataDir,
+    now: () => Date.now(),
+    log: (level, message) => ctx.logger[level](message)
+  });
+
+  // Optional surfaces: panel HTTP routes (needs the host webserver) and the
+  // settings namespace (needs a settings service). Both degrade to a logged
+  // no-op on headless profiles — the model tools never depend on them.
+  const extraDisposers: Array<() => void> = [];
+  const routeDispose = installPanelRoutes(ctx, panel, (listener) => store.onChange(listener));
+  if (routeDispose !== undefined) extraDisposers.push(routeDispose);
+  const settingsWire = wireSettings(ctx, config);
+  if (settingsWire.installed && settingsWire.dispose !== undefined) extraDisposers.push(settingsWire.dispose);
+
   scheduler.start();
   ctx.logger.info(
     "dsh-proactive started: dataDir=" + config.dataDir +
@@ -111,6 +133,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
 
   return async () => {
     stopCreated();
+    for (const dispose of extraDisposers) dispose();
     scheduler.stop();
     await store.persist().catch(() => undefined);
   };

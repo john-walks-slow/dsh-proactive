@@ -27,10 +27,25 @@ export interface WakeAnalysis {
   toolNames: string[];
   hasText: boolean;
   note?: string;
+  /** Truncated reasoning (thinking) summary of the turn, for the run history. */
+  reasoningSummary?: string;
+  /** Truncated visible-reply summary of the turn, for the run history. */
+  replySummary?: string;
 }
 
 const NO_REPLY_TOOL = "proactive_no_reply";
 const VISIBLE_TOOLS = new Set(["push_notify", "send_wechat"]);
+
+/** Per-field summary cap for the run history (reasoning + reply are stored truncated). */
+export const RUN_SUMMARY_MAX_LENGTH = 200;
+
+/** Collapse one summary field to at most RUN_SUMMARY_MAX_LENGTH characters. */
+export function truncateSummary(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= RUN_SUMMARY_MAX_LENGTH) return trimmed;
+  // Code-point slicing: avoids splitting a surrogate pair (e.g. emoji) mid-way.
+  return Array.from(trimmed).slice(0, RUN_SUMMARY_MAX_LENGTH).join("") + "…";
+}
 
 export function extractTextBlocks(data: Record<string, unknown>): string[] {
   const blocks = Array.isArray(data["blocks"]) ? data["blocks"] : undefined;
@@ -48,6 +63,26 @@ export function extractTextBlocks(data: Record<string, unknown>): string[] {
   const nested = data["message"];
   if (isRecord(nested) && Array.isArray(nested["content"])) {
     return extractTextBlocks({ blocks: nested["content"] as unknown[] });
+  }
+  return [];
+}
+
+/** Reasoning (thinking) block texts from one assistant/message event, same shapes as text. */
+export function extractReasoningBlocks(data: Record<string, unknown>): string[] {
+  const blocks = Array.isArray(data["blocks"]) ? data["blocks"] : undefined;
+  if (blocks !== undefined) {
+    const texts: string[] = [];
+    for (const block of blocks) {
+      if (typeof block === "object" && block !== null && block["type"] === "reasoning") {
+        const text = block["text"];
+        if (typeof text === "string" && text.trim().length > 0) texts.push(text);
+      }
+    }
+    return texts;
+  }
+  const nested = data["message"];
+  if (isRecord(nested) && Array.isArray(nested["content"])) {
+    return extractReasoningBlocks({ blocks: nested["content"] as unknown[] });
   }
   return [];
 }
@@ -80,12 +115,19 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   const turnSegment = turnEndIndex >= 0 ? effective.slice(0, turnEndIndex + 1) : effective;
 
   let hasText = false;
+  const textParts: string[] = [];
+  const reasoningParts: string[] = [];
   const toolNames: string[] = [];
   let noReply = false;
   for (const event of turnSegment) {
     if (event.type === "assistant/message") {
       const texts = extractTextBlocks(event.data);
-      if (texts.length > 0) hasText = true;
+      if (texts.length > 0) {
+        hasText = true;
+        textParts.push(...texts);
+      }
+      const reasoning = extractReasoningBlocks(event.data);
+      if (reasoning.length > 0) reasoningParts.push(...reasoning);
     }
     if (event.type === "tool/call") {
       const name = typeof event.data["name"] === "string" ? event.data["name"] : "";
@@ -121,6 +163,8 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     leaked,
     toolNames,
     hasText,
+    ...(reasoningParts.length > 0 ? { reasoningSummary: truncateSummary(reasoningParts.join("\n")) } : {}),
+    ...(textParts.length > 0 ? { replySummary: truncateSummary(textParts.join("\n")) } : {}),
     ...(note !== undefined ? { note } : {})
   };
 }

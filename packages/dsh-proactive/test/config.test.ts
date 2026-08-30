@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CONFIG, isInQuietHours, localClockMinutes, parseClockTime, resolveConfig } from "../src/config.js";
+import { MAX_PROMPT_LENGTH } from "../src/domain.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,5 +72,33 @@ test("resolveConfig honors env overrides", () => {
     assert.equal(cfg.maxDeliveriesPerDay, 7);
   } finally {
     delete process.env["DSH_PROACTIVE_MAX_DELIVERIES_PER_DAY"];
+  }
+});
+
+test("heartbeat defaults resolve and the interval clamps to the floor", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-hb-"));
+  try {
+    const cfg = resolveConfig(dir);
+    assert.equal(cfg.heartbeatEverySeconds, DEFAULT_CONFIG.heartbeatEverySeconds);
+    assert.ok(cfg.heartbeatPrompt.includes("heartbeat reminder"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatPrompt: "ping", heartbeatEverySeconds: 120 }));
+    const over = resolveConfig(dir);
+    assert.equal(over.heartbeatPrompt, "ping");
+    assert.equal(over.heartbeatEverySeconds, 300); // clamped to MIN_EVERY_SECONDS
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("config.json heartbeatPrompt longer than the schema cap is clamped, not rejected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-hb-clamp-"));
+  try {
+    const tooLong = "x".repeat(MAX_PROMPT_LENGTH + 100);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatPrompt: "  " + tooLong + "  " }));
+    const cfg = resolveConfig(dir);
+    assert.equal(cfg.heartbeatPrompt.length, MAX_PROMPT_LENGTH); // whitespace trimmed first, then sliced to the schema cap
+    assert.ok(cfg.heartbeatPrompt.startsWith("x")); // leading whitespace was trimmed before clamping
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

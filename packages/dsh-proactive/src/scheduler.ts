@@ -31,7 +31,7 @@ export interface SchedulerDeps {
   store: ProactiveStore;
   config: ProactiveConfig;
   /** Runs one alarm through the agent world; returns ok + analysis or busy/failed. */
-  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; analysis?: { decision: RunDecision; budgetDelta: number; leaked?: boolean; note?: string } }>;
+  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; analysis?: { decision: RunDecision; budgetDelta: number; leaked?: boolean; note?: string; reasoningSummary?: string; replySummary?: string } }>;
   now?: () => number;
   log: (level: "info" | "warn" | "error", message: string) => void;
 }
@@ -235,7 +235,7 @@ export class ProactiveScheduler {
       this.deps.log("warn", "leak: alarm " + alarm.id + " called no_reply after visible text (charged 1)");
     }
     const note = analysis.note ?? (analysis.leaked ? "leak: no_reply after visible text (charged 1)" : undefined);
-    await this.recordRun(alarm, analysis.decision, analysis.budgetDelta, note);
+    await this.recordRun(alarm, analysis.decision, analysis.budgetDelta, note, analysis.reasoningSummary, analysis.replySummary);
     this.advancePast(alarm, now, analysis.decision);
     return "advanced";
   }
@@ -244,7 +244,7 @@ export class ProactiveScheduler {
     this.retries.set(alarm.id, (this.retries.get(alarm.id) ?? 0) + 1);
   }
 
-  private async recordRun(alarm: Alarm, decision: RunDecision, budgetDelta: number, note?: string): Promise<void> {
+  private async recordRun(alarm: Alarm, decision: RunDecision, budgetDelta: number, note?: string, reasoningSummary?: string, replySummary?: string): Promise<void> {
     const rec = {
       id: "run_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       alarmId: alarm.id,
@@ -252,7 +252,9 @@ export class ProactiveScheduler {
       firedAt: new Date().toISOString(),
       decision,
       budgetDelta,
-      ...(note !== undefined ? { note } : {})
+      ...(note !== undefined ? { note } : {}),
+      ...(reasoningSummary !== undefined ? { reasoningSummary } : {}),
+      ...(replySummary !== undefined ? { replySummary } : {})
     };
     await this.deps.store.appendRun(rec).catch(() => undefined);
   }

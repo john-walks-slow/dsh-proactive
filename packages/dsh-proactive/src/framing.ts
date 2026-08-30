@@ -22,25 +22,16 @@ export interface FramingContext {
   configQuietHours: ProactiveConfig["quietHours"];
 }
 
-export const WAKE_REASON_LABELS: Record<WakeReason, string> = {
-  check_in: "习惯教练跟进",
-  alarm: "用户委托提醒",
-  interval: "周期跟进",
-  companion: "陪伴互动"
-};
-
 const WAKE_REASON_EN: Record<WakeReason, string> = {
-  check_in: "habit coach check-in",
-  alarm: "user-requested reminder",
-  interval: "periodic follow-up",
-  companion: "companion interaction"
+  heartbeat: "model-initiated periodic check-in",
+  alarm: "user-requested reminder"
 };
 
 /** The full wake prompt handed to the model (rules + facts + alarm prompt). */
 export function renderFraming(ctx: FramingContext): string {
   const lines: string[] = [];
   lines.push("## PROACTIVE WAKE");
-  lines.push("- wake_reason: " + ctx.alarm.wakeReason + " (" + WAKE_REASON_EN[ctx.alarm.wakeReason] + ")");
+  lines.push("- wake_reason: " + ctx.alarm.wakeReason + " (" + (WAKE_REASON_EN[ctx.alarm.wakeReason] ?? ctx.alarm.wakeReason) + ")");
   lines.push("- wake_context: This is a host-level wake-up scheduled by the alarm system. The user did NOT just send a message.");
   lines.push("- user_presence: " + ctx.userPresence + " (" + (ctx.userPresence === "live" ? "session is live; wait for the ongoing turn to settle if busy" : "session was cold; this wake resumed it") + ")");
   lines.push("- now: " + ctx.now.toISOString());
@@ -55,8 +46,8 @@ export function renderFraming(ctx: FramingContext): string {
   lines.push("```");
   lines.push("");
   lines.push("### Reply rules");
-  lines.push("1. If this follow-up can be completed silently or the situation resolved itself with nothing the user needs to see, call proactive_no_reply(reason) as the ONLY action of this turn and do NOT write any chat text.");
-  lines.push("2. If the user genuinely needs to see something now (the alarm is user-requested or the finding is important), write a short, concrete reply in the user's language.");
+  lines.push("1. proactive_no_reply(reason) is available on EVERY wake, including user-requested alarms (wake_reason alarm): if this follow-up can be completed silently, the situation resolved itself, or silence is the better choice (e.g. in-character for a roleplay persona, or the reminder is already obsolete), call it as the ONLY action of this turn and do NOT write any chat text.");
+  lines.push("2. If the user genuinely needs to see something now and a visible reply serves them, write a short, concrete reply in the user's language. A user-requested alarm usually deserves one, but one that is obsolete, already handled, or better ignored in-character may also end with proactive_no_reply.");
   lines.push("3. If the user is not at the screen (user_presence cold) and the finding is time-sensitive, prefer push_notify (or send_wechat when configured) with a short message, and keep any chat text minimal.");
   lines.push("");
   lines.push("Your check-in itself should take seconds, not minutes: no tool exploration, no long summaries. If the alarm is obsolete (already handled in this session), use proactive_no_reply.");

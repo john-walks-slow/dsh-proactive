@@ -37,6 +37,18 @@ export class ProactiveStore {
   corrupt = false;
   private state: StoreState;
   private budget: BudgetState;
+  private changeListeners = new Set<() => void>();
+  /** Subscribe to every store mutation (alarms/budget/runs); returns the disposer. */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  private emitChange(): void {
+    for (const listener of this.changeListeners) listener();
+  }
 
   constructor(dataDir: string, initial?: StoreState, initialBudget?: BudgetState) {
     this.dataDir = dataDir;
@@ -82,17 +94,22 @@ export class ProactiveStore {
 
   addAlarm(alarm: Alarm): void {
     this.state.alarms.push(alarm);
+    this.emitChange();
   }
 
   replaceAlarm(updated: Alarm): void {
     const index = this.state.alarms.findIndex((alarm) => alarm.id === updated.id);
-    if (index >= 0) this.state.alarms[index] = updated;
+    if (index >= 0) {
+      this.state.alarms[index] = updated;
+      this.emitChange();
+    }
   }
 
   removeAlarm(id: string): Alarm | undefined {
     const index = this.state.alarms.findIndex((alarm) => alarm.id === id);
     if (index < 0) return undefined;
     const [removed] = this.state.alarms.splice(index, 1);
+    this.emitChange();
     return removed;
   }
 
@@ -107,6 +124,7 @@ export class ProactiveStore {
   async appendRun(record: RunRecord): Promise<void> {
     await mkdir(this.dataDir, { recursive: true });
     await appendFile(this.dataDir + "/" + RUNS_FILE, JSON.stringify(record) + "\n", "utf8");
+    this.emitChange();
   }
 
   /** Budget for one UTC day; a new day resets the counter. */
@@ -124,6 +142,30 @@ export class ProactiveStore {
     const tmp = target + ".tmp." + process.pid + "." + Math.random().toString(36).slice(2);
     await writeFile(tmp, JSON.stringify(this.budget, null, 2) + "\n", "utf8");
     await rename(tmp, target);
+    this.emitChange();
     return this.budget.delivered;
+  }
+
+  /** Latest run records from runs.jsonl, oldest-to-newest within the window. */
+  async listRecentRuns(limit: number): Promise<RunRecord[]> {
+    if (limit <= 0) return [];
+    try {
+      const raw = await readFile(this.dataDir + "/" + RUNS_FILE, "utf8");
+      const lines = raw.split("\n").filter((line) => line.trim() !== "").slice(-limit);
+      const runs: RunRecord[] = [];
+      for (const line of lines) {
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (isRecord(parsed) && typeof parsed["id"] === "string" && typeof parsed["firedAt"] === "string") runs.push(parsed as unknown as RunRecord);
+        } catch {
+          /* one malformed tail line never blocks the panel */
+        }
+      }
+      return runs;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") this.emitChange();
+      return [];
+    }
   }
 }

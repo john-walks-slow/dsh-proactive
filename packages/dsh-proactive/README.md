@@ -2,17 +2,18 @@
 
 让 DeepSeek Harness 的模型**主动跟进**：给自己定 host 级闹钟，即使会话已冷却也会按时被唤醒；唤醒回合可以选择 `proactive_no_reply` 静默收尾——用户完全无感知。
 
-三个典型场景：
+两个典型场景：
 
-1. **习惯教练**：模型每天定时提醒/跟进用户习惯计划（`wake_reason: check_in`）。
-2. **虚拟陪伴**：模型主动找用户聊天（`wake_reason: companion`），低频、预算受限。
-3. **用户委托闹钟**：用户说"1 小时后提醒我"，模型用 `proactive_set` 给自己订闹钟（`wake_reason: alarm`），到点把用户唤醒；安静时段内用户委托提醒依然放行。
+1. **模型主动跟进**（`wake_reason: heartbeat`）：习惯教练式每日跟进、陪伴类的主动聊天、周期复查等都由模型自主发起，低频、受预算与安静时段约束；面板提供「心跳预设」一键按默认提示词与间隔（60 分钟）新建。（v1 曾用 check_in/interval/companion 三种名称，行为完全一致，已合并统一为 heartbeat；旧存储值仍兼容。）
+2. **用户委托闹钟**（`wake_reason: alarm`）：用户说"1 小时后提醒我"，模型用 `proactive_set` 给自己订闹钟，到点把用户唤醒；安静时段内用户委托提醒依然放行，预算耗尽也不跳过。
 
 ## 与 dsh-schedule 的区别
 
 dsh-schedule 的提醒是**会话内**的：会话凉了就不会触发。dsh-proactive 把闹钟存在 **host 级**（`$DSH_HOME/proactive/`），到点用 `ctx.agents.resume()` 把冷会话唤起来执行一次，跑完即释放（进程内 handle dispose，持久化会话不受影响）。
 
 ## 安装
+
+0. 构建产物前置（本地开发包）：`pnpm install && pnpm run build`（生成 `lib/`，含浏览器半边 `lib/client.js`）。
 
 1. 在 profile 目录（如 `/root/.dsh/profiles/web`）安装本包（本地路径）：
 
@@ -38,11 +39,24 @@ dsh plugin --profile web add file:/root/projects/dsh-proactive/packages/dsh-proa
   "maxConcurrentPerSession": 1,                // 每会话并发在途唤醒数
   "bootOverduePolicy": "fire",                 // fire | notify-only | drop
   "maxRetriesPerFire": 3,                      // 单次唤醒的 busy/failed 重试上限
-  "maxPromptLength": 4000
+  "maxPromptLength": 4000,
+  "heartbeatPrompt": "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。",
+  "heartbeatEverySeconds": 3600                // 心跳预设默认间隔（最小 300，最大 86400）
 }
 ```
 
 环境变量覆盖：`DSH_PROACTIVE_ENABLED`、`DSH_PROACTIVE_MAX_DELIVERIES_PER_DAY`、`DSH_PROACTIVE_DATA_DIR`、`DSH_PROACTIVE_TIME_ZONE`。
+
+## GUI 管理面板（v2）
+
+Web GUI 的设置面板中会出现「Proactive 闹钟」页签（插件随 bundle 安装自动注册，无需额外配置）：
+
+- **闹钟管理**：列出全部闹钟（状态/模式/下次触发/唤醒原因），可新建、暂停/恢复、立即触发、取消；面板操作与 `proactive_*` 工具共用同一套校验与错误码。
+- **心跳预设**：点「心跳预设」一键预填默认心跳提示词与默认间隔（60 分钟、`wake_reason=heartbeat`），可改后保存；提示词与间隔在设置面板可改（`heartbeatPrompt` / `heartbeatEverySeconds`），改即生效。
+- **最近唤醒**：运行记录表展示每次唤醒的时间、决策（no_reply/reply/push/skipped/failed）、预算增量，以及**思考与回复摘要**（截断至 200 字符，悬浮看全文）——帮助理解模型在唤醒回合里为什么这样决策（含静默 no_reply 的理由）。
+- **配置即改生效**：设置面板中的 proactive 配置（启用、每日预算、安静时段、每小时上限、并发、boot 策略、重试、max prompt）通过官方 settings 通道热更新，无需重启；`config.json`/环境变量作为默认层继续生效，面板改动覆盖它们。
+- **实时刷新**：面板订阅 SSE 推送（`/api/dsh-proactive/events`），任一来源的变更（模型工具、面板、调度器）都会自动刷新；另提供 `/api/dsh-proactive/state`（快照）与 `/api/dsh-proactive/action`（命令）。
+- 无 webserver 的环境（headless profile）自动跳过面板路由，模型工具不受影响。
 
 ## 工具
 
@@ -53,11 +67,11 @@ dsh plugin --profile web add file:/root/projects/dsh-proactive/packages/dsh-proa
 | `proactive_cancel` | 按 id 取消 |
 | `proactive_no_reply` | **唤醒回合专用**：静默收尾（`concludesTurn`），需单独调用且不产出文本 |
 
-唤醒回合的 framing 报文包含三条回复规则（重要提醒必须说、冷会话且有时效走 push_notify/send_wechat、无需用户感知就 no_reply），并如实给出今日预算用量。
+唤醒回合的 framing 报文包含三条回复规则（用户需要时简短回复、冷会话且有时效走 push_notify/send_wechat、无需用户感知或静默更合适就 no_reply），并如实给出今日预算用量。`proactive_no_reply` 对**任何唤醒原因**（含用户委托 alarm）都可用——角色扮演等场景允许"不理用户更真实"的静默收尾。
 
 ## 预算与安静时段
 
-- **预算**：任何可见输出（聊天文本、push_notify、send_wechat）1 单位/次，按 UTC 日累计，上限 `maxDeliveriesPerDay`；`no_reply` 免费不计。预算用尽后，主动型唤醒（check_in/companion/interval）不再触发；用户委托的 alarm 仍会触发（用户显式要求优先，允许轻微超限）。
+- **预算**：任何可见输出（聊天文本、push_notify、send_wechat）1 单位/次，按 UTC 日累计，上限 `maxDeliveriesPerDay`；`no_reply` 免费不计。预算用尽后，主动型唤醒（heartbeat）不再触发；用户委托的 alarm 仍会触发（用户显式要求优先，允许轻微超限）。
 - **安静时段**：非 alarm 唤醒在安静时段内延迟（每 5 分钟重评估），结束时若有遗漏自动补一次；alarm 不受限。
 - **失败处理**：busy/failed 递增重试，超过 `maxRetriesPerFire` 后按一次 skipped 记账并推进；重复闹钟错过的时间片不补跑，只推进到下一个锚点（对齐创建时刻）。
 
@@ -74,7 +88,7 @@ dsh plugin --profile web add file:/root/projects/dsh-proactive/packages/dsh-proa
 pnpm install
 npm run check    # tsc --noEmit
 npm run build    # tsc -p tsconfig.build.json -> lib/
-npm test         # 编译 + node:test（39 个单测）
+npm test         # 编译 + node:test（86 个单测）
 ```
 
 ## 已知限制（v1）

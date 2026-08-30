@@ -10,12 +10,21 @@ export const MIN_EVERY_SECONDS = 300;
 export const MAX_PROMPT_LENGTH = 4000;
 export const MAX_NO_REPLY_REASON_LENGTH = 200;
 
-export type WakeReason = "check_in" | "alarm" | "interval" | "companion";
+/**
+ * Why a wake fires. Only two reasons exist: `alarm` (user-requested reminder,
+ * exempt from quiet hours and the daily budget) and `heartbeat` (model-initiated
+ * periodic check-in, gated by quiet hours + budget). Earlier builds used
+ * `check_in`, `interval`, and `companion`; every model-initiated value behaved
+ * identically, so they were merged into `heartbeat`. Stored alarms may still
+ * carry those legacy values — framing and views keep them readable instead of
+ * breaking ("check_in" is treated as the same gate class, i.e. non-alarm).
+ */
+export type WakeReason = "heartbeat" | "alarm";
 export type AlarmMode = "one-shot" | "repeat";
-export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" | "failed";
+export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
 export type RunDecision = "no_reply" | "reply" | "push" | "skipped" | "failed";
 
-export const WAKE_REASONS: readonly WakeReason[] = ["check_in", "alarm", "interval", "companion"];
+export const WAKE_REASONS: readonly WakeReason[] = ["heartbeat", "alarm"];
 
 export type ProactiveErrorCode =
   | "invalid_prompt"
@@ -77,6 +86,10 @@ export interface RunRecord {
   decision: RunDecision;
   budgetDelta: number;
   note?: string;
+  /** Truncated reasoning (thinking) summary of the wake turn, for the panel history. */
+  reasoningSummary?: string;
+  /** Truncated visible-reply summary of the wake turn, for the panel history. */
+  replySummary?: string;
 }
 
 export type AlarmView = {
@@ -85,7 +98,7 @@ export type AlarmView = {
   prompt: string;
   wakeReason: WakeReason;
   nextDueAt: string;
-  state: "scheduled" | "overdue" | "in-flight" | "completed" | "cancelled" | "failed";
+  state: "scheduled" | "overdue" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
   deliveryMode: "host";
 }
 

@@ -13,7 +13,7 @@ function alarm(id: string, sessionId = "s1", nextDueAt = "2026-09-02T00:00:00.00
     mode: "one-shot",
     trigger: { at: "2026-09-02T00:00:00.000Z" },
     prompt: "跟进一下",
-    wakeReason: "check_in",
+    wakeReason: "heartbeat",
     deliveryHint: { chat: true, push: true, wechat: true },
     timeZone: "UTC",
     status: "scheduled",

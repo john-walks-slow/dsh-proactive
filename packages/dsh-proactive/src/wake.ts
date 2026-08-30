@@ -121,7 +121,9 @@ export class WakeDriver {
           decision: analysis.decision,
           budgetDelta: analysis.budgetDelta,
           ...(analysis.leaked ? { leaked: true } : {}),
-          ...(analysis.note !== undefined ? { note: analysis.note } : {})
+          ...(analysis.note !== undefined ? { note: analysis.note } : {}),
+          ...(analysis.reasoningSummary !== undefined ? { reasoningSummary: analysis.reasoningSummary } : {}),
+          ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {})
         }
       };
     } catch (error) {

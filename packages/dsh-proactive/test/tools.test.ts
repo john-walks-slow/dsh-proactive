@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { validateJsonSchemaValue } from "@deepseek-ai/dsh-tools";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { proactiveToolDefinitions, type ToolServices } from "../src/tools.js";
+import { validateCreateArgs } from "../src/alarm-factory.js";
 import type { ProactiveStore } from "../src/store.js";
 import type { ProactiveScheduler } from "../src/scheduler.js";
 import type { WakeDriver } from "../src/wake.js";
@@ -67,6 +69,40 @@ test("proactive_set validates selectors", async () => {
   assert.equal(code(await h.run("proactive_set", { prompt: "x", every_seconds: 10 * 365 * 86400 + 1 })), "invalid_trigger");
 });
 
+test("proactive_set rejects the merged wake_reason values", async () => {
+  const h = harness();
+  // The tool schema enum is the first gate: invalid values throw INVALID_ARGS
+  // before the closed domain validation (which the panel path still uses).
+  for (const legacy of ["check_in", "interval", "companion"]) {
+    await assert.rejects(h.run("proactive_set", { prompt: "x", after_seconds: 3600, wake_reason: legacy }),
+      (err: unknown) => (err as { code?: string })["code"] === "INVALID_ARGS");
+  }
+  const ok = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 3600, wake_reason: "alarm" }));
+  assert.equal(ok.state, "scheduled");
+  assert.equal(ok.wakeReason, "alarm");
+});
+
+test("validateCreateArgs rejects legacy wake reasons with a closed code (P2)", () => {
+  for (const legacy of ["check_in", "interval", "companion"]) {
+    const res = validateCreateArgs({ prompt: "x", after_seconds: 3600, wake_reason: legacy }) as { code?: string };
+    assert.equal(res.code, "invalid_trigger", "legacy: " + legacy);
+  }
+  const ok = validateCreateArgs({ prompt: "x", after_seconds: 3600, wake_reason: "heartbeat" });
+  assert.ok(!("code" in ok));
+});
+
+test("P1 regression: alarm view output schema admits legacy wake reasons", () => {
+  const h = harness();
+  const listDef = h.byName["proactive_list"];
+  // The array branch of the output oneOf carries the alarm view items schema.
+  const viewSchema = (listDef.output!.schema as { oneOf: Array<{ type: string; items: unknown }> }).oneOf[0].items as Parameters<typeof validateJsonSchemaValue>[0];
+  const base = { id: "a", mode: "repeat", prompt: "p", nextDueAt: "2026-09-02T00:00:00.000Z", state: "scheduled", deliveryMode: "host" };
+  for (const wakeReason of ["heartbeat", "alarm", "check_in", "interval", "companion"]) {
+    const violations = validateJsonSchemaValue(viewSchema, { ...base, wakeReason }, "value");
+    assert.deepEqual(violations, [], "wakeReason " + wakeReason + " must validate");
+  }
+});
+
 test("proactive_set creates one-shot and repeat alarms end to end", async () => {
   const h = harness();
   const one = asView(await h.run("proactive_set", { prompt: "提醒喝水", after_seconds: 3600 }));
@@ -75,9 +111,9 @@ test("proactive_set creates one-shot and repeat alarms end to end", async () => 
   assert.equal(one.state, "scheduled");
   assert.equal(h.store.alarms.length, 1);
   assert.equal(h.requestDrives, 1);
-  const rep = asView(await h.run("proactive_set", { prompt: "检查 TODO", every_seconds: 300, wake_reason: "check_in" }));
+  const rep = asView(await h.run("proactive_set", { prompt: "检查 TODO", every_seconds: 300, wake_reason: "heartbeat" }));
   assert.equal(rep.mode, "repeat");
-  assert.equal(rep.wakeReason, "check_in");
+  assert.equal(rep.wakeReason, "heartbeat");
   const at = asView(await h.run("proactive_set", { prompt: "两点叫我", at: { date: "2026-09-02", time: "14:00:00", time_zone: "Asia/Shanghai" } }));
   assert.equal(at.mode, "one-shot");
   assert.equal(h.store.alarms.length, 3);
