@@ -9,6 +9,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { writeFile, rename, mkdir } from "node:fs/promises";
 import { MAX_PROMPT_LENGTH, MIN_EVERY_SECONDS, canonicalizeTimeZone, isRecord } from "./domain.js";
 
 export interface QuietHours {
@@ -96,6 +97,21 @@ export function loadConfigFile(dataDir: string): Partial<ProactiveConfig> {
     }
     return {};
   }
+}
+
+/**
+ * Persist one config patch to <dataDir>/config.json atomically. The patch is
+ * merged over whatever the file currently holds, so fields outside the patch
+ * (hand-written or set earlier) survive. Returns the merged file object.
+ */
+export async function writeConfigFile(dataDir: string, patch: Partial<ProactiveConfig>): Promise<Partial<ProactiveConfig>> {
+  const merged: Partial<ProactiveConfig> = { ...loadConfigFile(dataDir), ...patch };
+  await mkdir(dataDir, { recursive: true });
+  const target = dataDir + "/config.json";
+  const tmp = target + ".tmp." + process.pid + "." + Math.random().toString(36).slice(2);
+  await writeFile(tmp, JSON.stringify(merged, null, 2) + "\n", "utf8");
+  await rename(tmp, target);
+  return merged;
 }
 
 function positiveInt(value: unknown, fallback: number, ceiling: number): number {

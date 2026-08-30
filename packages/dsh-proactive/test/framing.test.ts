@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createFramingMessage, renderFraming, type FramingContext } from "../src/framing.js";
+import { createFramingMessage, effectiveWakePrompt, renderFraming, type FramingContext } from "../src/framing.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
 import type { Alarm } from "../src/domain.js";
 
 const alarm: Alarm = {
@@ -29,6 +30,7 @@ function ctx(overrides: Partial<FramingContext> = {}): FramingContext {
     now: new Date("2026-09-01T09:00:00.000Z"),
     userPresence: "cold",
     configQuietHours: { start: "23:00", end: "08:00", timeZone: "Asia/Shanghai" },
+    heartbeatPrompt: DEFAULT_CONFIG.heartbeatPrompt,
     ...overrides
   };
 }
@@ -75,4 +77,32 @@ test("createFramingMessage builds a notice-form user message", () => {
   const text = msg.content.filter((b) => b.type === "text").map((b) => b["text"]).join("");
   assert.ok(text.length > 0);
   assert.match(text, /## PROACTIVE WAKE/);
+});
+
+const heartbeatAlarm = (prompt: string): Alarm => ({ ...alarm, id: "hb_1", wakeReason: "heartbeat", prompt });
+
+test("effectiveWakePrompt: heartbeat always leads with the configured default", () => {
+  const base = ctx().heartbeatPrompt.trim();
+  // No extra direction: default alone.
+  assert.equal(effectiveWakePrompt(ctx({ alarm: heartbeatAlarm("") })), base);
+  assert.equal(effectiveWakePrompt(ctx({ alarm: heartbeatAlarm("   ") })), base);
+  // Extra direction: default first, custom appended after a blank line.
+  const out = effectiveWakePrompt(ctx({ alarm: heartbeatAlarm("关注用户的睡眠节奏") }));
+  assert.equal(out, base + "\n\n关注用户的睡眠节奏");
+  assert.ok(out.startsWith(base), "default must come first");
+  // Same wording as the default is deduped (panel preset prefill case).
+  assert.equal(effectiveWakePrompt(ctx({ alarm: heartbeatAlarm(base) })), base);
+});
+
+test("effectiveWakePrompt: alarm keeps its prompt verbatim (no default prefix)", () => {
+  assert.equal(effectiveWakePrompt(ctx({ alarm: { ...alarm, prompt: "提醒我喝水" } })), "提醒我喝水");
+  assert.equal(effectiveWakePrompt(ctx({ alarm: { ...alarm, wakeReason: "check_in" as Alarm["wakeReason"], prompt: "legacy 提醒" } })), "legacy 提醒");
+});
+
+test("renderFraming embeds the effective heartbeat prompt in the alarm instruction", () => {
+  const base = ctx().heartbeatPrompt.trim();
+  const text = renderFraming(ctx({ alarm: heartbeatAlarm("关注用户的睡眠节奏") }));
+  assert.ok(text.includes("关注用户的睡眠节奏"));
+  const jsonLine = text.split("\n").find((l) => l.includes("关注用户的睡眠节奏"));
+  assert.ok(jsonLine?.includes(base), "default wording must be part of the emitted prompt");
 });

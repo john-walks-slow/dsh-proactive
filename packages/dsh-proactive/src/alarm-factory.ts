@@ -13,6 +13,7 @@ import {
   validatePrompt,
   inputError,
   WAKE_REASONS,
+  MAX_PROMPT_LENGTH,
   type Alarm,
   type AlarmTrigger,
   type AtInput,
@@ -58,14 +59,6 @@ export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | 
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined);
   if (selectors !== 1) return { code: "invalid_trigger", message: "proactive_set requires exactly one of at, after_seconds, or every_seconds." };
-  let prompt: string;
-  try {
-    prompt = validatePrompt(args["prompt"]);
-  } catch (error) {
-    return inputError(error);
-  }
-  const delivery = normalizeDelivery(args["delivery"]);
-  if (delivery === undefined) return { code: "invalid_trigger", message: "delivery must be an object with boolean chat/push/wechat fields." };
   let wakeReason: WakeReason = "alarm";
   if (args["wake_reason"] !== undefined) {
     if (typeof args["wake_reason"] !== "string" || !(WAKE_REASONS as readonly string[]).includes(args["wake_reason"])) {
@@ -73,6 +66,24 @@ export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | 
     }
     wakeReason = args["wake_reason"] as WakeReason;
   }
+  // Heartbeat prompts are optional: an omitted/empty prompt means "just the
+  // configured default heartbeat wording" (the framing layer always leads with
+  // it). Alarm prompts are the user's instruction and must be non-empty.
+  let prompt: string;
+  if (wakeReason === "heartbeat") {
+    prompt = typeof args["prompt"] === "string" ? args["prompt"].trim() : "";
+    if (prompt.length > MAX_PROMPT_LENGTH) {
+      return { code: "invalid_prompt", message: "prompt must be at most " + MAX_PROMPT_LENGTH + " characters." };
+    }
+  } else {
+    try {
+      prompt = validatePrompt(args["prompt"]);
+    } catch (error) {
+      return inputError(error);
+    }
+  }
+  const delivery = normalizeDelivery(args["delivery"]);
+  if (delivery === undefined) return { code: "invalid_trigger", message: "delivery must be an object with boolean chat/push/wechat fields." };
   const timeZone = typeof args["time_zone"] === "string" && args["time_zone"].length > 0 ? args["time_zone"] : undefined;
   if (args["after_seconds"] !== undefined) {
     const value = args["after_seconds"];

@@ -2,7 +2,7 @@
 
 ## 验证说明
 
-- 验证对象：dsh-proactive 插件 v0.1.0 的端到端行为。单元测试已覆盖 domain/config/store/observer/framing/scheduler/tools/wake/panel/settings（86 项全绿），以下场景依赖真实 DSH 服务、真实 GUI、真实时钟与真实推送通道，必须人工验证。
+- 验证对象：dsh-proactive 插件 v0.1.0 的端到端行为。单元测试已覆盖 domain/config/store/observer/framing/scheduler/tools/wake/panel/settings（96 项全绿，含本轮 proactive_update_settings 与 heartbeat 默认前置的纯逻辑），以下场景依赖真实 DSH 服务、真实 GUI、真实时钟与真实推送通道，必须人工验证。
 - 环境/前置条件：
   - dsh web 服务已重启并加载插件（日志出现 `dsh-proactive started`）
   - 本插件已按 README 安装步骤加入 profile（pnpm add + `dsh.profile.bundles` 列表；插件自带 bundle patch 自动生效），`$DSH_HOME/proactive/` 目录已生成
@@ -56,6 +56,9 @@
 | 10. 同时用模型工具和面板各自新建一个闹钟后重启 dsh web | 重启后面板两个闹钟都在（持久化），状态正确恢复 | | 待验证 | 持久化 + 面板重启恢复 |
 | 11. 面板「心跳预设」新建闹钟：点心跳预设按钮，再点创建 | 表单预填默认心跳提示词（设置面板配置的那段）+ 默认间隔 3600s + wake_reason=heartbeat；保存后列表出现 repeat 闹钟；改设置里 heartbeatPrompt/heartbeatEverySeconds 后面板预设随之更新 | | 待验证 | heartbeat 默认配置与面板联动 |
 | 12. 「最近唤醒」摘要：触发几次唤醒（至少一次 no_reply、一次 reply）后打开面板 runs 区块 | 每条记录显示时间/决策/预算增量 + 思考与回复摘要（截断 200 字符，悬浮全文）；no_reply 记录也能看到模型静默的理由（思考摘要）；旧 runs 记录（无摘要字段）显示"—"不报错 | | 待验证 | 唤醒历史推理+回复摘要 |
+| 13. 模型更新设置：在会话里让模型用 proactive_update_settings 把 heartbeat_every_seconds 从 3600 改成 1800（只传这一字段） | 只改变 interval：面板设置页 heartbeatEverySeconds 变为 1800，其余字段不变；`$DSH_HOME/proactive/config.json` 出现 `heartbeatEverySeconds: 1800`；重启 dsh web 后仍为 1800（持久化生效） | | 待验证 | 设置更新工具 partial + 持久化 |
+| 14. heartbeat 默认前置：删掉某 heartbeat 闹钟的 prompt（或新建一个不带 prompt 的 heartbeat），等一个周期触发 | 唤醒内容以默认心跳提示词开头（面板设置里那段 `heartbeatPrompt`），无重复拼接；给 heartbeat 传一个附加方向 prompt 时，默认提示词在前、附加方向在后 | | 待验证 | heartbeat prompt 可选 + 默认前置 |
+| 15. 面板 heartbeat 预设去重：用面板「心跳预设」新建（prompt 预填默认值，不修改） | 到点唤醒指令只有一份默认提示词，不会重复出现两遍 | | 待验证 | 预设 prefill 与默认前置的去重 |
 
 ## v2 验证结论
 

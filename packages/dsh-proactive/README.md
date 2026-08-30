@@ -62,12 +62,28 @@ Web GUI 的设置面板中会出现「Proactive 闹钟」页签（插件随 bund
 
 | 工具 | 作用 |
 |---|---|
-| `proactive_set` | 建闹钟：`prompt` + 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(>=300)；可选 `time_zone`、`delivery`、`wake_reason` |
+| `proactive_set` | 建闹钟：`prompt` + 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(>=300)；可选 `time_zone`、`delivery`、`wake_reason`。`prompt` 对 `wake_reason=heartbeat` 可选（省略即用默认心跳提示词，见下） |
 | `proactive_list` | 列出本会话活跃闹钟 |
 | `proactive_cancel` | 按 id 取消 |
 | `proactive_no_reply` | **唤醒回合专用**：静默收尾（`concludesTurn`），需单独调用且不产出文本 |
+| `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours`/`heartbeat_prompt`/`heartbeat_every_seconds` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
 
 唤醒回合的 framing 报文包含三条回复规则（用户需要时简短回复、冷会话且有时效走 push_notify/send_wechat、无需用户感知或静默更合适就 no_reply），并如实给出今日预算用量。`proactive_no_reply` 对**任何唤醒原因**（含用户委托 alarm）都可用——角色扮演等场景允许"不理用户更真实"的静默收尾。
+
+### heartbeat 提示词的默认前置
+
+`wake_reason=heartbeat` 的唤醒指令**始终**以配置的默认心跳提示词（`heartbeatPrompt`，设置面板可改）开头——那是经过调校的通用措辞，效果最好；`proactive_set` 的 `prompt` 只提供**额外方向**，在默认提示词之后追加（空或省略则只有默认提示词）。`proactive_update_settings` 的 `heartbeat_prompt` 可随时调整该默认值。
+
+### 配置的双入口语义
+
+同一份配置有两个编辑面，写入层不同：
+
+| 入口 | 写入层 | 生效方式 |
+|---|---|---|
+| `proactive_update_settings` 工具 | `config.json`（原子写，持久） | 写入后立即热应用到运行中调度器；重启后仍生效 |
+| 设置面板（Proactive 页签） | settings 服务层（base=启动时 config.json 快照） | 热应用立即生效；**重启后由 settings 层持久值胜出** |
+
+若两者交替编辑：工具改动会实时反映在运行中的调度器与 `config.json`，但面板会话内可能显示旧值；面板随后保存任一字段会把其 base 合成值整表回写，覆盖工具改动（重启后以 settings 层最终值为准）。日常使用模型自主更新走工具即可；需要面板所见一致时，改完工具设置后刷新面板或重启。数值上限：工具严格遵循 `resolveConfig` 钳制（如并发 ≤4、重试 ≤10），面板 schema 更宽——工具接受的值不会被下次启动静默截断。
 
 ## 预算与安静时段
 
@@ -88,7 +104,7 @@ Web GUI 的设置面板中会出现「Proactive 闹钟」页签（插件随 bund
 pnpm install
 npm run check    # tsc --noEmit
 npm run build    # tsc -p tsconfig.build.json -> lib/
-npm test         # 编译 + node:test（86 个单测）
+npm test         # 编译 + node:test（96 个单测）
 ```
 
 ## 已知限制（v1）

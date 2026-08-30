@@ -98,7 +98,8 @@ export class WakeDriver {
         quiet: isInQuietHours(now, this.deps.config),
         now: new Date(now),
         userPresence: presence,
-        configQuietHours: this.deps.config.quietHours
+        configQuietHours: this.deps.config.quietHours,
+        heartbeatPrompt: this.deps.config.heartbeatPrompt
       };
       const message = createFramingMessage(context);
 

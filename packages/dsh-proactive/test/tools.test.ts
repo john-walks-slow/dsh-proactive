@@ -1,10 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { validateJsonSchemaValue } from "@deepseek-ai/dsh-tools";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { proactiveToolDefinitions, type ToolServices } from "../src/tools.js";
 import { validateCreateArgs } from "../src/alarm-factory.js";
+import { resolveConfig } from "../src/config.js";
 import type { ProactiveStore } from "../src/store.js";
 import type { ProactiveScheduler } from "../src/scheduler.js";
 import type { WakeDriver } from "../src/wake.js";
@@ -40,9 +44,11 @@ function harness() {
   const activeWakes = new Set<string>();
   let requestDrives = 0;
   let concluded = false;
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-tools-"));
+  const config = resolveConfig(dir);
   const services = {
     store: store as unknown as ProactiveStore,
-    config: { maxDeliveriesPerDay: 3 } as unknown as ToolServices["config"],
+    config,
     driver: { isActiveWake: (id: string) => activeWakes.has(id) } as unknown as WakeDriver,
     scheduler: { requestDrive: () => { requestDrives += 1; } } as unknown as ProactiveScheduler,
     now: () => NOW
@@ -52,7 +58,8 @@ function harness() {
   const byName = Object.fromEntries(defs.map((d) => [d.name, d]));
   const exec = { agent, concludeTurn: () => { concluded = true; } } as unknown as ToolRunContext;
   const run = (tool: string, args: Record<string, unknown>) => byName[tool].execute(args, exec) as Promise<unknown>;
-  return { store, activeWakes, agent, byName, run, concluded: () => concluded, get requestDrives() { return requestDrives; } };
+  const cleanup = () => { rmSync(dir, { recursive: true, force: true }); };
+  return { store, activeWakes, agent, byName, run, dir, config, services, cleanup, concluded: () => concluded, get requestDrives() { return requestDrives; } };
 }
 
 const code = (v: unknown): string | undefined => (v as { code?: string })["code"];
@@ -175,6 +182,62 @@ test("proactive_no_reply requires an active wake and concludes the turn", async 
   assert.deepEqual(res, { accepted: true, silent: true });
   assert.equal(h.concluded(), true);
   assert.equal(code(await h.run("proactive_no_reply", { reason: "r".repeat(201) })), "invalid_trigger");
+});
+
+test("proactive_set: prompt is optional for heartbeat, still required for alarm", async () => {
+  const h = harness();
+  // Heartbeat without prompt: accepted, empty prompt stored.
+  const hb = asView(await h.run("proactive_set", { after_seconds: 3600, wake_reason: "heartbeat" }));
+  assert.equal(hb.state, "scheduled");
+  assert.equal(hb.wakeReason, "heartbeat");
+  assert.equal(h.store.alarms[0]?.prompt, "");
+  assert.equal(h.store.alarms[0]?.wakeReason, "heartbeat");
+  // Heartbeat with an explicit empty prompt: also accepted.
+  const hb2 = asView(await h.run("proactive_set", { prompt: "   ", after_seconds: 7200, wake_reason: "heartbeat" }));
+  assert.equal(hb2.state, "scheduled");
+  assert.equal(h.store.alarms.length, 2);
+  // Alarm (default wake reason) without prompt: still rejected.
+  assert.equal(code(await h.run("proactive_set", { after_seconds: 5 })), "invalid_prompt");
+  assert.equal(h.store.alarms.length, 2);
+});
+
+test("proactive_update_settings: partial update changes only the given field", async () => {
+  const h = harness();
+  const before = h.config.heartbeatEverySeconds;
+  const snapshot = structuredClone({
+    enabled: h.config.enabled,
+    maxDeliveriesPerDay: h.config.maxDeliveriesPerDay,
+    quietHours: h.config.quietHours,
+    heartbeatPrompt: h.config.heartbeatPrompt,
+    heartbeatEverySeconds: h.config.heartbeatEverySeconds
+  });
+  const out = await h.run("proactive_update_settings", { heartbeat_every_seconds: before + 600 }) as Record<string, unknown>;
+  assert.equal(out.heartbeat_every_seconds, before + 600);
+  // Only the requested field changed in the live config; every other field is
+  // bit-identical to the pre-update snapshot (not trivially self-referential).
+  assert.equal(h.config.heartbeatEverySeconds, before + 600);
+  assert.deepEqual(h.config.enabled, snapshot.enabled);
+  assert.deepEqual(h.config.maxDeliveriesPerDay, snapshot.maxDeliveriesPerDay);
+  assert.deepEqual(h.config.quietHours, snapshot.quietHours);
+  assert.deepEqual(h.config.heartbeatPrompt, snapshot.heartbeatPrompt);
+  // Persisted to config.json (merged over the file, other keys intact).
+  const file = JSON.parse(readFileSync(join(h.dir, "config.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(file["heartbeatEverySeconds"], before + 600);
+  assert.ok(!("enabled" in file), "unrelated keys must not be persisted");
+});
+
+test("proactive_update_settings: rejects unknown keys and out-of-range values", async () => {
+  const h = harness();
+  assert.equal(code(await h.run("proactive_update_settings", {})), "invalid_trigger");
+  assert.equal(code(await h.run("proactive_update_settings", { nope: 1 })), "invalid_trigger");
+  assert.equal(code(await h.run("proactive_update_settings", { heartbeat_every_seconds: 60 })), "invalid_trigger");
+  assert.equal(code(await h.run("proactive_update_settings", { heartbeat_prompt: "   " })), "invalid_prompt");
+  assert.equal(code(await h.run("proactive_update_settings", { quiet_hours: { start: "25:00", end: "07:00", time_zone: "UTC" } })), "invalid_trigger");
+  // Nothing was applied or persisted.
+  assert.equal(h.config.heartbeatEverySeconds, h.services.config.heartbeatEverySeconds);
+  let exists = true;
+  try { readFileSync(join(h.dir, "config.json"), "utf8"); } catch { exists = false; }
+  assert.equal(exists, false);
 });
 
 test("tools reject exec bound to another agent", async () => {

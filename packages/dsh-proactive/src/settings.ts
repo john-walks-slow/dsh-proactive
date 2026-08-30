@@ -9,7 +9,7 @@
 import z from "schemastery";
 import type { Context } from "@deepseek-ai/cordis";
 import { DEFAULT_CONFIG, type ProactiveConfig, type BootOverduePolicy, type QuietHours } from "./config.js";
-import { MAX_PROMPT_LENGTH, MIN_EVERY_SECONDS } from "./domain.js";
+import { MAX_PROMPT_LENGTH, MIN_EVERY_SECONDS, canonicalizeTimeZone, isRecord, type ToolError } from "./domain.js";
 
 /** The hot-updatable configuration subset, excluding the immutable dataDir. */
 export interface HotConfig {
@@ -63,6 +63,127 @@ export function applyHotConfig(target: ProactiveConfig, next: HotConfig): boolea
 }
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * Accepted ranges for the proactive_update_settings tool. These mirror the
+ * resolveConfig clamps exactly (config.ts), so a value this tool accepts is
+ * never silently truncated on the next boot when config.json is re-read —
+ * the hot-applied value and the persisted value agree.
+ */
+const MAX_DELIVERIES_PER_DAY = 50;
+const MAX_WAKEUPS_PER_HOUR = 60;
+const MAX_CONCURRENT_PER_SESSION = 4;
+const MAX_RETRIES_PER_FIRE = 10;
+const MAX_SET_PROMPT_LENGTH = 20000;
+const HEARTBEAT_MAX_SECONDS = 86400;
+
+/**
+ * Closed validation for the proactive_update_settings tool: an open patch of
+ * snake_case keys, each optional; at least one key must be present. Returns
+ * ONLY the keys that were supplied (partial), so an update never clobbers
+ * other live settings. Numeric ranges mirror the resolveConfig clamps exactly
+ * (tighter than the settings UI schema where they differ), so a tool-written
+ * config.json is never silently truncated on the next boot — hot-applied and
+ * persisted values always agree.
+ */
+export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig> } | ToolError {
+  if (!isRecord(raw) || Object.keys(raw).length === 0) {
+    return { code: "invalid_trigger", message: "proactive_update_settings requires at least one setting to update." };
+  }
+  const allowed = new Set([
+    "enabled", "max_deliveries_per_day", "quiet_hours",
+    "max_wakeups_per_hour", "max_concurrent_per_session", "boot_overdue_policy",
+    "max_retries_per_fire", "max_prompt_length", "heartbeat_prompt", "heartbeat_every_seconds"
+  ]);
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) {
+      return { code: "invalid_trigger", message: "proactive_update_settings accepts only " + [...allowed].join(", ") + "." };
+    }
+  }
+  const patch: Partial<HotConfig> = {};
+  const write = <K extends keyof HotConfig>(key: K, value: HotConfig[K]): void => {
+    (patch as Record<string, unknown>)[key] = value;
+  };
+  if ("enabled" in raw) {
+    if (typeof raw["enabled"] !== "boolean") return { code: "invalid_trigger", message: "enabled must be a boolean." };
+    write("enabled", raw["enabled"]);
+  }
+  if ("max_deliveries_per_day" in raw) {
+    const n = raw["max_deliveries_per_day"];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > MAX_DELIVERIES_PER_DAY) {
+      return { code: "invalid_trigger", message: "max_deliveries_per_day must be a safe integer 0.." + MAX_DELIVERIES_PER_DAY + "." };
+    }
+    write("maxDeliveriesPerDay", n);
+  }
+  if ("quiet_hours" in raw) {
+    const q = raw["quiet_hours"];
+    if (!isRecord(q) || typeof q["start"] !== "string" || typeof q["end"] !== "string" || typeof q["time_zone"] !== "string") {
+      return { code: "invalid_trigger", message: "quiet_hours must be { start: \"HH:MM\", end: \"HH:MM\", time_zone: IANA }." };
+    }
+    if (!TIME_PATTERN.test(q["start"])) return { code: "invalid_trigger", message: "quiet_hours.start must match HH:MM." };
+    if (!TIME_PATTERN.test(q["end"])) return { code: "invalid_trigger", message: "quiet_hours.end must match HH:MM." };
+    let zone: string;
+    try {
+      zone = canonicalizeTimeZone(q["time_zone"]);
+    } catch {
+      return { code: "invalid_time_zone", message: "quiet_hours.time_zone must be an IANA time zone." };
+    }
+    write("quietHours", { start: q["start"], end: q["end"], timeZone: zone });
+  }
+  if ("max_wakeups_per_hour" in raw) {
+    const n = raw["max_wakeups_per_hour"];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n > MAX_WAKEUPS_PER_HOUR) {
+      return { code: "invalid_trigger", message: "max_wakeups_per_hour must be a safe integer 1.." + MAX_WAKEUPS_PER_HOUR + "." };
+    }
+    write("maxWakeupsPerHour", n);
+  }
+  if ("max_concurrent_per_session" in raw) {
+    const n = raw["max_concurrent_per_session"];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n > MAX_CONCURRENT_PER_SESSION) {
+      return { code: "invalid_trigger", message: "max_concurrent_per_session must be a safe integer 1.." + MAX_CONCURRENT_PER_SESSION + "." };
+    }
+    write("maxConcurrentPerSession", n);
+  }
+  if ("boot_overdue_policy" in raw) {
+    const v = raw["boot_overdue_policy"];
+    if (v !== "fire" && v !== "notify-only" && v !== "drop") {
+      return { code: "invalid_trigger", message: "boot_overdue_policy must be fire, notify-only, or drop." };
+    }
+    write("bootOverduePolicy", v);
+  }
+  if ("max_retries_per_fire" in raw) {
+    const n = raw["max_retries_per_fire"];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > MAX_RETRIES_PER_FIRE) {
+      return { code: "invalid_trigger", message: "max_retries_per_fire must be a safe integer 0.." + MAX_RETRIES_PER_FIRE + "." };
+    }
+    write("maxRetriesPerFire", n);
+  }
+  if ("max_prompt_length" in raw) {
+    const n = raw["max_prompt_length"];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 100 || n > MAX_SET_PROMPT_LENGTH) {
+      return { code: "invalid_trigger", message: "max_prompt_length must be a safe integer 100.." + MAX_SET_PROMPT_LENGTH + "." };
+    }
+    write("maxPromptLength", n);
+  }
+  if ("heartbeat_prompt" in raw) {
+    if (typeof raw["heartbeat_prompt"] !== "string" || raw["heartbeat_prompt"].trim().length === 0) {
+      return { code: "invalid_prompt", message: "heartbeat_prompt must be a non-empty string." };
+    }
+    const trimmed = (raw["heartbeat_prompt"] as string).trim();
+    if (trimmed.length > MAX_PROMPT_LENGTH) {
+      return { code: "invalid_prompt", message: "heartbeat_prompt must be at most " + MAX_PROMPT_LENGTH + " characters." };
+    }
+    write("heartbeatPrompt", trimmed);
+  }
+  if ("heartbeat_every_seconds" in raw) {
+    const n = raw["heartbeat_every_seconds"];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < MIN_EVERY_SECONDS || n > HEARTBEAT_MAX_SECONDS) {
+      return { code: "invalid_trigger", message: "heartbeat_every_seconds must be a safe integer " + MIN_EVERY_SECONDS + ".." + HEARTBEAT_MAX_SECONDS + "." };
+    }
+    write("heartbeatEverySeconds", n);
+  }
+  return { patch };
+}
 
 const quietHoursSchema = z.object({
   start: z.string().pattern(TIME_PATTERN).default("23:00"),

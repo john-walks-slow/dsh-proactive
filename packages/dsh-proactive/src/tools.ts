@@ -6,6 +6,7 @@
  *   proactive_list      view this session's active alarms
  *   proactive_cancel    cancel one of this session's alarms
  *   proactive_no_reply  conclude the current wake turn with deep silence
+ *   proactive_update_settings  partially update host-level settings (only the given fields)
  *
  * The stores they touch are host-level (the plugin singleton), so they work
  * identically in cold-wake turns and in ordinary user turns.
@@ -14,9 +15,12 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { defineTool, type ToolCallView, type ToolDefinition, type ValueSchemaSpec } from "@deepseek-ai/dsh-tools";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
+import type { JsonValue } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
   MAX_NO_REPLY_REASON_LENGTH,
+  MAX_PROMPT_LENGTH,
+  MIN_EVERY_SECONDS,
   WAKE_REASONS,
   inputError,
   internalError,
@@ -35,10 +39,12 @@ import {
   type WakeReason
 } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
+import { writeConfigFile } from "./config.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveScheduler } from "./scheduler.js";
 import type { WakeDriver } from "./wake.js";
 import { buildAlarm, validateCreateArgs, type CreateSpec } from "./alarm-factory.js";
+import { applyHotConfig, hotSubset, validateSettingsPatch, type HotConfig } from "./settings.js";
 
 export interface ToolServices {
   store: ProactiveStore;
@@ -77,6 +83,32 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
   }
 };
 
+const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    enabled: { type: "boolean", required: true },
+    max_deliveries_per_day: { type: "integer", required: true },
+    quiet_hours: {
+      type: "object",
+      additionalProperties: false,
+      required: true,
+      properties: {
+        start: { type: "string", required: true },
+        end: { type: "string", required: true },
+        time_zone: { type: "string", required: true }
+      }
+    },
+    max_wakeups_per_hour: { type: "integer", required: true },
+    max_concurrent_per_session: { type: "integer", required: true },
+    boot_overdue_policy: { type: "string", required: true },
+    max_retries_per_fire: { type: "integer", required: true },
+    max_prompt_length: { type: "integer", required: true },
+    heartbeat_prompt: { type: "string", required: true },
+    heartbeat_every_seconds: { type: "integer", required: true }
+  }
+};
+
 function renderValue(_args: unknown, value: unknown): ContentBlock[] {
   return [{ type: "text" as const, text: JSON.stringify(value) }] as ContentBlock[];
 }
@@ -91,9 +123,12 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
   return [
         defineTool({
           name: "proactive_set",
-          description: "Create one host-level alarm for this session. Supply a non-empty prompt and exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, or every_seconds of at least 300 for a fixed-rate repeat. The alarm fires even when this session is cold; the wake turn is framed so the model can stay silent with proactive_no_reply.",
+          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, or every_seconds of at least 300 for a fixed-rate repeat. The prompt is required for wake_reason alarm (the user's instruction); it is optional for wake_reason heartbeat, where the configured default heartbeat wording is always used as the base and an optional prompt adds extra direction. The alarm fires even when this session is cold; the wake turn is framed so the model can stay silent with proactive_no_reply.",
           parameters: {
-            prompt: { type: "string", required: true, description: "What the wake turn should do, in the user's language and context. Plain, concrete instruction." },
+            prompt: {
+              type: "string",
+              description: "What the wake turn should do, in the user's language and context. Plain, concrete instruction. Optional for wake_reason=heartbeat: an omitted prompt means \"just the configured default heartbeat wording\" (the wake always leads with it); supply one only for extra direction. Required for wake_reason=alarm."
+            },
             at: {
               oneOf: [
                 { type: "string", description: "Strict RFC 3339 date-time with explicit zone, e.g. 2026-09-01T09:30:00+08:00." },
@@ -205,12 +240,72 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             return { accepted: true, silent: true };
           },
           presentCall: (callArgs) => presentCard("Silent wake acknowledgment", String((callArgs as { reason?: unknown })["reason"] ?? ""))
+        }),
+
+        defineTool({
+          name: "proactive_update_settings",
+          description: "Partially update host-level dsh-proactive settings: only the fields you pass are changed, the rest keep their current values. The update is persisted to config.json and hot-applied to the running scheduler immediately, so it also affects future wake gating and heartbeat framing. Supply at least one field.",
+          parameters: {
+            enabled: { type: "boolean", description: "Master toggle: false pauses all proactive wakes (user-requested alarms still fire)." },
+            max_deliveries_per_day: { type: "integer", description: "Visible deliveries per UTC day (chat text, push_notify, send_wechat); 0..50." },
+            quiet_hours: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                start: { type: "string", required: true, description: "HH:MM wall-clock in time_zone; window start inclusive." },
+                end: { type: "string", required: true, description: "HH:MM wall-clock in time_zone; window end exclusive." },
+                time_zone: { type: "string", required: true, description: "IANA Area/Location." }
+              },
+              description: "Quiet window; only wake_reason alarm fires inside it."
+            },
+            max_wakeups_per_hour: { type: "integer", description: "Host-wide cap on proactive wake turns per rolling hour; 1..60." },
+            max_concurrent_per_session: { type: "integer", description: "Concurrent in-flight wake turns per session; 1..4." },
+            boot_overdue_policy: { type: "string", enum: ["fire", "notify-only", "drop"], description: "How boot-time overdue alarms are treated." },
+            max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
+            max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
+            heartbeat_prompt: { type: "string", description: "Default heartbeat wording every heartbeat wake leads with (max " + MAX_PROMPT_LENGTH + " chars)." },
+            heartbeat_every_seconds: { type: "integer", description: "Default heartbeat repeat interval in seconds (min " + MIN_EVERY_SECONDS + ", max 1 day)." }
+          },
+          output: {
+            schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
+            render: renderValue
+          },
+          async execute(args, exec) {
+            if (exec.agent !== agent) return internalError();
+            const shape = validateSettingsPatch(args);
+            if (isToolError(shape)) return shape;
+            try {
+              await writeConfigFile(services.config.dataDir, shape.patch as unknown as Partial<ProactiveConfig>);
+            } catch {
+              return { code: "persistence_uncertain", message: "Settings were not durably stored; please retry." } as ToolError;
+            }
+            const next: HotConfig = { ...hotSubset(services.config), ...shape.patch };
+            applyHotConfig(services.config, next);
+            return settingsView(services.config);
+          },
+          presentCall: (callArgs) => presentCard("Update proactive settings", Object.keys((callArgs as Record<string, unknown>) ?? {}).join(", "))
         })
       ];
 }
 
+/** One read-only settings view the update tool returns (mirrors HotConfig in snake_case). */
+function settingsView(config: ProactiveConfig): JsonValue {
+  return {
+    enabled: config.enabled,
+    max_deliveries_per_day: config.maxDeliveriesPerDay,
+    quiet_hours: { start: config.quietHours.start, end: config.quietHours.end, time_zone: config.quietHours.timeZone },
+    max_wakeups_per_hour: config.maxWakeupsPerHour,
+    max_concurrent_per_session: config.maxConcurrentPerSession,
+    boot_overdue_policy: config.bootOverduePolicy,
+    max_retries_per_fire: config.maxRetriesPerFire,
+    max_prompt_length: config.maxPromptLength,
+    heartbeat_prompt: config.heartbeatPrompt,
+    heartbeat_every_seconds: config.heartbeatEverySeconds
+  };
+}
+
 /**
- * Register the four tools on an agent's scoped context; returns disposable
+ * Register the five tools on an agent's scoped context; returns disposable
  * tools. The definitions themselves live in {@link proactiveToolDefinitions}
  * so they can be unit-tested without a cordis context.
  */
