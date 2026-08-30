@@ -20,6 +20,7 @@ interface AlarmRow {
   wakeReason: string;
   nextDueAt: string;
   state: string;
+  jitter?: number;
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -55,7 +56,7 @@ function fmtInstant(iso: string): string {
 export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement {
   const copy: ProactivePanelCopy = zh;
   const transport = useMemo(() => new ProactiveHostTransport(), []);
-  const [snapshot, setSnapshot] = useState<{ server: { now: string; corrupt: boolean }; config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; heartbeatPrompt: string; heartbeatEverySeconds: number }; alarms: AlarmRow[]; runs: Array<{ id: string; firedAt: string; decision: string; budgetDelta: number; reasoningSummary?: string; replySummary?: string }> } | null>(null);
+  const [snapshot, setSnapshot] = useState<{ server: { now: string; corrupt: boolean }; config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; heartbeatPrompt: string; heartbeatEverySeconds: number; heartbeatJitter: number }; alarms: AlarmRow[]; runs: Array<{ id: string; firedAt: string; decision: string; budgetDelta: number; reasoningSummary?: string; replySummary?: string }> } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -101,7 +102,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
   const applyHeartbeat = useCallback(() => {
     if (snapshot === null) return;
     setShowForm(true);
-    setForm({ prompt: snapshot.config.heartbeatPrompt, everySeconds: snapshot.config.heartbeatEverySeconds, wakeReason: "heartbeat" });
+    setForm({ prompt: snapshot.config.heartbeatPrompt, everySeconds: snapshot.config.heartbeatEverySeconds, jitter: snapshot.config.heartbeatJitter, wakeReason: "heartbeat" });
   }, [snapshot]);
 
   const style = {
@@ -143,6 +144,14 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
               const value = Number(e.target.value);
               setForm(form.everySeconds !== undefined ? { ...form, everySeconds: value } : { ...form, afterSeconds: value });
             }} />
+            {form.everySeconds !== undefined ? (
+              <span style={{ marginLeft: 8 }}>
+                <label>{copy.jitter} <input type="number" min={0} max={1} step={0.05} style={input} value={form.jitter ?? 0} onChange={(e) => {
+                  const value = Number(e.target.value);
+                  setForm({ ...form, jitter: Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0 });
+                }} /></label>
+              </span>
+            ) : null}
           </div>
           <div style={{ marginBottom: 6 }}>
             <label>{copy.wakeReason}: </label>
@@ -166,7 +175,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
             <tr key={alarm.id}>
               <td style={cell}>{alarm.prompt}</td>
               <td style={cell}>{STATE_LABELS[alarm.state] ?? alarm.state} · {WAKE_LABELS[alarm.wakeReason] ?? alarm.wakeReason}</td>
-              <td style={cell}>{MODE_LABELS[alarm.mode] ?? alarm.mode}</td>
+              <td style={cell}>{MODE_LABELS[alarm.mode] ?? alarm.mode}{alarm.jitter !== undefined ? ` · ±${Math.round(alarm.jitter * 100)}%` : ""}</td>
               <td style={cell}>{fmtInstant(alarm.nextDueAt)}</td>
               <td style={cell}>
                 {alarm.state === "scheduled" || alarm.state === "overdue" ? <button style={button} onClick={() => { void run({ kind: "toggle", id: alarm.id }); }}>{copy.pause}</button> : null}

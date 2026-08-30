@@ -41,6 +41,8 @@ export interface ProactiveConfig {
   heartbeatPrompt: string;
   /** Default heartbeat repeat interval in seconds (panel preset; floor MIN_EVERY_SECONDS, cap 1 day). */
   heartbeatEverySeconds: number;
+  /** Default heartbeat repeat randomness 0..1 (panel preset prefill; 0 = fixed rate). */
+  heartbeatJitter: number;
   /** Absolute directory for alarms.json / runs.jsonl / state.json / config.json. */
   dataDir: string;
 }
@@ -56,6 +58,7 @@ export const DEFAULT_CONFIG: ProactiveConfig = {
   maxPromptLength: 4000,
   heartbeatPrompt: "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。",
   heartbeatEverySeconds: 3600,
+  heartbeatJitter: 0.1,
   dataDir: "/root/.dsh/proactive"
 };
 
@@ -121,6 +124,13 @@ function positiveInt(value: unknown, fallback: number, ceiling: number): number 
   return n;
 }
 
+/** Normalize a 0..1 ratio (jitter); out-of-range or non-numeric falls back. */
+function ratio01(value: unknown, fallback: number): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? value : NaN;
+  if (!Number.isFinite(n) || n < 0 || n > 1) return fallback;
+  return n;
+}
+
 /** Merge defaults, file overrides, and DSH_PROACTIVE_* environment overrides. */
 export function resolveConfig(dataDir?: string): ProactiveConfig {
   const dir = dataDir ?? (process.env["DSH_PROACTIVE_DATA_DIR"] ?? defaultDataDir());
@@ -162,6 +172,7 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
       ? file["heartbeatPrompt"].trim().slice(0, MAX_PROMPT_LENGTH) // same cap as the settings schema, keeps prefill valid
       : DEFAULT_CONFIG.heartbeatPrompt,
     heartbeatEverySeconds: Math.max(MIN_EVERY_SECONDS, positiveInt(file["heartbeatEverySeconds"], DEFAULT_CONFIG.heartbeatEverySeconds, HEARTBEAT_MAX_SECONDS)),
+    heartbeatJitter: ratio01(file["heartbeatJitter"], DEFAULT_CONFIG.heartbeatJitter),
     dataDir: dir
   };
   if (env["DSH_PROACTIVE_ENABLED"] === "0" || env["DSH_PROACTIVE_ENABLED"] === "false") config.enabled = false;

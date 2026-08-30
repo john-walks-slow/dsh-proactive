@@ -5,7 +5,7 @@
  * surface over one domain, never a parallel implementation.
  */
 
-import { isRecord, toAlarmView, instantEpoch, nextEveryOccurrence, type Alarm, type RunRecord } from "../domain.js";
+import { isRecord, toAlarmView, instantEpoch, nextEveryOccurrence, nextJitteredOccurrence, type Alarm, type RunRecord } from "../domain.js";
 import { buildAlarm, validateCreateArgs, type CreateSpec } from "../alarm-factory.js";
 import type { ProactiveConfig } from "../config.js";
 import type { ProactiveStore } from "../store.js";
@@ -37,7 +37,8 @@ export class ProactivePanelService {
         maxDeliveriesPerDay: cfg.maxDeliveriesPerDay,
         quietHours: { start: cfg.quietHours.start, end: cfg.quietHours.end, timeZone: cfg.quietHours.timeZone },
         heartbeatPrompt: cfg.heartbeatPrompt,
-        heartbeatEverySeconds: cfg.heartbeatEverySeconds
+        heartbeatEverySeconds: cfg.heartbeatEverySeconds,
+        heartbeatJitter: cfg.heartbeatJitter
       },
       alarms: this.deps.store.listAlarms().map((alarm) => toAlarmView(alarm, now)),
       runs
@@ -91,7 +92,11 @@ export class ProactivePanelService {
         // one-shots keep their original due instant (an expired one fires at once).
         if (current.mode === "repeat" && "everySeconds" in current.trigger) {
           const anchor = current.lastRunAt ?? current.createdAt;
-          next = new Date(nextEveryOccurrence(instantEpoch(anchor), current.trigger.everySeconds as number, now)).toISOString();
+          const every = current.trigger.everySeconds as number;
+          const jitter = current.trigger["jitter"];
+          next = new Date(typeof jitter === "number" && Number.isFinite(jitter) && jitter > 0
+            ? nextJitteredOccurrence(instantEpoch(anchor), every, now, jitter)
+            : nextEveryOccurrence(instantEpoch(anchor), every, now)).toISOString();
         }
       }
       const updated: Alarm = { ...current, status: current.status === "paused" ? "scheduled" : "paused", nextDueAt: next, updatedAt: stamp };

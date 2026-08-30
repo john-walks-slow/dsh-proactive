@@ -56,6 +56,8 @@ export interface AlarmTriggerAt {
 export interface AlarmTriggerEvery {
   everySeconds: number;
   anchor: string;
+  /** Optional randomness 0..1: each repeat interval is scaled by (1 ± jitter·uniform(0,1)). Absent/0 = fixed rate. */
+  jitter?: number;
 }
 
 export type AlarmTrigger = AlarmTriggerAt | AlarmTriggerEvery;
@@ -100,6 +102,8 @@ export type AlarmView = {
   nextDueAt: string;
   state: "scheduled" | "overdue" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
   deliveryMode: "host";
+  /** Repeat randomness 0..1; present only for jittered repeats. */
+  jitter?: number;
 }
 
 /** Input failure that maps to a closed, stable public code. */
@@ -336,6 +340,37 @@ export function nextEveryOccurrence(anchorEpoch: number, everySeconds: number, n
   return anchorEpoch + k * interval;
 }
 
+/** Uniform(0,1) source for jitter; default Math.random. */
+export type RandomSource = () => number;
+
+/**
+ * One jittered repeat interval in seconds: the base every_seconds scaled by
+ * (1 ± jitter · uniform(0,1)), floored at MIN_EVERY_SECONDS so a heavily
+ * jittered interval can never collapse below the validator's floor.
+ */
+export function jitterInterval(everySeconds: number, jitter: number, random: RandomSource = Math.random): number {
+  const j = Math.min(1, Math.max(0, jitter));
+  const scale = 1 + (random() * 2 - 1) * j;
+  return Math.max(MIN_EVERY_SECONDS, Math.round(everySeconds * scale));
+}
+
+/**
+ * The next occurrence of a jittered repeat: the wake fires roughly
+ * every_seconds after the previous one, with each interval independently
+ * scaled by (1 ± jitter). The walk is based on now rather than the original
+ * anchor so consecutive wakes stay human rather than metronomic, and it is
+ * always strictly in the future (a miss is skipped, never re-fired).
+ * jitter 0 degenerates to the exact anchor-aligned grid of nextEveryOccurrence.
+ */
+export function nextJitteredOccurrence(anchorEpoch: number, everySeconds: number, now: number, jitter: number, random: RandomSource = Math.random): number {
+  if (jitter === undefined || jitter === 0) {
+    return nextEveryOccurrence(anchorEpoch, everySeconds, now);
+  }
+  nextEveryOccurrence(anchorEpoch, everySeconds, now); // validates everySeconds + floor
+  const intervalMs = jitterInterval(everySeconds, jitter, random) * 1e3;
+  return Math.max(now + 1, now + intervalMs);
+}
+
 /** Whether the alarm target is still in the future. */
 export function requireFuture(epoch: number, now: number): void {
   if (epoch <= now) throw new ProactiveInputError("not_future", "The target must be in the future.");
@@ -354,7 +389,8 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
     wakeReason: alarm.wakeReason,
     nextDueAt: alarm.nextDueAt,
     state: overdue ? "overdue" : alarm.status,
-    deliveryMode: "host"
+    deliveryMode: "host",
+    ...(alarm.mode === "repeat" && "everySeconds" in alarm.trigger && typeof alarm.trigger["jitter"] === "number" && alarm.trigger["jitter"] > 0 ? { jitter: alarm.trigger["jitter"] } : {})
   };
 }
 

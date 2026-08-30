@@ -23,6 +23,7 @@ export interface HotConfig {
   maxPromptLength: number;
   heartbeatPrompt: string;
   heartbeatEverySeconds: number;
+  heartbeatJitter: number;
 }
 
 /**
@@ -41,7 +42,8 @@ export function hotSubset(config: ProactiveConfig): HotConfig {
     maxRetriesPerFire: config.maxRetriesPerFire,
     maxPromptLength: config.maxPromptLength,
     heartbeatPrompt: config.heartbeatPrompt,
-    heartbeatEverySeconds: config.heartbeatEverySeconds
+    heartbeatEverySeconds: config.heartbeatEverySeconds,
+    heartbeatJitter: config.heartbeatJitter
   };
 }
 
@@ -93,7 +95,7 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
   const allowed = new Set([
     "enabled", "max_deliveries_per_day", "quiet_hours",
     "max_wakeups_per_hour", "max_concurrent_per_session", "boot_overdue_policy",
-    "max_retries_per_fire", "max_prompt_length", "heartbeat_prompt", "heartbeat_every_seconds"
+    "max_retries_per_fire", "max_prompt_length", "heartbeat_prompt", "heartbeat_every_seconds", "heartbeat_jitter"
   ]);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) {
@@ -182,6 +184,13 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
     }
     write("heartbeatEverySeconds", n);
   }
+  if ("heartbeat_jitter" in raw) {
+    const j = raw["heartbeat_jitter"];
+    if (typeof j !== "number" || !Number.isFinite(j) || j < 0 || j > 1) {
+      return { code: "invalid_trigger", message: "heartbeat_jitter must be a number in 0..1 (0 = fixed rate)." };
+    }
+    write("heartbeatJitter", j);
+  }
   return { patch };
 }
 
@@ -202,7 +211,8 @@ export const proactiveSettingsSchema = z.object({
   maxRetriesPerFire: z.number().min(0).max(16).default(3),
   maxPromptLength: z.number().min(100).max(100000).default(4000),
   heartbeatPrompt: z.string().min(1).max(MAX_PROMPT_LENGTH).default(DEFAULT_CONFIG.heartbeatPrompt),
-  heartbeatEverySeconds: z.number().min(MIN_EVERY_SECONDS).max(86400).default(DEFAULT_CONFIG.heartbeatEverySeconds)
+  heartbeatEverySeconds: z.number().min(MIN_EVERY_SECONDS).max(86400).default(DEFAULT_CONFIG.heartbeatEverySeconds),
+  heartbeatJitter: z.number().min(0).max(1).default(DEFAULT_CONFIG.heartbeatJitter)
 });
 
 export interface SettingsWire {

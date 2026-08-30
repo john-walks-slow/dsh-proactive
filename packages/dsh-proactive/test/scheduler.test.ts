@@ -46,7 +46,7 @@ interface Harness {
   flush(cond?: () => boolean): Promise<void>;
 }
 
-async function harness(opts: { quietHours?: QuietHours; maxRetriesPerFire?: number } = {}): Promise<Harness> {
+async function harness(opts: { quietHours?: QuietHours; maxRetriesPerFire?: number; random?: () => number } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-sched-"));
   const config = resolveConfig(dir);
   config.quietHours = opts.quietHours ?? { start: "23:00", end: "08:00", timeZone: "UTC" };
@@ -64,6 +64,7 @@ async function harness(opts: { quietHours?: QuietHours; maxRetriesPerFire?: numb
       return first;
     },
     now: () => clock.t,
+    ...(opts.random !== undefined ? { random: opts.random } : {}),
     log: () => undefined
   });
   const flush = async (cond?: () => boolean) => {
@@ -131,6 +132,21 @@ test("repeat advances to the next anchor", async (tctx) => {
   assert.equal(h.store.getAlarm("r1")?.status, "scheduled");
   assert.equal(h.store.getAlarm("r1")?.runCount, 1);
   assert.ok(Date.parse(h.store.getAlarm("r1")!.nextDueAt) > BASE_NOW);
+});
+
+test("jittered repeat advances by a randomized interval, never before now", async (tctx) => {
+  // random() = 1 -> scale 1 + jitter (longer); random() = 0 -> scale 1 - jitter (shorter).
+  const h = await harness({ random: () => 1 });
+  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  const anchor = BASE_NOW - 3600_000;
+  h.store.addAlarm(alarm("j1", { mode: "repeat", trigger: { everySeconds: 3600, anchor: new Date(anchor).toISOString(), jitter: 0.1 }, nextDueAt: new Date(BASE_NOW - 1).toISOString() }));
+  h.scheduler.start();
+  await h.flush(() => h.fired.length >= 1 && h.store.getAlarm("j1")?.runCount === 1);
+  const next = Date.parse(h.store.getAlarm("j1")!.nextDueAt);
+  // With random()=1 the interval scales up to 3600*1.1; with the strict-future walk
+  // from now it lands inside (3600, 3600*1.1 + a few ms] rather than the exact grid.
+  assert.ok(next > BASE_NOW, "next must be strictly after now");
+  assert.ok(next <= BASE_NOW + Math.round(3600 * 1.1) * 1000 + 1, "interval must not exceed (1+jitter)*every");
 });
 
 test("busy defers and advances after maxRetriesPerFire", async (tctx) => {

@@ -76,6 +76,25 @@ test("proactive_set validates selectors", async () => {
   assert.equal(code(await h.run("proactive_set", { prompt: "x", every_seconds: 10 * 365 * 86400 + 1 })), "invalid_trigger");
 });
 
+test("proactive_set validates jitter bounds and only with every_seconds", async () => {
+  const h = harness();
+  assert.equal(code(await h.run("proactive_set", { prompt: "x", every_seconds: 300, jitter: -0.1 })), "invalid_trigger");
+  assert.equal(code(await h.run("proactive_set", { prompt: "x", every_seconds: 300, jitter: 1.1 })), "invalid_trigger");
+  // Schema gate blocks non-number jitter before the closed domain validation.
+  await assert.rejects(h.run("proactive_set", { prompt: "x", every_seconds: 300, jitter: "0.1" }),
+    (err: unknown) => (err as { code?: string })["code"] === "INVALID_ARGS");
+  const ok = asView(await h.run("proactive_set", { prompt: "x", every_seconds: 300, jitter: 0.15 }));
+  assert.equal(ok.mode, "repeat");
+  assert.equal((h.store.alarms[0]?.trigger as { jitter?: number }).jitter, 0.15);
+  // jitter without every_seconds is rejected (unknown-key surface) at validation level:
+  const res = validateCreateArgs({ prompt: "x", after_seconds: 60, jitter: 0.1 }) as { code?: string };
+  assert.equal(res.code, "invalid_trigger");
+  // Non-finite jitter is rejected at the domain gate (number type passes). NaN serializes
+  // to null through the runner, so exercise validateCreateArgs directly for the NaN case.
+  const nan = validateCreateArgs({ prompt: "x", every_seconds: 300, jitter: Number.NaN }) as { code?: string };
+  assert.equal(nan.code, "invalid_trigger");
+});
+
 test("proactive_set rejects the merged wake_reason values", async () => {
   const h = harness();
   // The tool schema enum is the first gate: invalid values throw INVALID_ARGS
@@ -108,6 +127,19 @@ test("P1 regression: alarm view output schema admits legacy wake reasons", () =>
     const violations = validateJsonSchemaValue(viewSchema, { ...base, wakeReason }, "value");
     assert.deepEqual(violations, [], "wakeReason " + wakeReason + " must validate");
   }
+});
+
+test("P0 regression: jittered alarm view passes the runtime output schema gate", () => {
+  const h = harness();
+  const listDef = h.byName["proactive_list"];
+  const viewSchema = (listDef.output!.schema as { oneOf: Array<{ type: string; items: unknown }> }).oneOf[0].items as Parameters<typeof validateJsonSchemaValue>[0];
+  const base = { id: "a", mode: "repeat", prompt: "p", nextDueAt: "2026-09-02T00:00:00.000Z", state: "scheduled", deliveryMode: "host", wakeReason: "heartbeat" };
+  // A jittered view must validate (schema declares jitter, optional).
+  const jittered = validateJsonSchemaValue(viewSchema, { ...base, jitter: 0.15 }, "value");
+  assert.deepEqual(jittered, [], "jittered view must validate against the output schema");
+  // A non-jittered view must still validate (jitter optional, not required).
+  const plain = validateJsonSchemaValue(viewSchema, { ...base }, "value");
+  assert.deepEqual(plain, [], "non-jittered view must validate against the output schema");
 });
 
 test("proactive_set creates one-shot and repeat alarms end to end", async () => {

@@ -8,7 +8,9 @@ import {
   inputError,
   internalError,
   isToolError,
+  jitterInterval,
   nextEveryOccurrence,
+  nextJitteredOccurrence,
   requireFuture,
   resolveAtInput,
   toAlarmView,
@@ -85,6 +87,31 @@ test("nextEveryOccurrence aligns to the anchor and enforces the floor", () => {
   assert.throws(() => nextEveryOccurrence(anchor, 1.5, anchor), errCode("frequency_too_high"));
 });
 
+test("jitterInterval scales within (1 ± jitter) and floors at MIN_EVERY_SECONDS", () => {
+  // random() = 1 -> scale 1 + jitter; 0 -> scale 1 - jitter.
+  assert.equal(jitterInterval(3600, 0.1, () => 1), Math.round(3600 * 1.1));
+  assert.equal(jitterInterval(3600, 0.1, () => 0), Math.round(3600 * 0.9));
+  assert.equal(jitterInterval(3600, 0, () => 1), 3600); // jitter 0 -> exact
+  // Heavy jitter cannot collapse below the floor.
+  assert.equal(jitterInterval(300, 1, () => 0), 300); // max(300, round(300*0)) = 300
+  // Out-of-range jitter is clamped to [0,1].
+  assert.equal(jitterInterval(3600, 2, () => 1), Math.round(3600 * 2));
+  assert.equal(jitterInterval(3600, -1, () => 0), 3600);
+});
+
+test("nextJitteredOccurrence stays strictly future and walks around now", () => {
+  const anchor = Date.parse("2026-09-01T00:00:00.000Z");
+  // jitter 0 degenerates to the exact grid.
+  assert.equal(nextJitteredOccurrence(anchor, 300, anchor + 1, 0), nextEveryOccurrence(anchor, 300, anchor + 1));
+  // The walk is based on now, not the anchor phase; always strictly in the future.
+  const plus = nextJitteredOccurrence(anchor, 300, anchor + 10_000, 0.1, () => 1);
+  assert.ok(plus > anchor + 10_000);
+  const minus = nextJitteredOccurrence(anchor, 300, anchor + 10_000, 0.1, () => 0);
+  assert.ok(minus > anchor + 10_000);
+  // Validation still applies: sub-floor every_seconds rejects.
+  assert.throws(() => nextJitteredOccurrence(anchor, 299, anchor + 1, 0.1), errCode("frequency_too_high"));
+});
+
 test("requireFuture rejects the past", () => {
   const now = Date.parse("2026-09-01T00:00:00.000Z");
   requireFuture(now + 1, now);
@@ -111,6 +138,31 @@ test("toAlarmView marks overdue", () => {
   const view = toAlarmView(alarm, Date.parse("2026-09-01T00:00:00.000Z"));
   assert.equal(view.state, "overdue");
   assert.equal(view.deliveryMode, "host");
+});
+
+test("toAlarmView surfaces jitter only for jittered repeats", () => {
+  const base: Alarm = {
+    id: "a1",
+    sessionId: "s1",
+    mode: "repeat",
+    trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z" },
+    prompt: "p",
+    wakeReason: "heartbeat",
+    deliveryHint: { chat: true, push: true, wechat: true },
+    timeZone: "UTC",
+    status: "scheduled",
+    nextDueAt: "2026-09-01T01:00:00.000Z",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:00.000Z",
+    runCount: 0,
+    lastRunAt: null
+  };
+  const nowMs = Date.parse("2026-08-31T00:00:00.000Z");
+  assert.equal(toAlarmView(base, nowMs).jitter, undefined);
+  const jittered: Alarm = { ...base, trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z", jitter: 0.2 } };
+  assert.equal(toAlarmView(jittered, nowMs).jitter, 0.2);
+  const zeroJitter: Alarm = { ...base, trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z", jitter: 0 } };
+  assert.equal(toAlarmView(zeroJitter, nowMs).jitter, undefined);
 });
 
 test("error helpers stay closed and stable", () => {

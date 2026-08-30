@@ -11,6 +11,7 @@ export interface ProactivePanelCopy {
   triggerKind: string;
   afterSeconds: string;
   everySeconds: string;
+  jitter: string;
   wakeReason: string;
   heartbeatPreset: string;
   create: string;
@@ -39,6 +40,7 @@ export const zh: ProactivePanelCopy = {
   triggerKind: "触发方式",
   afterSeconds: "延迟秒数",
   everySeconds: "固定间隔秒数",
+  jitter: "随机抖动 (±比例 0-1)",
   wakeReason: "唤醒原因",
   heartbeatPreset: "心跳预设",
   create: "创建",
@@ -67,6 +69,7 @@ export const en: ProactivePanelCopy = {
   triggerKind: "Trigger",
   afterSeconds: "Delay seconds",
   everySeconds: "Fixed interval seconds",
+  jitter: "Random jitter (±ratio 0-1)",
   wakeReason: "Wake reason",
   heartbeatPreset: "Heartbeat preset",
   create: "Create",

@@ -119,7 +119,28 @@ test("panel snapshot carries configuration summary", async () => {
   assert.equal(snap.config.quietHours.start, h.config.quietHours.start);
   assert.equal(snap.config.heartbeatPrompt, h.config.heartbeatPrompt);
   assert.equal(snap.config.heartbeatEverySeconds, h.config.heartbeatEverySeconds);
+  assert.equal(snap.config.heartbeatJitter, h.config.heartbeatJitter);
   assert.equal(snap.server.dataDir, h.store.dataDir);
+});
+
+test("panel: jittered repeat appears in the snapshot and resumes via the jitter walk", async () => {
+  const h = await harness();
+  const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "p", every_seconds: 3600, jitter: 0.2 } } });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  assert.equal(created.snapshot.alarms[0].jitter, 0.2);
+  const id = created.snapshot.alarms[0].id;
+  // Config summary already defaults heartbeatJitter for the preset prefill.
+  assert.equal(created.snapshot.config.heartbeatJitter, h.config.heartbeatJitter);
+  // Pause + resume keeps the alarm alive; the resumed due is strictly future.
+  const paused = await h.service.action({ action: { kind: "toggle", id } });
+  assert.equal(paused.ok, true);
+  if (!paused.ok) return;
+  const resumed = await h.service.action({ action: { kind: "toggle", id } });
+  assert.equal(resumed.ok, true);
+  if (!resumed.ok) return;
+  assert.equal(resumed.snapshot.alarms[0].state, "scheduled");
+  assert.ok(Date.parse(resumed.snapshot.alarms[0].nextDueAt) > NOW);
 });
 
 test("createArgsFromForm matches the tool dialect (after_seconds form)", () => {
@@ -129,6 +150,23 @@ test("createArgsFromForm matches the tool dialect (after_seconds form)", () => {
   assert.equal(args["prompt"], "p");
   assert.equal(args["wake_reason"], "heartbeat");
   assert.deepEqual(args["delivery"], { chat: true, push: false, wechat: false });
+});
+
+test("createArgsFromForm carries jitter for the every_seconds form", () => {
+  const form: PanelCreateForm = { prompt: "p", everySeconds: 3600, jitter: 0.15 };
+  const args = createArgsFromForm(form);
+  assert.equal(args["every_seconds"], 3600);
+  assert.equal(args["jitter"], 0.15);
+});
+
+test("P1 regression: createArgsFromForm never carries stale jitter into after_seconds", () => {
+  // A form that previously held jitter (e.g. via the heartbeat preset prefill)
+  // but was switched to after_seconds must not leak jitter into the args —
+  // the shared validator rejects jitter without every_seconds.
+  const form: PanelCreateForm = { prompt: "p", afterSeconds: 900, jitter: 0.1 };
+  const args = createArgsFromForm(form);
+  assert.equal(args["after_seconds"], 900);
+  assert.ok(!("jitter" in args), "stale jitter must not leak into after_seconds args");
 });
 
 test("applyHotConfig mutates only the hot subset and reports change", () => {

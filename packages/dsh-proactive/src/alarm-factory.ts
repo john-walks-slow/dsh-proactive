@@ -31,6 +31,8 @@ export interface CreateSpec {
   at?: unknown;
   afterSeconds?: number;
   everySeconds?: number;
+  /** Optional repeat randomness 0..1: each interval scaled by (1 ± jitter·uniform(0,1)). */
+  jitter?: number;
   timeZone?: string;
   delivery: DeliveryHint;
   wakeReason: WakeReason;
@@ -53,12 +55,15 @@ function allocateId(prefix: string): string {
  * the model tools and the GUI accept exactly one dialect.
  */
 export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | ToolError {
-  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "time_zone", "delivery", "wake_reason"]);
+  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "jitter", "time_zone", "delivery", "wake_reason"]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, time_zone, delivery, wake_reason." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, jitter, time_zone, delivery, wake_reason." };
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined);
   if (selectors !== 1) return { code: "invalid_trigger", message: "proactive_set requires exactly one of at, after_seconds, or every_seconds." };
+  if (args["jitter"] !== undefined && args["every_seconds"] === undefined) {
+    return { code: "invalid_trigger", message: "jitter is only meaningful with every_seconds." };
+  }
   let wakeReason: WakeReason = "alarm";
   if (args["wake_reason"] !== undefined) {
     if (typeof args["wake_reason"] !== "string" || !(WAKE_REASONS as readonly string[]).includes(args["wake_reason"])) {
@@ -108,7 +113,15 @@ export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | 
     } catch (error) {
       return inputError(error);
     }
-    return { prompt, kind: "every", everySeconds: value, delivery, wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
+    let jitter: number | undefined;
+    if (args["jitter"] !== undefined) {
+      const j = args["jitter"];
+      if (typeof j !== "number" || !Number.isFinite(j) || j < 0 || j > 1) {
+        return { code: "invalid_trigger", message: "jitter must be a number in 0..1 (0 = fixed rate)." };
+      }
+      jitter = j;
+    }
+    return { prompt, kind: "every", everySeconds: value, ...(jitter !== undefined ? { jitter } : {}), delivery, wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
   }
   return { prompt, kind: "at", at: args["at"], delivery, wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
 }
@@ -123,7 +136,11 @@ export function buildAlarm(sessionId: string, spec: CreateSpec, nowStart: number
   }
   if (spec.kind === "every") {
     const epoch = nowStart + spec.everySeconds! * 1000;
-    const trigger: AlarmTrigger = { everySeconds: spec.everySeconds!, anchor: stamp };
+    const trigger: AlarmTrigger = {
+      everySeconds: spec.everySeconds!,
+      anchor: stamp,
+      ...(spec.jitter !== undefined ? { jitter: spec.jitter } : {})
+    };
     return { alarm: newAlarm(sessionId, spec, trigger, epoch, stamp) };
   }
   if (typeof spec.at !== "string" && !isRecord(spec.at)) {

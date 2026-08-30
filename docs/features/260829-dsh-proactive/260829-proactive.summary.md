@@ -86,3 +86,29 @@
 ## 待办（追加）
 
 4. v3 验证项见 validation.md 13–15（需实机：设置工具持久化重启后生效、heartbeat 默认前置、面板预设去重）
+
+# v3.5 增量（2026-08-31：重复间隔随机抖动 jitter）
+
+## 背景
+
+用户心愿单 1："interval支持一定randomness"——固定间隔的 repeat 闹钟（尤其心跳）每次唤醒间隔完全可预测（节拍器），既机械又让多会话可能在整点同步扎堆。期望给重复间隔加可控随机性。
+
+## 已落地决策
+
+- **`proactive_set` 新参数 `jitter`**（0..1，仅与 `every_seconds` 一起合法，否则 `invalid_trigger`）：
+  - 存入 `AlarmTriggerEvery.jitter`；`nextJitteredOccurrence(anchor, every, now, jitter, random)` 纯函数推进：从第 2 次唤醒起每次基于"上次之后再过一抖动间隔"，间隔独立按 `(1 ± jitter·uniform(0,1))` 缩放，严格在未来（错过不补跑），且不低于 MIN_EVERY_SECONDS；**首个周期固定**（创建时 `now + every_seconds`，不抖动）。
+  - `jitterInterval(everySeconds, jitter, random)` 单独导出并保底 300s；`random` 源可注入（scheduler deps 新增 `random?`），测试确定性。
+- **输出契约（review 修复）**：`ALARM_VIEW_SCHEMA` 声明可选 `jitter: { type: "number" }`（不带 required）——dsh-tools 运行时对工具返回值做 `additionalProperties: false` 校验，缺声明会让带 jitter 的 proactive_set 先落库后抛 INVALID_TOOL_OUTPUT、proactive_list 整体失败；`createArgsFromForm` 只在 every_seconds 模式下带出 jitter（面板切 after 模式不清 stale jitter 的 P1）。
+- **全局 `heartbeatJitter`**（默认 0.1 = ±10%，`config.json` / `proactive_update_settings` 的 `heartbeat_jitter` 可改）：只作为**面板「心跳预设」的预填值**（applyHeartbeat 带 jitter），不改变既有闹钟；0 关闭。
+- **面板**：创建表单 in every 模式显示 jitter 输入（0..1 step 0.05）；闹钟行 show `±N%` 徽标（`AlarmView.jitter` 仅在 jittered repeat 时出现）；toggle 恢复用 jitter walk 而非固定锚点，展示的"下次触发"与实际一致。
+- **向后兼容**：无 jitter 字段的存量 repeat 完全走原 `nextEveryOccurrence` 网格路径。
+
+## 代表性变更文件
+
+- `src/domain.ts`（AlarmTriggerEvery.jitter、jitterInterval、nextJitteredOccurrence、AlarmView.jitter）
+- `src/alarm-factory.ts`（jitter 校验与落库）、`src/scheduler.ts`（advance 分支 + random 注入）
+- `src/config.ts` / `src/settings.ts` / `src/tools.ts` / `src/panel/*` / `src/client/*`（heartbeatJitter 全局 + 各面透传）
+
+## 待办（追加）
+
+5. v3.5 验证项见 validation.md 16–17（需实机：jitter 心跳实际间隔分布、面板预设预填与徽标显示）

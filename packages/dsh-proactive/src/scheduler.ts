@@ -15,7 +15,7 @@
 
 import type { Alarm, RunDecision } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
-import { instantEpoch, isRecord, nextEveryOccurrence } from "./domain.js";
+import { instantEpoch, isRecord, nextEveryOccurrence, nextJitteredOccurrence } from "./domain.js";
 import { isInQuietHours } from "./config.js";
 import type { ProactiveStore } from "./store.js";
 
@@ -33,6 +33,8 @@ export interface SchedulerDeps {
   /** Runs one alarm through the agent world; returns ok + analysis or busy/failed. */
   runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; analysis?: { decision: RunDecision; budgetDelta: number; leaked?: boolean; note?: string; reasoningSummary?: string; replySummary?: string } }>;
   now?: () => number;
+  /** Uniform(0,1) source for jittered repeats; defaults to Math.random. */
+  random?: () => number;
   log: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -281,7 +283,14 @@ export class ProactiveScheduler {
     if (!isRecord(trigger) || !("everySeconds" in trigger) || typeof trigger["everySeconds"] !== "number" || !Number.isSafeInteger(trigger["everySeconds"]) || typeof trigger["anchor"] !== "string") {
       return { ...alarm, status: "failed", lastRunAt: stamp, runCount: alarm.runCount + 1, updatedAt: stamp };
     }
-    const nextDueEpoch = nextEveryOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now);
+    const jitter = trigger["jitter"];
+    // jitter is an enhancement field: a corrupt/malformed value (string, NaN,
+    // out of range) degrades softly to the deterministic grid instead of
+    // killing the alarm — the anchor+everySeconds pair is the load-bearing
+    // part of a repeat trigger.
+    const nextDueEpoch = typeof jitter === "number" && Number.isFinite(jitter) && jitter > 0
+      ? nextJitteredOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now, jitter, this.deps.random ?? Math.random)
+      : nextEveryOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now);
     return {
       ...alarm,
       status: "scheduled",

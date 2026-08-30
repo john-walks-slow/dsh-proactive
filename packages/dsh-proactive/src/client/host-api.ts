@@ -7,8 +7,8 @@ import type { PanelAction } from "../panel/contract.js";
 
 export interface PanelSnapshotDto {
   server: { now: string; dataDir: string; corrupt: boolean };
-  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; heartbeatPrompt: string; heartbeatEverySeconds: number };
-  alarms: Array<{ id: string; mode: string; prompt: string; wakeReason: string; nextDueAt: string; state: string; deliveryMode: string }>;
+  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; heartbeatPrompt: string; heartbeatEverySeconds: number; heartbeatJitter: number };
+  alarms: Array<{ id: string; mode: string; prompt: string; wakeReason: string; nextDueAt: string; state: string; deliveryMode: string; jitter?: number }>;
   runs: Array<{ id: string; alarmId: string; firedAt: string; decision: string; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string }>;
 }
 

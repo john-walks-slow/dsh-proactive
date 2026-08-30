@@ -79,7 +79,12 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     prompt: { type: "string", required: true },
     nextDueAt: { type: "string", required: true },
     state: { type: "string", required: true, enum: ["scheduled", "overdue", "in-flight", "completed", "cancelled", "failed"] },
-    deliveryMode: { type: "string", required: true, const: "host" }
+    deliveryMode: { type: "string", required: true, const: "host" },
+    // Optional repeat randomness; only present for jittered repeats. Deliberately
+    // NOT required: dsh-tools compiles required:true per-property into the top-level
+    // required array, so requiring it here would break non-jittered alarms on the
+    // runtime output gate (INVALID_TOOL_OUTPUT: missing required).
+    jitter: { type: "number" }
   }
 };
 
@@ -105,7 +110,8 @@ const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
     max_retries_per_fire: { type: "integer", required: true },
     max_prompt_length: { type: "integer", required: true },
     heartbeat_prompt: { type: "string", required: true },
-    heartbeat_every_seconds: { type: "integer", required: true }
+    heartbeat_every_seconds: { type: "integer", required: true },
+    heartbeat_jitter: { type: "number", required: true }
   }
 };
 
@@ -123,7 +129,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
   return [
         defineTool({
           name: "proactive_set",
-          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, or every_seconds of at least 300 for a fixed-rate repeat. The prompt is required for wake_reason alarm (the user's instruction); it is optional for wake_reason heartbeat, where the configured default heartbeat wording is always used as the base and an optional prompt adds extra direction. The alarm fires even when this session is cold; the wake turn is framed so the model can stay silent with proactive_no_reply.",
+          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, or every_seconds of at least 300 for a fixed-rate repeat (optionally with jitter 0..1 for randomized intervals). The prompt is required for wake_reason alarm (the user's instruction); it is optional for wake_reason heartbeat, where the configured default heartbeat wording is always used as the base and an optional prompt adds extra direction. The alarm fires even when this session is cold; the wake turn is framed so the model can stay silent with proactive_no_reply.",
           parameters: {
             prompt: {
               type: "string",
@@ -137,7 +143,8 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
               description: "Absolute target with an explicit or implied time zone."
             },
             after_seconds: { type: "integer", description: "Positive delay in seconds from now." },
-            every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; occurrences align to creation time and missed ones are skipped." },
+            every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; without jitter, occurrences align to creation time and missed ones are skipped." },
+            jitter: { type: "number", description: "Optional repeat randomness 0..1: each interval is scaled by (1 ± jitter·uniform(0,1)) so consecutive wakes are not metronomic. 0/default = fixed rate. Only meaningful with every_seconds." },
             time_zone: { type: "string", description: "IANA Area/Location used for at alignment and quiet-hours reporting (default UTC)." },
             delivery: { type: "object", additionalProperties: false, properties: { chat: { type: "boolean", description: "Chat text allowed (default true)" }, push: { type: "boolean", description: "push_notify allowed (default true)" }, wechat: { type: "boolean", description: "send_wechat allowed (default true)" } }, description: "Allowed delivery channels for the wake turn." },
             wake_reason: { type: "string", enum: WAKE_REASONS, description: "heartbeat: model-initiated periodic check-in (gated by quiet hours and daily budget) | alarm: user-requested reminder (quiet-hours and budget exempt). Default alarm." }
@@ -264,7 +271,8 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
             max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
             heartbeat_prompt: { type: "string", description: "Default heartbeat wording every heartbeat wake leads with (max " + MAX_PROMPT_LENGTH + " chars)." },
-            heartbeat_every_seconds: { type: "integer", description: "Default heartbeat repeat interval in seconds (min " + MIN_EVERY_SECONDS + ", max 1 day)." }
+            heartbeat_every_seconds: { type: "integer", description: "Default heartbeat repeat interval in seconds (min " + MIN_EVERY_SECONDS + ", max 1 day)." },
+            heartbeat_jitter: { type: "number", description: "Default heartbeat repeat randomness 0..1 (panel preset prefill; 0 = fixed rate)." }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -300,7 +308,8 @@ function settingsView(config: ProactiveConfig): JsonValue {
     max_retries_per_fire: config.maxRetriesPerFire,
     max_prompt_length: config.maxPromptLength,
     heartbeat_prompt: config.heartbeatPrompt,
-    heartbeat_every_seconds: config.heartbeatEverySeconds
+    heartbeat_every_seconds: config.heartbeatEverySeconds,
+    heartbeat_jitter: config.heartbeatJitter
   };
 }
 

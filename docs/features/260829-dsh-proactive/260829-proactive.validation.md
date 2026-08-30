@@ -60,6 +60,13 @@
 | 14. heartbeat 默认前置：删掉某 heartbeat 闹钟的 prompt（或新建一个不带 prompt 的 heartbeat），等一个周期触发 | 唤醒内容以默认心跳提示词开头（面板设置里那段 `heartbeatPrompt`），无重复拼接；给 heartbeat 传一个附加方向 prompt 时，默认提示词在前、附加方向在后 | | 待验证 | heartbeat prompt 可选 + 默认前置 |
 | 15. 面板 heartbeat 预设去重：用面板「心跳预设」新建（prompt 预填默认值，不修改） | 到点唤醒指令只有一份默认提示词，不会重复出现两遍 | | 待验证 | 预设 prefill 与默认前置的去重 |
 
+## v3.5 jitter 验证（2026-08-31）
+
+| # | 操作 | 预期 | 结果 | 状态 | 说明 |
+|---|---|---|---|---|---|
+| 16 | jitter 心跳：面板「心跳预设」新建（默认 heartbeatJitter=0.1），等 3-4 个周期记录实际触发间隔；或让模型 proactive_set 订 `every_seconds=3600, jitter=0.15` 的心跳 | 实际间隔在 `(1±jitter)·every` 范围内浮动，不是固定整点；每次唤醒仍严格在未来（无重复/扎堆）；面板闹钟行显示 `±15%` 徽标；模型 proactive_list 返回的闹钟带 jitter 字段 | | 待验证 | 间隔分布 + 面板徽标 + 视图透传 |
+| 17 | jitter 边界：模型传 `jitter=1.5` / `jitter=-0.1` / `every_seconds` 不带 jitter 之外的选择器传 jitter（如 `after_seconds`+jitter） | 返回闭式错误码 `invalid_trigger`，不产生闹钟；`proactive_update_settings` 传 `heartbeat_jitter=0.5` 生效（面板预设随之预填 ±50%），传越界值被拒 | | 待验证 | 闭式校验 + 全局配置联动 |
+
 ## v2 验证结论
 
 {待验证}

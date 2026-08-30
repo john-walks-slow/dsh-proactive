@@ -30,6 +30,8 @@ export interface ConfigView {
   heartbeatPrompt: string;
   /** Default heartbeat repeat interval in seconds used to prefill the create form. */
   heartbeatEverySeconds: number;
+  /** Default heartbeat repeat randomness 0..1 used to prefill the create form. */
+  heartbeatJitter: number;
 }
 
 export interface PanelSnapshot {
@@ -65,6 +67,8 @@ export interface PanelCreateForm {
   at?: string;
   afterSeconds?: number;
   everySeconds?: number;
+  /** Repeat randomness 0..1; only meaningful together with everySeconds. */
+  jitter?: number;
   timeZone?: string;
   delivery?: { chat: boolean; push: boolean; wechat: boolean };
   wakeReason?: string;
@@ -76,6 +80,10 @@ export function createArgsFromForm(form: PanelCreateForm): Record<string, unknow
   if (form.at !== undefined && form.at !== "") args["at"] = form.at;
   if (form.afterSeconds !== undefined) args["after_seconds"] = form.afterSeconds;
   if (form.everySeconds !== undefined) args["every_seconds"] = form.everySeconds;
+  // Jitter is only meaningful with every_seconds: never carry a stale jitter
+  // (e.g. from a heartbeat preset prefill) into after_seconds creations, which
+  // the shared validator would reject as invalid_trigger.
+  if (form.everySeconds !== undefined && form.jitter !== undefined) args["jitter"] = form.jitter;
   if (form.timeZone !== undefined && form.timeZone !== "") args["time_zone"] = form.timeZone;
   if (form.wakeReason !== undefined && form.wakeReason !== "") args["wake_reason"] = form.wakeReason;
   return args;

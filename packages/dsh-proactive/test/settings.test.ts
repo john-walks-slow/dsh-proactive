@@ -17,6 +17,16 @@ test("validateSettingsPatch returns only the supplied keys (partial)", () => {
   assert.equal(out.patch.heartbeatEverySeconds, 1800);
 });
 
+test("validateSettingsPatch accepts and bounds heartbeat_jitter", () => {
+  const ok = validateSettingsPatch({ heartbeat_jitter: 0.25 });
+  assert.ok(!("code" in ok));
+  assert.deepEqual(ok.patch, { heartbeatJitter: 0.25 });
+  assert.equal(code(validateSettingsPatch({ heartbeat_jitter: -0.01 })), "invalid_trigger");
+  assert.equal(code(validateSettingsPatch({ heartbeat_jitter: 1.01 })), "invalid_trigger");
+  assert.equal(code(validateSettingsPatch({ heartbeat_jitter: "0.5" })), "invalid_trigger");
+  assert.equal(code(validateSettingsPatch({ heartbeat_jitter: Number.NaN })), "invalid_trigger");
+});
+
 test("validateSettingsPatch normalizes quiet_hours and heartbeat_prompt", () => {
   const out = validateSettingsPatch({
     quiet_hours: { start: "22:00", end: "07:00", time_zone: "Asia/Shanghai" },
