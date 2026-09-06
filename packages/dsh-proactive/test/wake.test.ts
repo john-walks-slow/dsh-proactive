@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { EpochHeader } from "@deepseek-ai/dsh-session";
 import { ReasoningEffortId } from "@deepseek-ai/dsh-llm";
@@ -187,23 +188,21 @@ test("selectionFromHeader mirrors the session's committed request config", () =>
   assert.deepEqual(selectionFromHeader(withEffort), { provider: "p", model: "m", reasoningEffort: "low" });
 });
 
-test("cold resume installs a model-selection setup and lets the turn proceed", async () => {
+test("cold resume installs a model-selection setup that drives the request waterfall", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
   const store = new ProactiveStore(dir);
-  let lastOptions: { agentOptions?: unknown; setup?: unknown } = {};
+  let capturedOptions: { agentOptions?: unknown; setup?: unknown } = {};
+  const header: EpochHeader = { config: { provider: "cpa", model: "gemini-3-flash" } };
+  const wakeAgent = makeWakeAgent(header);
   const agents: AgentsFacade = {
     get: () => undefined as never,
     resume: async (options) => {
-      lastOptions = options;
+      capturedOptions = options;
       const handle: AgentHandleLike = { agent: wakeAgent, dispose: async () => undefined };
       return handle;
     }
   };
-  // selection resolution itself is covered by createWakeSelectionRef; here we
-  // only prove the resume contract: cold wakes must carry a setup hook and the
-  // turn must still proceed when the fake agent completes normally
-  const wakeAgent = makeWakeAgent({ config: { provider: "cpa", model: "gemini-3-flash" } });
   const driver = new WakeDriver({
     agents,
     modelSelection: () => ({ provider: "cpa", model: "medium" }),
@@ -214,7 +213,25 @@ test("cold resume installs a model-selection setup and lets the turn proceed", a
   try {
     const fire = await driver.fire(alarm("c1"));
     assert.equal(fire.outcome, "ok");
-    assert.equal(typeof lastOptions.setup, "function", "cold resume must carry a setup hook");
+    assert.equal(typeof capturedOptions.setup, "function", "cold resume must carry a setup hook");
+
+    // execute the real setup against a real cordis Context with the fake agent
+    const agentCtx = new Context();
+    Object.defineProperty(agentCtx, "agent", { value: wakeAgent, configurable: true });
+    const applied = (capturedOptions.setup as (ctx: Context) => unknown)(agentCtx);
+    if (applied && typeof (applied as { then?: unknown }).then === "function") await applied;
+
+    // drive the two model-selection waterfalls (strict cordis event typings
+    // don't know these runtime event names; cast just for the test harness)
+    const waterfall = (agentCtx as unknown as { waterfall: (subject: unknown, name: string, ...args: unknown[]) => Promise<unknown> }).waterfall;
+    // system-prompt/assemble snapshots the session-header selection
+    const assembled = (await waterfall(agentCtx, "system-prompt/assemble", {}, {}, () => Promise.resolve({ variables: {} }))) as { variables: Record<string, unknown> };
+    assert.deepEqual(assembled.variables, { provider: "cpa", model: "gemini-3-flash" });
+    // agent/request overrides the seed route with the assembled selection
+    const request = (await waterfall(agentCtx, "agent/request", { turn: 1, step: 1 }, () => Promise.resolve({ provider: "seed", model: "seed", maxTokens: 100 }))) as { provider: string; model: string; maxTokens: number };
+    assert.equal(request.provider, "cpa");
+    assert.equal(request.model, "gemini-3-flash");
+    assert.equal(request.maxTokens, 100, "unrelated request fields must pass through untouched");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

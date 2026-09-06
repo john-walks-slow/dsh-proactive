@@ -16,9 +16,8 @@
  * is a process-local runtime; the persisted session itself stays intact).
  */
 
-import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
+import type { Agent, AgentOptions, AgentSetup, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
-import type { Context } from "@deepseek-ai/cordis";
 import type { EpochHeader } from "@deepseek-ai/dsh-session";
 import type { Alarm, RunDecision } from "./domain.js";
 import type { ProactiveStore } from "./store.js";
@@ -49,9 +48,10 @@ export interface AgentsFacade {
 
 /**
  * Resume-time composition hook, handed the resumed agent's scoped context.
- * Mirrors dsh-agent's own setup contract ({@link https://github.com/DeepSeek/DSH dsh-agent runtime-types}.
+ * Reuses dsh-agent's own `AgentSetup` type so upstream contract drift in the
+ * setup signature surfaces as a compile error here too.
  */
-export type WakeResumeSetup = (agentCtx: Context) => Promise<{ commit(): void } | void> | { commit(): void } | void;
+export type WakeResumeSetup = AgentSetup;
 
 export interface ResumeFacadeOptions {
   resumeSessionId: string;
@@ -119,7 +119,12 @@ export class WakeDriver {
           agentOptions,
           setup: (agentCtx) => {
             const agent = (agentCtx as unknown as { agent: Agent }).agent;
-            if (agent === undefined) return;
+            // react-loop installs `agent` on the scoped ctx before setup runs;
+            // absence means the setup contract drifted — fail loudly instead of
+            // silently reproducing the original "no provider/model" error
+            if (agent === undefined) {
+              throw new Error("wake resume: resumed agent has no scoped .agent (dsh-agent setup contract drift)");
+            }
             installModelSelection(agentCtx, this.createWakeSelection(agent));
           }
         });
@@ -184,6 +189,10 @@ export class WakeDriver {
 /**
  * Provider/model for a wake turn from the session's last committed request
  * header, when one exists. Pure so the fallback chain is unit-testable.
+ *
+ * `reasoningEffort` is passed through verbatim: an explicit effort in the
+ * header is preserved for the wake turn, while an absent effort is left unset
+ * so adapter/default effort resolution applies (mirrors the web host).
  */
 export function selectionFromHeader(header: EpochHeader | undefined): ModelSelection | undefined {
   if (header === undefined) return undefined;
@@ -215,7 +224,10 @@ export function createWakeSelectionRef(
       if (fromHeader !== undefined) return fromHeader;
       const maybe = fallback();
       if (maybe === undefined || (maybe.provider === undefined && maybe.model === undefined)) {
-        log("warn", "wake resume: no committed request header and agentDefaultModel selection unavailable; provider/model left to the request waterfall");
+        const what = header === undefined
+          ? "no committed request header"
+          : "committed request header is incomplete (missing provider/model)";
+        log("warn", `wake resume: ${what} and agentDefaultModel selection unavailable; provider/model left to the request waterfall`);
         return undefined;
       }
       if (maybe.provider === undefined || maybe.model === undefined) {

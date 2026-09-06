@@ -10,7 +10,7 @@
 - `src/config.ts` — 默认配置 + config.json/环境变量覆盖 + 安静时段判定
 - `src/store.ts` — alarms.json（原子写）/runs.jsonl/state.json 持久化；corrupt 降级
 - `src/scheduler.ts` — 串行 drive 循环：门控（安静/budget/hourly/boot 策略）、重试、单定时器重臂
-- `src/wake.ts` — WakeDriver：live/cold 双路径、runMaintenance+followup、whenIdle、dispose、inflight 守卫
+- `src/wake.ts` — WakeDriver：live/cold 双路径、冷 resume 装 `installModelSelection`（`createWakeSelectionRef`：会话 request header → agentDefaultModel → warn）、runMaintenance+followup、whenIdle、dispose、inflight 守卫
 - `src/framing.ts` — 唤醒报文（wake_reason/user_presence/budget/quiet_hours/alarm_prompt_json + 3 条回复规则）；notice-form 用户消息
 - `src/observer.ts` — 从会话日志切片判定 no_reply/reply/push/failed 与预算增量；leaked 标记
 - `src/tools.ts` — proactive_set/list/cancel/no_reply（no_reply 需 inflight 且【只调它不写文本】）
@@ -32,3 +32,4 @@
 - 本地改完要跑 `tsc -p tsconfig.json`（src+test 一起查）再 `node --test 'dist/test/*.test.js'`；node --test dist/test/ 目录形式在 Node 22 会 MODULE_NOT_FOUND
 - tools 的 output.schema 每个属性都要带 `required: true`（dsh-tools 的 per-property 约定，不是 JSON Schema 顶层 required 数组）
 - notice 来源必须带 `summary`（≤120 字符），否则 MessageSource 类型不满足
+- 冷 resume 的 provider/model 不能只靠 AgentOptions：新 loop 实例首次 buildRequest 只读 AgentOptions（不看持久化 request header），agentDefaultModel 取空时必抛 `has no provider/model`。必须像 web 主机（dsh-host-apiproxy selectionFor）一样经 resume `setup` 装 `installModelSelection`，水位：会话 request header → agentDefaultModel → warn（2026-09-06 根因，见 docs/issues/260906-cold-wake-provider-model/）

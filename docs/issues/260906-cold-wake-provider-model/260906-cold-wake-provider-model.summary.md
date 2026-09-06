@@ -42,6 +42,22 @@ and AgentOptions.model or supply both via the agent/request waterfall
   - 修复后（Test D）：同为 `modelSelection → undefined` 生产条件，冷唤醒回合**完成**，捕获到 `request/header` `reason=resume`、`config={provider:"cpa", model:"gemini-3-flash"}`（**会话自身模型**，jk 会话 header 里就是它），`turn/end` `kind=completed`，无 warn。
 - 效果语义：jk 冷唤醒将用会话自己在用的 gemini-3-flash，而非今天的默认 cpa/medium——与 web 路径行为一致。
 
+## 评审轮（2026-09-06，/spawn-reviewer）
+
+结论 **准入**（0 P0 / 0 P1 / 2 P2 / 4 P3，报告见同目录 `260906-cold-wake-provider-model.review.md`）。已采纳：
+
+- **P2-1**：冷 resume 单测从「只断言 setup 存在」升级为「真实 cordis Context 执行 setup + 驱动 `system-prompt/assemble` / `agent/request` 瀑布断言覆盖」。
+- **P2-2**：`agentCtx.agent` 缺失从静默 return 改为**显式 throw**（契约漂移时响亮失败，不再复现原始迷惑错误）。
+- **P3**：① 兜底 warn 区分「无 request header」与「header 不完整」；② `WakeResumeSetup` 改为复用官方 `AgentSetup` 类型（上游漂移 tsc 即报）；③ reasoningEffort 透传语义补注释。
+
+修后全量 `npm test` **118/118 绿**（树中另有并发开发中的 session-tab 工作新加入了 8 个用例）；E2E 复跑仍闭环。
+
+## 上线（2026-09-06）
+
+- `lib/` 已同步至 web profile（`/root/.dsh/profiles/web/node_modules/dsh-proactive/lib`，25 个文件，修复内容在位），随后重启 dsh 生效。
+- 前置发现并处理：JK 闹钟 `alarm_mtfkvz2j3nqik0` 在 13:30:18Z（13:29:34 触发点后 44s）被置为 **paused**（面板 toggle，推测用户暂停）——这就是 13:09 后无更多运行记录的原因。已通过面板 API 恢复 **scheduled**，`nextDueAt` 由 lastRunAt 重算推进为 **`2026-09-06T14:39:03.815Z`**（约重启后 20 分钟内触发，即修复后的首个冷唤醒验证点）。
+- 若用户不需要该 heartbeat，可在面板再次暂停。
+
 ## 风险与后续注意
 
 - 本轮修复**未上线**：web profile 的 `node_modules/dsh-proactive` 是构建拷贝，需重新同步 `lib/` 后重启 dsh 生效（重启会中断当前会话）。
