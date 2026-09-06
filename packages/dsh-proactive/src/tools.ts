@@ -109,9 +109,7 @@ const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
     boot_overdue_policy: { type: "string", required: true },
     max_retries_per_fire: { type: "integer", required: true },
     max_prompt_length: { type: "integer", required: true },
-    heartbeat_prompt: { type: "string", required: true },
-    heartbeat_every_seconds: { type: "integer", required: true },
-    heartbeat_jitter: { type: "number", required: true }
+    heartbeat_prompt: { type: "string", required: true }
   }
 };
 
@@ -270,9 +268,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             boot_overdue_policy: { type: "string", enum: ["fire", "notify-only", "drop"], description: "How boot-time overdue alarms are treated." },
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
             max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
-            heartbeat_prompt: { type: "string", description: "Default heartbeat wording every heartbeat wake leads with (max " + MAX_PROMPT_LENGTH + " chars)." },
-            heartbeat_every_seconds: { type: "integer", description: "Default heartbeat repeat interval in seconds (min " + MIN_EVERY_SECONDS + ", max 1 day)." },
-            heartbeat_jitter: { type: "number", description: "Default heartbeat repeat randomness 0..1 (panel preset prefill; 0 = fixed rate)." }
+            heartbeat_prompt: { type: "string", description: "Default heartbeat wording every heartbeat wake leads with (max " + MAX_PROMPT_LENGTH + " chars)." }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -307,9 +303,7 @@ function settingsView(config: ProactiveConfig): JsonValue {
     boot_overdue_policy: config.bootOverduePolicy,
     max_retries_per_fire: config.maxRetriesPerFire,
     max_prompt_length: config.maxPromptLength,
-    heartbeat_prompt: config.heartbeatPrompt,
-    heartbeat_every_seconds: config.heartbeatEverySeconds,
-    heartbeat_jitter: config.heartbeatJitter
+    heartbeat_prompt: config.heartbeatPrompt
   };
 }
 

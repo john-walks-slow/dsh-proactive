@@ -24,6 +24,26 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** Parse the optional `session` query parameter; empty string → undefined. Malformed encoding fails closed (undefined). */
+function sessionParam(req: IncomingMessage): string | undefined {
+  const raw = (req.url ?? "").split("?")[1];
+  if (raw === undefined) return undefined;
+  for (const part of raw.split("&")) {
+    if (part.startsWith("session=")) {
+      let value: string;
+      try {
+        value = decodeURIComponent(part.slice("session=".length));
+      } catch {
+        // Bad percent-encoding: treat as absent rather than crashing the request.
+        return undefined;
+      }
+      value = value.trim();
+      return value === "" ? undefined : value;
+    }
+  }
+  return undefined;
+}
+
 async function readBoundedJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -57,7 +77,7 @@ export function installPanelRoutes(
 
   disposers.push(
     webserver.register({ kind: "exact", path: "/api/dsh-proactive/state", handler: (req, res) => {
-      void service.snapshot().then(
+      void service.snapshot(sessionParam(req)).then(
         (snapshot) => writeJson(res, 200, snapshot),
         () => writeJson(res, 500, { code: "internal_error", message: "snapshot failed" })
       );
@@ -71,7 +91,7 @@ export function installPanelRoutes(
         return;
       }
       void readBoundedJson(req, ACTION_BODY_MAX_BYTES)
-        .then((body) => service.action(body))
+        .then((body) => service.action(body, sessionParam(req)))
         .then((result) => {
           if (result.ok) writeJson(res, 200, result.snapshot);
           else writeJson(res, 400, result.error);

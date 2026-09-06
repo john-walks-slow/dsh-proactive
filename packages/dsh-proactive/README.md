@@ -4,7 +4,7 @@
 
 两个典型场景：
 
-1. **模型主动跟进**（`wake_reason: heartbeat`）：习惯教练式每日跟进、陪伴类的主动聊天、周期复查等都由模型自主发起，低频、受预算与安静时段约束；面板提供「心跳预设」一键按默认提示词与间隔（60 分钟）新建。（v1 曾用 check_in/interval/companion 三种名称，行为完全一致，已合并统一为 heartbeat；旧存储值仍兼容。）
+1. **模型主动跟进**（`wake_reason: heartbeat`）：习惯教练式每日跟进、陪伴类的主动聊天、周期复查等都由模型自主发起，低频、受预算与安静时段约束；间隔/抖动等参数在创建时每个闹钟单独配置，无需全局预填。（v1 曾用 check_in/interval/companion 三种名称，行为完全一致，已合并统一为 heartbeat；旧存储值仍兼容。）
 2. **用户委托闹钟**（`wake_reason: alarm`）：用户说"1 小时后提醒我"，模型用 `proactive_set` 给自己订闹钟，到点把用户唤醒；安静时段内用户委托提醒依然放行，预算耗尽也不跳过。
 
 ## 与 dsh-schedule 的区别
@@ -40,23 +40,28 @@ dsh plugin --profile web add file:/root/projects/dsh-proactive/packages/dsh-proa
   "bootOverduePolicy": "fire",                 // fire | notify-only | drop
   "maxRetriesPerFire": 3,                      // 单次唤醒的 busy/failed 重试上限
   "maxPromptLength": 4000,
-  "heartbeatPrompt": "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。",
-  "heartbeatEverySeconds": 3600,               // 心跳预设默认间隔（最小 300，最大 86400）
-  "heartbeatJitter": 0.1                        // 心跳预设默认随机抖动（0..1，0=固定间隔）
+  "heartbeatPrompt": "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。"
 }
 ```
 
 环境变量覆盖：`DSH_PROACTIVE_ENABLED`、`DSH_PROACTIVE_MAX_DELIVERIES_PER_DAY`、`DSH_PROACTIVE_DATA_DIR`、`DSH_PROACTIVE_TIME_ZONE`。
 
-## GUI 管理面板（v2）
+## GUI 管理面板（v4）
 
-Web GUI 的设置面板中会出现「Proactive 闹钟」页签（插件随 bundle 安装自动注册，无需额外配置）：
+Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，无需额外配置）：
 
-- **闹钟管理**：列出全部闹钟（状态/模式/下次触发/唤醒原因），可新建、暂停/恢复、立即触发、取消；面板操作与 `proactive_*` 工具共用同一套校验与错误码。
-- **心跳预设**：点「心跳预设」一键预填默认心跳提示词与默认间隔（60 分钟、`wake_reason=heartbeat`）与默认随机抖动（±10%），可改后保存；提示词、间隔与抖动在设置面板可改（`heartbeatPrompt` / `heartbeatEverySeconds` / `heartbeatJitter`），改即生效。
-- **最近唤醒**：运行记录表展示每次唤醒的时间、决策（no_reply/reply/push/skipped/failed）、预算增量，以及**思考与回复摘要**（截断至 200 字符，悬浮看全文）——帮助理解模型在唤醒回合里为什么这样决策（含静默 no_reply 的理由）。
-- **配置即改生效**：设置面板中的 proactive 配置（启用、每日预算、安静时段、每小时上限、并发、boot 策略、重试、max prompt）通过官方 settings 通道热更新，无需重启；`config.json`/环境变量作为默认层继续生效，面板改动覆盖它们。
-- **实时刷新**：面板订阅 SSE 推送（`/api/dsh-proactive/events`），任一来源的变更（模型工具、面板、调度器）都会自动刷新；另提供 `/api/dsh-proactive/state`（快照）与 `/api/dsh-proactive/action`（命令）。
+**对话页「主动唤醒」tab（会话视角）**——每个会话的对话页头部与 Chat/轨迹 并列出现「主动唤醒」页签：
+
+- **会话闹钟**：只显示**当前会话**的闹钟（状态/模式/下次触发/唤醒原因），可新建、暂停/恢复、立即触发、编辑、取消；会话内的操作带归属校验，不能越权管理其他会话的闹钟。
+- **每闹钟历史**：每个闹钟行可展开查看自己的唤醒记录（决策/预算增量/思考与回复摘要）。
+- 激活的 tab 由框架记忆（切走再回仍是「主动唤醒」）。
+
+**设置页「主动唤醒」节（全局视角）**：
+
+- **全局配置**：启用开关、每日预算、安静时段（起止与时区）、心跳唤醒默认指令，均可直接编辑保存（`update_config` 动作持久化 `config.json` 并热应用，与工具同一套校验）。
+- **单一闹钟表格**：列出**所有会话**的闹钟，可**筛选**（状态/模式/会话）与**排序**（下次触发/创建时间/指令），可暂停/恢复、立即触发、**编辑**（改指令/间隔/抖动/唤醒原因，保留 id 与历史）、删除；每个闹钟行可展开查看自己的唤醒历史。所属会话列显示**会话标题**（能解析时），标题旁的复制图标一键复制会话 id。
+- **新建闹钟带目标会话**：新建表单显示「目标会话」选择器（取自现有闹钟归属 + 全局），不再产生无归属孤儿闹钟。
+- **实时刷新**：两个面板都订阅 SSE 推送（`/api/dsh-proactive/events`），任一来源的变更（模型工具、面板、调度器）都会自动刷新；另提供 `/api/dsh-proactive/state`（快照，可带 `?session=`）与 `/api/dsh-proactive/action`（命令）。
 - 无 webserver 的环境（headless profile）自动跳过面板路由，模型工具不受影响。
 
 ## 工具
@@ -67,7 +72,7 @@ Web GUI 的设置面板中会出现「Proactive 闹钟」页签（插件随 bund
 | `proactive_list` | 列出本会话活跃闹钟 |
 | `proactive_cancel` | 按 id 取消 |
 | `proactive_no_reply` | **唤醒回合专用**：静默收尾（`concludesTurn`），需单独调用且不产出文本 |
-| `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours`/`heartbeat_prompt`/`heartbeat_every_seconds`/`heartbeat_jitter` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
+| `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours`/`heartbeat_prompt` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
 
 唤醒回合的 framing 报文包含三条回复规则（用户需要时简短回复、冷会话且有时效走 push_notify/send_wechat、无需用户感知或静默更合适就 no_reply），并如实给出今日预算用量。`proactive_no_reply` 对**任何唤醒原因**（含用户委托 alarm）都可用——角色扮演等场景允许"不理用户更真实"的静默收尾。
 
@@ -79,10 +84,10 @@ Web GUI 的设置面板中会出现「Proactive 闹钟」页签（插件随 bund
 
 固定间隔的重复闹钟（`every_seconds`）可以带一个 `jitter`（0..1）：从**第 2 次唤醒起**，每次实际间隔按 `(1 ± jitter·uniform(0,1))` 独立缩放，连续唤醒不再是节拍器——心跳更像人，也避免多会话在整点同步扎堆。首个周期固定（创建时 `now + every_seconds`，不抖动），之后每个间隔独立。细节：
 
-- **何时生效**：`proactive_set` 显式传 `jitter`；或面板「心跳预设」按全局 `heartbeatJitter`（默认 0.1，即 ±10%）预填。未传则保持固定间隔（向后兼容）。
+- **何时生效**：`proactive_set` 或面板创建/编辑重复闹钟时显式传 `jitter`。未传则保持固定间隔（向后兼容）。
 - **语义**：基于"上次唤醒之后再过一抖动间隔"，始终严格在未来（错过不补跑、不扎堆）；抖动再大也不会低于 300 秒的间隔下限。
 - **面板展示**：重复闹钟行会显示 `±N%` 徽标；下一次触发时间如实反映抖动后的值。
-- **心跳预设默认**：`heartbeatJitter` 是全局配置（`config.json` / `proactive_update_settings` 的 `heartbeat_jitter`），只作为面板预设的预填值，不改变既有闹钟。
+- **每闹钟配置**：间隔与抖动没有全局/会话级默认偏好，每次创建或编辑重复闹钟时按闹钟单独填写（`proactive_set` 的 `every_seconds`/`jitter` 或面板表单）。
 
 ### 配置的双入口语义
 
@@ -114,7 +119,7 @@ Web GUI 的设置面板中会出现「Proactive 闹钟」页签（插件随 bund
 pnpm install
 npm run check    # tsc --noEmit
 npm run build    # tsc -p tsconfig.build.json -> lib/
-npm test         # 编译 + node:test（96 个单测）
+npm test         # 编译 + node:test
 ```
 
 ## 已知限制（v1）

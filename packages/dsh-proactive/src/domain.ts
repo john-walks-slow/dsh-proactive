@@ -10,6 +10,17 @@ export const MIN_EVERY_SECONDS = 300;
 export const MAX_PROMPT_LENGTH = 4000;
 export const MAX_NO_REPLY_REASON_LENGTH = 200;
 
+/** dsh session ids are alphanumeric plus `._-`; anything else (slashes, traversals, spaces, UTF-8) is rejected. */
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/** Fail closed on session ids that could escape storage paths or scope lookups. */
+export function isValidSessionId(sessionId: string): boolean {
+  if (sessionId === "" || sessionId.length > 200) return false;
+  // "." and ".." would resolve to the sessions root itself — never a real session.
+  if (sessionId === "." || sessionId === "..") return false;
+  return SESSION_ID_PATTERN.test(sessionId);
+}
+
 /**
  * Why a wake fires. Only two reasons exist: `alarm` (user-requested reminder,
  * exempt from quiet hours and the daily budget) and `heartbeat` (model-initiated
@@ -96,6 +107,7 @@ export interface RunRecord {
 
 export type AlarmView = {
   id: string;
+  sessionId: string;
   mode: AlarmMode;
   prompt: string;
   wakeReason: WakeReason;
@@ -384,6 +396,7 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
   const overdue = alarm.status === "scheduled" && instantEpoch(alarm.nextDueAt) <= now;
   return {
     id: alarm.id,
+    sessionId: alarm.sessionId,
     mode: alarm.mode,
     prompt: alarm.prompt,
     wakeReason: alarm.wakeReason,

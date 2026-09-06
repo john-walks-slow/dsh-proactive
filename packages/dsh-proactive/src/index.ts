@@ -56,6 +56,40 @@ function currentModelSelection(ctx: Context): { provider?: string; model?: strin
   return undefined;
 }
 
+interface SessionsLike {
+  get?: (id: string) => unknown;
+}
+
+interface SessionTitleLike {
+  get?: (session: unknown) => { title?: string } | undefined;
+}
+
+/**
+ * Resolve a session id to its display title for the panel tables. The services
+ * are probed optional (sessions + dsh-session-title), so a headless host that
+ * lacks them degrades to an empty title — the panel then shows the raw id.
+ */
+function resolveSessionTitle(ctx: Context): (sessionId: string) => string {
+  const ctxGet = (ctx as unknown as { get: (name: string, strict?: boolean) => unknown }).get;
+  const sessions = ctxGet("sessions", false) as SessionsLike | undefined;
+  const titles = ctxGet("sessionTitle", false) as SessionTitleLike | undefined;
+  const sessionsGet = sessions?.get;
+  const titlesGet = titles?.get;
+  if (sessionsGet === undefined || titlesGet === undefined) {
+    return () => "";
+  }
+  return (sessionId: string) => {
+    try {
+      const session = sessionsGet(sessionId);
+      if (session === undefined) return "";
+      const snapshot = titlesGet(session);
+      return typeof snapshot?.title === "string" ? snapshot.title : "";
+    } catch {
+      return "";
+    }
+  };
+}
+
 export async function apply(ctx: Context): Promise<() => Promise<void>> {
   ctx.logger.info("dsh-proactive: applying (trace).");
   const config = resolveConfig();
@@ -115,7 +149,8 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     scheduler,
     dataDir: config.dataDir,
     now: () => Date.now(),
-    log: (level, message) => ctx.logger[level](message)
+    log: (level, message) => ctx.logger[level](message),
+    sessionTitle: resolveSessionTitle(ctx)
   });
 
   // Optional surfaces: panel HTTP routes (needs the host webserver) and the

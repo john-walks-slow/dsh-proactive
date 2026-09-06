@@ -30,6 +30,25 @@ function alarm(id: string, overrides: Partial<Alarm> = {}): Alarm {
 
 const BASE_NOW = Date.parse("2026-09-01T09:00:00.000Z");
 
+/**
+ * Persistent store writes are fire-and-forget in these tests; a racing
+ * async persist can re-create files inside the dir while rmSync walks it,
+ * surfacing as ENOTEMPTY. Retry briefly before giving up. Async so the
+ * event loop can drain the pending persist completion between attempts.
+ */
+async function rmSyncSafe(dir: string, maxAttempts = 20): Promise<void> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch {
+      /* busy: an in-flight persist re-created a file; yield and retry */
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
 interface Outcome {
   outcome: "ok" | "busy" | "failed";
   analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string };
@@ -78,7 +97,7 @@ async function harness(opts: { quietHours?: QuietHours; maxRetriesPerFire?: numb
 
 test("due one-shot fires and completes; run record written", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   h.store.addAlarm(alarm("a1"));
   h.scheduler.start();
   await h.flush(() => h.store.getAlarm("a1")?.status === "completed");
@@ -91,7 +110,7 @@ test("due one-shot fires and completes; run record written", async (tctx) => {
 
 test("wake summaries round-trip from analysis to runs.jsonl and listRecentRuns", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   h.outcomes.push({
     outcome: "ok",
     analysis: { decision: "no_reply", budgetDelta: 0, reasoningSummary: "该提醒昨天已处理过，静默收尾。", replySummary: "" }
@@ -109,7 +128,7 @@ test("wake summaries round-trip from analysis to runs.jsonl and listRecentRuns",
 
 test("skipped runs carry no summary fields", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   // Budget exhausted → non-alarm (heartbeat) wakes are skipped via recordSkip (no analysis summaries).
   h.store.addAlarm(alarm("k1", { wakeReason: "heartbeat" }));
   h.config.maxDeliveriesPerDay = 1;
@@ -124,7 +143,7 @@ test("skipped runs carry no summary fields", async (tctx) => {
 
 test("repeat advances to the next anchor", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   const anchor = BASE_NOW - 300_000;
   h.store.addAlarm(alarm("r1", { mode: "repeat", trigger: { everySeconds: 300, anchor: new Date(anchor).toISOString() }, nextDueAt: new Date(BASE_NOW - 1).toISOString() }));
   h.scheduler.start();
@@ -137,7 +156,7 @@ test("repeat advances to the next anchor", async (tctx) => {
 test("jittered repeat advances by a randomized interval, never before now", async (tctx) => {
   // random() = 1 -> scale 1 + jitter (longer); random() = 0 -> scale 1 - jitter (shorter).
   const h = await harness({ random: () => 1 });
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   const anchor = BASE_NOW - 3600_000;
   h.store.addAlarm(alarm("j1", { mode: "repeat", trigger: { everySeconds: 3600, anchor: new Date(anchor).toISOString(), jitter: 0.1 }, nextDueAt: new Date(BASE_NOW - 1).toISOString() }));
   h.scheduler.start();
@@ -151,7 +170,7 @@ test("jittered repeat advances by a randomized interval, never before now", asyn
 
 test("busy defers and advances after maxRetriesPerFire", async (tctx) => {
   const h = await harness({ maxRetriesPerFire: 2 });
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   h.outcomes.push({ outcome: "busy" }, { outcome: "busy" });
   h.store.addAlarm(alarm("b1"));
   h.scheduler.start();
@@ -168,7 +187,7 @@ test("busy defers and advances after maxRetriesPerFire", async (tctx) => {
 
 test("visible reply outcome spends budget", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   h.outcomes.push({ outcome: "ok", analysis: { decision: "reply", budgetDelta: 1 } });
   h.store.addAlarm(alarm("v1"));
   h.scheduler.start();
@@ -178,7 +197,7 @@ test("visible reply outcome spends budget", async (tctx) => {
 
 test("quiet hours defer non-alarm wakes; user alarms are exempt", async (tctx) => {
   const h = await harness({ quietHours: { start: "00:00", end: "23:59", timeZone: "UTC" } });
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
   h.store.addAlarm(alarm("q1", { wakeReason: "heartbeat" }));
   h.store.addAlarm(alarm("q2", { wakeReason: "alarm" }));
@@ -192,7 +211,7 @@ test("quiet hours defer non-alarm wakes; user alarms are exempt", async (tctx) =
 
 test("daily budget gate skips non-alarm wakes at the cap", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   await h.store.spendBudget("2026-09-01", 3);
   h.store.addAlarm(alarm("c1", { wakeReason: "heartbeat" }));
   h.scheduler.start();
@@ -217,7 +236,7 @@ test("boot overdue policy notify-only skips instead of firing", async (tctx) => 
     now: () => clock.t,
     log: () => undefined
   });
-  tctx.after(() => { scheduler.stop(); rmSync(dir, { recursive: true, force: true }); });
+  tctx.after(async () => { scheduler.stop(); rmSyncSafe(dir); });
   store.addAlarm(alarm("n1"));
   scheduler.start();
   for (let i = 0; i < 50 && store.getAlarm("n1")?.runCount !== 1; i++) await new Promise((r) => setTimeout(r, 10));
@@ -238,7 +257,7 @@ test("arms a real timer and fires a future-due alarm", async (tctx) => {
     now: () => BASE_NOW + (Date.now() - t0),
     log: () => undefined
   });
-  tctx.after(() => { scheduler.stop(); rmSync(dir, { recursive: true, force: true }); });
+  tctx.after(async () => { scheduler.stop(); rmSyncSafe(dir); });
   store.addAlarm(alarm("t1", { nextDueAt: new Date(BASE_NOW + 150).toISOString() }));
   scheduler.start();
   // real timer fires ~150ms later; wait for the terminal state, not just the fire
@@ -264,7 +283,7 @@ test("persists in-flight while the wake runs, then completes", async (tctx) => {
     now: () => BASE_NOW,
     log: () => undefined
   });
-  tctx.after(() => { scheduler.stop(); rmSync(dir, { recursive: true, force: true }); });
+  tctx.after(async () => { scheduler.stop(); rmSyncSafe(dir); });
   store.addAlarm(alarm("w1"));
   // snapshot what a crash would leave on disk mid-wake
   const crashView: string[] = [];
@@ -295,7 +314,7 @@ test("persists in-flight while the wake runs, then completes", async (tctx) => {
 
 test("malformed repeat alarm fails closed without killing the drive loop", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   // a corrupt repeat (trigger missing) next to a healthy one-shot
   h.store.addAlarm({ ...alarm("bad1", { mode: "repeat" as const }), trigger: undefined as never });
   h.store.addAlarm(alarm("good1"));
@@ -324,7 +343,7 @@ test("a throwing runWake is contained and logged without killing later alarms", 
     now: () => BASE_NOW,
     log: () => undefined
   });
-  tctx.after(() => { scheduler.stop(); rmSync(dir, { recursive: true, force: true }); });
+  tctx.after(async () => { scheduler.stop(); rmSyncSafe(dir); });
   store.addAlarm(alarm("badX"));
   store.addAlarm(alarm("okY"));
   scheduler.start();
@@ -342,9 +361,11 @@ test("a throwing runWake is contained and logged without killing later alarms", 
 
 test("recovers in-flight alarms on boot as scheduled", async (tctx) => {
   const h = await harness();
-  tctx.after(() => { h.scheduler.stop(); rmSync(h.dir, { recursive: true, force: true }); });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   h.store.addAlarm(alarm("i1", { status: "in-flight" }));
   h.scheduler.start();
   await h.flush(() => h.store.getAlarm("i1")?.status !== "in-flight");
   assert.notEqual(h.store.getAlarm("i1")?.status, "in-flight");
 });
+
+

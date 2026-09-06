@@ -10,7 +10,7 @@
 
 import { readFileSync } from "node:fs";
 import { writeFile, rename, mkdir } from "node:fs/promises";
-import { MAX_PROMPT_LENGTH, MIN_EVERY_SECONDS, canonicalizeTimeZone, isRecord } from "./domain.js";
+import { MAX_PROMPT_LENGTH, canonicalizeTimeZone, isRecord } from "./domain.js";
 
 export interface QuietHours {
   /** "HH:MM" wall-clock in the configured time zone; start inclusive, end exclusive. */
@@ -37,12 +37,8 @@ export interface ProactiveConfig {
   maxRetriesPerFire: number;
   /** Upper bound for alarm prompts. */
   maxPromptLength: number;
-  /** Default heartbeat check-in prompt consumed by the panel preset. */
+  /** Default heartbeat check-in prompt. */
   heartbeatPrompt: string;
-  /** Default heartbeat repeat interval in seconds (panel preset; floor MIN_EVERY_SECONDS, cap 1 day). */
-  heartbeatEverySeconds: number;
-  /** Default heartbeat repeat randomness 0..1 (panel preset prefill; 0 = fixed rate). */
-  heartbeatJitter: number;
   /** Absolute directory for alarms.json / runs.jsonl / state.json / config.json. */
   dataDir: string;
 }
@@ -57,15 +53,10 @@ export const DEFAULT_CONFIG: ProactiveConfig = {
   maxRetriesPerFire: 3,
   maxPromptLength: 4000,
   heartbeatPrompt: "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。",
-  heartbeatEverySeconds: 3600,
-  heartbeatJitter: 0.1,
   dataDir: "/root/.dsh/proactive"
 };
 
 const TIME_PATTERN = /^(?<hour>[01]\d|2[0-3]):(?<minute>[0-5]\d)$/;
-
-/** Ceiling for the heartbeat interval: a ping slower than one full day is no longer a heartbeat. */
-const HEARTBEAT_MAX_SECONDS = 86400;
 
 function defaultDataDir(): string {
   if (typeof process !== "undefined" && process.env["DSH_HOME"]) return process.env["DSH_HOME"] + "/proactive";
@@ -124,13 +115,6 @@ function positiveInt(value: unknown, fallback: number, ceiling: number): number 
   return n;
 }
 
-/** Normalize a 0..1 ratio (jitter); out-of-range or non-numeric falls back. */
-function ratio01(value: unknown, fallback: number): number {
-  const n = typeof value === "number" && Number.isFinite(value) ? value : NaN;
-  if (!Number.isFinite(n) || n < 0 || n > 1) return fallback;
-  return n;
-}
-
 /** Merge defaults, file overrides, and DSH_PROACTIVE_* environment overrides. */
 export function resolveConfig(dataDir?: string): ProactiveConfig {
   const dir = dataDir ?? (process.env["DSH_PROACTIVE_DATA_DIR"] ?? defaultDataDir());
@@ -171,8 +155,6 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     heartbeatPrompt: typeof file["heartbeatPrompt"] === "string" && file["heartbeatPrompt"].trim().length > 0
       ? file["heartbeatPrompt"].trim().slice(0, MAX_PROMPT_LENGTH) // same cap as the settings schema, keeps prefill valid
       : DEFAULT_CONFIG.heartbeatPrompt,
-    heartbeatEverySeconds: Math.max(MIN_EVERY_SECONDS, positiveInt(file["heartbeatEverySeconds"], DEFAULT_CONFIG.heartbeatEverySeconds, HEARTBEAT_MAX_SECONDS)),
-    heartbeatJitter: ratio01(file["heartbeatJitter"], DEFAULT_CONFIG.heartbeatJitter),
     dataDir: dir
   };
   if (env["DSH_PROACTIVE_ENABLED"] === "0" || env["DSH_PROACTIVE_ENABLED"] === "false") config.enabled = false;

@@ -9,7 +9,7 @@
 import z from "schemastery";
 import type { Context } from "@deepseek-ai/cordis";
 import { DEFAULT_CONFIG, type ProactiveConfig, type BootOverduePolicy, type QuietHours } from "./config.js";
-import { MAX_PROMPT_LENGTH, MIN_EVERY_SECONDS, canonicalizeTimeZone, isRecord, type ToolError } from "./domain.js";
+import { MAX_PROMPT_LENGTH, canonicalizeTimeZone, isRecord, type ToolError } from "./domain.js";
 
 /** The hot-updatable configuration subset, excluding the immutable dataDir. */
 export interface HotConfig {
@@ -22,8 +22,6 @@ export interface HotConfig {
   maxRetriesPerFire: number;
   maxPromptLength: number;
   heartbeatPrompt: string;
-  heartbeatEverySeconds: number;
-  heartbeatJitter: number;
 }
 
 /**
@@ -41,9 +39,7 @@ export function hotSubset(config: ProactiveConfig): HotConfig {
     bootOverduePolicy: config.bootOverduePolicy,
     maxRetriesPerFire: config.maxRetriesPerFire,
     maxPromptLength: config.maxPromptLength,
-    heartbeatPrompt: config.heartbeatPrompt,
-    heartbeatEverySeconds: config.heartbeatEverySeconds,
-    heartbeatJitter: config.heartbeatJitter
+    heartbeatPrompt: config.heartbeatPrompt
   };
 }
 
@@ -77,7 +73,6 @@ const MAX_WAKEUPS_PER_HOUR = 60;
 const MAX_CONCURRENT_PER_SESSION = 4;
 const MAX_RETRIES_PER_FIRE = 10;
 const MAX_SET_PROMPT_LENGTH = 20000;
-const HEARTBEAT_MAX_SECONDS = 86400;
 
 /**
  * Closed validation for the proactive_update_settings tool: an open patch of
@@ -95,7 +90,7 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
   const allowed = new Set([
     "enabled", "max_deliveries_per_day", "quiet_hours",
     "max_wakeups_per_hour", "max_concurrent_per_session", "boot_overdue_policy",
-    "max_retries_per_fire", "max_prompt_length", "heartbeat_prompt", "heartbeat_every_seconds", "heartbeat_jitter"
+    "max_retries_per_fire", "max_prompt_length", "heartbeat_prompt"
   ]);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) {
@@ -177,20 +172,6 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
     }
     write("heartbeatPrompt", trimmed);
   }
-  if ("heartbeat_every_seconds" in raw) {
-    const n = raw["heartbeat_every_seconds"];
-    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < MIN_EVERY_SECONDS || n > HEARTBEAT_MAX_SECONDS) {
-      return { code: "invalid_trigger", message: "heartbeat_every_seconds must be a safe integer " + MIN_EVERY_SECONDS + ".." + HEARTBEAT_MAX_SECONDS + "." };
-    }
-    write("heartbeatEverySeconds", n);
-  }
-  if ("heartbeat_jitter" in raw) {
-    const j = raw["heartbeat_jitter"];
-    if (typeof j !== "number" || !Number.isFinite(j) || j < 0 || j > 1) {
-      return { code: "invalid_trigger", message: "heartbeat_jitter must be a number in 0..1 (0 = fixed rate)." };
-    }
-    write("heartbeatJitter", j);
-  }
   return { patch };
 }
 
@@ -210,9 +191,7 @@ export const proactiveSettingsSchema = z.object({
   bootOverduePolicy: z.union([z.const("fire"), z.const("notify-only"), z.const("drop")]).default("fire"),
   maxRetriesPerFire: z.number().min(0).max(16).default(3),
   maxPromptLength: z.number().min(100).max(100000).default(4000),
-  heartbeatPrompt: z.string().min(1).max(MAX_PROMPT_LENGTH).default(DEFAULT_CONFIG.heartbeatPrompt),
-  heartbeatEverySeconds: z.number().min(MIN_EVERY_SECONDS).max(86400).default(DEFAULT_CONFIG.heartbeatEverySeconds),
-  heartbeatJitter: z.number().min(0).max(1).default(DEFAULT_CONFIG.heartbeatJitter)
+  heartbeatPrompt: z.string().min(1).max(MAX_PROMPT_LENGTH).default(DEFAULT_CONFIG.heartbeatPrompt)
 });
 
 export interface SettingsWire {

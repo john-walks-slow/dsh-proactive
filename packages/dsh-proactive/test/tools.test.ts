@@ -235,26 +235,24 @@ test("proactive_set: prompt is optional for heartbeat, still required for alarm"
 
 test("proactive_update_settings: partial update changes only the given field", async () => {
   const h = harness();
-  const before = h.config.heartbeatEverySeconds;
+  const before = h.config.maxDeliveriesPerDay;
   const snapshot = structuredClone({
     enabled: h.config.enabled,
     maxDeliveriesPerDay: h.config.maxDeliveriesPerDay,
     quietHours: h.config.quietHours,
-    heartbeatPrompt: h.config.heartbeatPrompt,
-    heartbeatEverySeconds: h.config.heartbeatEverySeconds
+    heartbeatPrompt: h.config.heartbeatPrompt
   });
-  const out = await h.run("proactive_update_settings", { heartbeat_every_seconds: before + 600 }) as Record<string, unknown>;
-  assert.equal(out.heartbeat_every_seconds, before + 600);
+  const out = await h.run("proactive_update_settings", { max_deliveries_per_day: before + 2 }) as Record<string, unknown>;
+  assert.equal(out.max_deliveries_per_day, before + 2);
   // Only the requested field changed in the live config; every other field is
   // bit-identical to the pre-update snapshot (not trivially self-referential).
-  assert.equal(h.config.heartbeatEverySeconds, before + 600);
+  assert.equal(h.config.maxDeliveriesPerDay, before + 2);
   assert.deepEqual(h.config.enabled, snapshot.enabled);
-  assert.deepEqual(h.config.maxDeliveriesPerDay, snapshot.maxDeliveriesPerDay);
   assert.deepEqual(h.config.quietHours, snapshot.quietHours);
   assert.deepEqual(h.config.heartbeatPrompt, snapshot.heartbeatPrompt);
   // Persisted to config.json (merged over the file, other keys intact).
   const file = JSON.parse(readFileSync(join(h.dir, "config.json"), "utf8")) as Record<string, unknown>;
-  assert.equal(file["heartbeatEverySeconds"], before + 600);
+  assert.equal(file["maxDeliveriesPerDay"], before + 2);
   assert.ok(!("enabled" in file), "unrelated keys must not be persisted");
 });
 
@@ -262,11 +260,10 @@ test("proactive_update_settings: rejects unknown keys and out-of-range values", 
   const h = harness();
   assert.equal(code(await h.run("proactive_update_settings", {})), "invalid_trigger");
   assert.equal(code(await h.run("proactive_update_settings", { nope: 1 })), "invalid_trigger");
-  assert.equal(code(await h.run("proactive_update_settings", { heartbeat_every_seconds: 60 })), "invalid_trigger");
   assert.equal(code(await h.run("proactive_update_settings", { heartbeat_prompt: "   " })), "invalid_prompt");
   assert.equal(code(await h.run("proactive_update_settings", { quiet_hours: { start: "25:00", end: "07:00", time_zone: "UTC" } })), "invalid_trigger");
   // Nothing was applied or persisted.
-  assert.equal(h.config.heartbeatEverySeconds, h.services.config.heartbeatEverySeconds);
+  assert.equal(h.config.heartbeatPrompt, h.services.config.heartbeatPrompt);
   let exists = true;
   try { readFileSync(join(h.dir, "config.json"), "utf8"); } catch { exists = false; }
   assert.equal(exists, false);

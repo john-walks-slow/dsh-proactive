@@ -79,29 +79,10 @@ test("heartbeat defaults resolve and the interval clamps to the floor", () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-hb-"));
   try {
     const cfg = resolveConfig(dir);
-    assert.equal(cfg.heartbeatEverySeconds, DEFAULT_CONFIG.heartbeatEverySeconds);
-    assert.equal(cfg.heartbeatJitter, DEFAULT_CONFIG.heartbeatJitter);
     assert.ok(cfg.heartbeatPrompt.includes("heartbeat reminder"));
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatPrompt: "ping", heartbeatEverySeconds: 120 }));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatPrompt: "ping" }));
     const over = resolveConfig(dir);
     assert.equal(over.heartbeatPrompt, "ping");
-    assert.equal(over.heartbeatEverySeconds, 300); // clamped to MIN_EVERY_SECONDS
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("heartbeatJitter is clamped to [0,1] and falls back on garbage", () => {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-hb-j-"));
-  try {
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatJitter: 0.3 }));
-    assert.equal(resolveConfig(dir).heartbeatJitter, 0.3);
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatJitter: 1.5 }));
-    assert.equal(resolveConfig(dir).heartbeatJitter, DEFAULT_CONFIG.heartbeatJitter);
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatJitter: -0.2 }));
-    assert.equal(resolveConfig(dir).heartbeatJitter, DEFAULT_CONFIG.heartbeatJitter);
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatJitter: "0.4" }));
-    assert.equal(resolveConfig(dir).heartbeatJitter, DEFAULT_CONFIG.heartbeatJitter);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
