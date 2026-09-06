@@ -121,7 +121,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   }, [snapshot]);
 
   return (
-    <div className="dshp-panel" data-testid="proactive-session-panel">
+    <div className="dshp-panel dshp-panel-session" data-testid="proactive-session-panel">
       <div className="dshp-head">
         <div>
           <h2 className="dshp-title">{copy.sessionTitle}</h2>

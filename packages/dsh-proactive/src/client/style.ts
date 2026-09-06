@@ -56,6 +56,15 @@ const STYLESHEET = String.raw`
   gap: var(--dshp-gap);
 }
 
+/* ---------- conversation.view tab container ---------- */
+/* The settings section's host container already pads itself (24px sides), but
+   the conversation.view host area (.wSkVaW_viewArea) has zero padding — without
+   this the tab content sits flush against the view edges. Scoped to the session
+   panel only so the settings page never double-pads. */
+.dshp-panel.dshp-panel-session {
+  padding: 16px 16px 28px;
+}
+
 /* ---------- header ---------- */
 .dshp-panel .dshp-head {
   display: flex;
