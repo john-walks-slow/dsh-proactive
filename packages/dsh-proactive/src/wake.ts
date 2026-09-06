@@ -2,7 +2,12 @@
  * Wake driver: the agent-world mechanics behind one alarm fire.
  *
  *   live session  -> reuse the live agent handle (follow-up queued politely)
- *   cold session  -> ctx.agents.resume() on the same session id, then follow-up
+ *   cold session  -> ctx.agents.resume() on the same session id, then follow-up.
+ *                    The resumed agent gets a model-selection installed on its
+ *                    scope (mirroring the web host's selectionFor), so its
+ *                    first buildRequest resolves provider/model even when
+ *                    AgentOptions are empty: the session's own committed
+ *                    request header wins, agentDefaultModel is the fallback.
  *   busy agent    -> runMaintenance throws; caller retries after a short delay
  *   deep silence  -> the framing + proactive_no_reply contract; the observer
  *                    derives the decision from the committed session log
@@ -11,7 +16,10 @@
  * is a process-local runtime; the persisted session itself stays intact).
  */
 
-import type { Agent, AgentOptions } from "@deepseek-ai/dsh-agent";
+import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
+import { installModelSelection } from "@deepseek-ai/dsh-agent";
+import type { Context } from "@deepseek-ai/cordis";
+import type { EpochHeader } from "@deepseek-ai/dsh-session";
 import type { Alarm, RunDecision } from "./domain.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveConfig } from "./config.js";
@@ -36,7 +44,19 @@ export type WakeFireResult =
 /** Narrow facade over the pieces of AgentRegistry / agents we actually use. */
 export interface AgentsFacade {
   get(sessionId: string): Agent | undefined;
-  resume(options: { resumeSessionId: string; agentOptions?: AgentOptions }): Promise<AgentHandleLike>;
+  resume(options: ResumeFacadeOptions): Promise<AgentHandleLike>;
+}
+
+/**
+ * Resume-time composition hook, handed the resumed agent's scoped context.
+ * Mirrors dsh-agent's own setup contract ({@link https://github.com/DeepSeek/DSH dsh-agent runtime-types}.
+ */
+export type WakeResumeSetup = (agentCtx: Context) => Promise<{ commit(): void } | void> | { commit(): void } | void;
+
+export interface ResumeFacadeOptions {
+  resumeSessionId: string;
+  agentOptions?: AgentOptions;
+  setup?: WakeResumeSetup;
 }
 
 /** The handle surface we consume (dsh-agent AgentHandle). */
@@ -68,6 +88,17 @@ export class WakeDriver {
     return this.inflight.has(sessionId);
   }
 
+  /**
+   * Model selection for a resumed agent: the session's own committed request
+   * header wins (the same model the live session last used), agentDefaultModel
+   * is the fallback for sessions without any header. Installed on the agent's
+   * scope so the first buildRequest resolves provider/model even when
+   * AgentOptions are empty — the web host's exact pattern (selectionFor).
+   */
+  private createWakeSelection(agent: Agent): ModelSelectionRef {
+    return createWakeSelectionRef(agent.session.requestHeader(), this.deps.modelSelection, this.deps.log);
+  }
+
   async fire(alarm: Alarm): Promise<WakeFireResult> {
     if (this.inflight.has(alarm.sessionId)) {
       return { outcome: "busy" };
@@ -83,7 +114,15 @@ export class WakeDriver {
           model !== undefined && (model.provider !== undefined || model.model !== undefined)
             ? (model.provider !== undefined ? { provider: model.provider, ...(model.model !== undefined ? { model: model.model } : {}) } : model.model !== undefined ? { model: model.model } : {})
             : undefined;
-        ownedHandle = await this.deps.agents.resume({ resumeSessionId: alarm.sessionId, agentOptions });
+        ownedHandle = await this.deps.agents.resume({
+          resumeSessionId: alarm.sessionId,
+          agentOptions,
+          setup: (agentCtx) => {
+            const agent = (agentCtx as unknown as { agent: Agent }).agent;
+            if (agent === undefined) return;
+            installModelSelection(agentCtx, this.createWakeSelection(agent));
+          }
+        });
         agent = ownedHandle.agent;
         presence = "cold";
       }
@@ -140,5 +179,55 @@ export class WakeDriver {
       }
     }
   }
+}
+
+/**
+ * Provider/model for a wake turn from the session's last committed request
+ * header, when one exists. Pure so the fallback chain is unit-testable.
+ */
+export function selectionFromHeader(header: EpochHeader | undefined): ModelSelection | undefined {
+  if (header === undefined) return undefined;
+  if (header.config.provider === undefined || header.config.model === undefined) return undefined;
+  return {
+    provider: header.config.provider,
+    model: header.config.model,
+    ...(header.config.reasoningEffort === undefined ? {} : { reasoningEffort: header.config.reasoningEffort })
+  };
+}
+
+/**
+ * Mutable model selection for a resumed agent's wake turn: the session's own
+ * committed request header wins, then {@link fallback} (agentDefaultModel).
+ * A missing or incomplete fallback is surfaced as a warn instead of silently
+ * emptying the selection; `current` is undefined only when nothing at all
+ * resolves, so the request waterfall has nowhere to draw provider/model from.
+ */
+export function createWakeSelectionRef(
+  header: EpochHeader | undefined,
+  fallback: () => { provider?: string; model?: string } | undefined,
+  log: WakeDriverDeps["log"]
+): ModelSelectionRef {
+  let picked: ModelSelection | undefined;
+  return {
+    get current(): ModelSelection | undefined {
+      if (picked !== undefined) return picked;
+      const fromHeader = selectionFromHeader(header);
+      if (fromHeader !== undefined) return fromHeader;
+      const maybe = fallback();
+      if (maybe === undefined || (maybe.provider === undefined && maybe.model === undefined)) {
+        log("warn", "wake resume: no committed request header and agentDefaultModel selection unavailable; provider/model left to the request waterfall");
+        return undefined;
+      }
+      if (maybe.provider === undefined || maybe.model === undefined) {
+        log("warn", "wake resume: agentDefaultModel selection incomplete: " + JSON.stringify(maybe));
+        return undefined;
+      }
+      return { provider: maybe.provider, model: maybe.model };
+    },
+    set current(next: ModelSelection | undefined) {
+      picked = next;
+    },
+    assembled: void 0
+  };
 }
 

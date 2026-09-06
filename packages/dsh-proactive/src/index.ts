@@ -35,19 +35,23 @@ interface ModelSelectionLike {
 }
 
 function currentModelSelection(ctx: Context): { provider?: string; model?: string } | undefined {
+  const service = (ctx as unknown as Record<string, unknown>)["agentDefaultModel"];
+  if (service === undefined || typeof (service as { currentSelection?: unknown })["currentSelection"] !== "function") {
+    ctx.logger.warn(
+      "dsh-proactive: ctx.agentDefaultModel is not resolvable from this scope (service " + (service === undefined ? "missing" : "has no currentSelection") + "); cold wakes will rely on the session request header fallback"
+    );
+    return undefined;
+  }
   try {
-    const service = (ctx as unknown as Record<string, unknown>)["agentDefaultModel"];
-    if (service !== undefined && typeof (service as { currentSelection?: unknown })["currentSelection"] === "function") {
-      const selection = (service as { currentSelection: () => ModelSelectionLike })["currentSelection"]();
-      if (selection !== undefined && selection !== null) {
-        return {
-          ...(typeof selection["provider"] === "string" ? { provider: selection["provider"] } : {}),
-          ...(typeof selection["model"] === "string" ? { model: selection["model"] } : {})
-        };
-      }
+    const selection = (service as { currentSelection: () => ModelSelectionLike })["currentSelection"]();
+    if (selection !== undefined && selection !== null) {
+      return {
+        ...(typeof selection["provider"] === "string" ? { provider: selection["provider"] } : {}),
+        ...(typeof selection["model"] === "string" ? { model: selection["model"] } : {})
+      };
     }
-  } catch {
-    /* default model service is optional */
+  } catch (error) {
+    ctx.logger.warn("dsh-proactive: agentDefaultModel.currentSelection() failed: " + String(error && (error as Error).message || error));
   }
   return undefined;
 }
