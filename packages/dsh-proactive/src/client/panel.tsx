@@ -55,7 +55,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
 
   const reload = useCallback(async () => {
     try {
-      const next = await transport.state();
+      const next = await transport.stateEnriched();
       setSnapshot(next);
       setError(null);
     } catch (reason) {
@@ -76,7 +76,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     setBusy(true);
     setError(null);
     try {
-      setSnapshot(await transport.action(action));
+      setSnapshot(await transport.actionEnriched(action));
       setShowForm(false);
       setEditingId(null);
       setForm({ prompt: "", afterSeconds: 3600 });

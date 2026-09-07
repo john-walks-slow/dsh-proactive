@@ -23,8 +23,8 @@ export interface PanelServiceDeps {
   dataDir: string;
   now: () => number;
   log: (level: "info" | "warn" | "error", message: string) => void;
-  /** Resolve a session id to a display title (empty = unknown). May be async. */
-  sessionTitle: (sessionId: string) => string | Promise<string>;
+  /** Resolve a session id to a display title (empty = unknown). */
+  sessionTitle: (sessionId: string) => string;
 }
 
 export class ProactivePanelService {
@@ -45,20 +45,18 @@ export class ProactivePanelService {
     const rows: RunView[] = sessionId === undefined
       ? allRuns
       : allRuns.filter((run) => run.sessionId === sessionId);
-    const alarms: AlarmRowView[] = await Promise.all(
-      this.deps.store.listAlarms()
-        .filter((alarm) => sessionId === undefined || alarm.sessionId === sessionId)
-        .map(async (alarm) => {
-          const view = toAlarmView(alarm, now);
-          return {
-            ...view,
-            sessionTitle: await this.deps.sessionTitle(alarm.sessionId),
-            createdAt: alarm.createdAt,
-            ...(alarm.mode === "repeat" && "everySeconds" in alarm.trigger ? { everySeconds: alarm.trigger.everySeconds as number } : {}),
-            ...(alarm.mode === "one-shot" && "at" in alarm.trigger ? { at: alarm.trigger.at as string } : {})
-          };
-        })
-    );
+    const alarms: AlarmRowView[] = this.deps.store.listAlarms()
+      .filter((alarm) => sessionId === undefined || alarm.sessionId === sessionId)
+      .map((alarm) => {
+        const view = toAlarmView(alarm, now);
+        return {
+          ...view,
+          sessionTitle: this.deps.sessionTitle(alarm.sessionId),
+          createdAt: alarm.createdAt,
+          ...(alarm.mode === "repeat" && "everySeconds" in alarm.trigger ? { everySeconds: alarm.trigger.everySeconds as number } : {}),
+          ...(alarm.mode === "one-shot" && "at" in alarm.trigger ? { at: alarm.trigger.at as string } : {})
+        };
+      });
     return {
       server: { now: new Date(now).toISOString(), dataDir: this.deps.dataDir, corrupt: this.deps.store.corrupt },
       config: {

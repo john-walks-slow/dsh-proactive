@@ -56,71 +56,15 @@ function currentModelSelection(ctx: Context): { provider?: string; model?: strin
   return undefined;
 }
 
-interface SessionsLike {
-  get?: (id: string) => unknown;
-}
-
-interface SessionTitleLike {
-  get?: (session: unknown) => { title?: string } | undefined;
-}
-
-interface SessionQueryLike {
-  readTitle?: (sessionId: string) => Promise<{ title?: string } | undefined>;
-}
-
 /**
- * Resolve a session id to its display title for the panel tables. Two sources,
- * in preference order:
- *
- * 1. `sessionQuery.readTitle(sessionId)` — the log-backed title fold that the
- *    host surfaces in session lists. It works for cold (persisted-not-attached)
- *    sessions too, which the in-memory `sessions` store cannot see.
- * 2. `sessions.get(sessionId)` + `sessionTitle.get(session)` — the live
- *    in-memory fold, for hosts that mount the title service but no query
- *    engine.
- *
- * Both are probed optional, so a headless host that lacks them degrades to an
- * empty title — the panel then shows the raw id.
+ * Session display titles are a client-side concern: the GUI panels enrich
+ * alarm rows from the host `session.list` projections (the exact same source
+ * the sidebar uses), so the host-side surface stays dependency-free. This
+ * resolver always yields an empty title; the panel falls back to the raw
+ * session id when no title arrived (e.g. headless hosts).
  */
-export function resolveSessionTitle(ctx: Context): (sessionId: string) => Promise<string> {
-  const ctxGet = (ctx as unknown as { get: (name: string, strict?: boolean) => unknown }).get;
-  const sessions = ctxGet("sessions", false) as SessionsLike | undefined;
-  const titles = ctxGet("sessionTitle", false) as SessionTitleLike | undefined;
-  const query = ctxGet("sessionQuery", false) as SessionQueryLike | undefined;
-  const sessionsGet = sessions?.get;
-  const titlesGet = titles?.get;
-  const queryRead = query?.readTitle;
-  const titleFromSession = (session: unknown): string => {
-    if (titlesGet === undefined) return "";
-    try {
-      const snapshot = titlesGet(session);
-      return typeof snapshot?.title === "string" ? snapshot.title : "";
-    } catch {
-      return "";
-    }
-  };
-  if (queryRead !== undefined) {
-    return async (sessionId: string) => {
-      try {
-        const snapshot = await queryRead(sessionId);
-        return typeof snapshot?.title === "string" ? snapshot.title : "";
-      } catch {
-        return "";
-      }
-    };
-  }
-  if (sessionsGet === undefined || titlesGet === undefined) {
-    return async () => "";
-  }
-  return async (sessionId: string) => {
-    try {
-      const session = sessionsGet(sessionId);
-      if (session === undefined) return "";
-      return titleFromSession(session);
-    } catch {
-      return "";
-    }
-  };
+function resolveSessionTitle(_ctx: unknown): (sessionId: string) => string {
+  return () => "";
 }
 
 export async function apply(ctx: Context): Promise<() => Promise<void>> {

@@ -36,7 +36,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   const reload = useCallback(async () => {
     const requested = sessionRef.current;
     try {
-      const next = await transport.state(requested);
+      const next = await transport.stateEnriched(requested);
       if (sessionRef.current !== requested) return; // stale: a newer session is now active
       setSnapshot(next);
       setError(null);
@@ -62,7 +62,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
     setBusy(true);
     setError(null);
     try {
-      const next = await transport.action(action, requested);
+      const next = await transport.actionEnriched(action, requested);
       if (sessionRef.current !== requested) return; // stale action response from a previous session
       setSnapshot(next);
       setShowForm(false);
