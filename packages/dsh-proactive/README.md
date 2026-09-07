@@ -2,10 +2,11 @@
 
 让 DeepSeek Harness 的模型**主动跟进**：给自己定 host 级闹钟，即使会话已冷却也会按时被唤醒；唤醒回合可以选择 `proactive_no_reply` 静默收尾——用户完全无感知。
 
-两个典型场景：
+闹钟模型（v2）：
 
-1. **模型主动跟进**（`wake_reason: heartbeat`）：习惯教练式每日跟进、陪伴类的主动聊天、周期复查等都由模型自主发起，低频、受预算与安静时段约束；间隔/抖动等参数在创建时每个闹钟单独配置，无需全局预填。（v1 曾用 check_in/interval/companion 三种名称，行为完全一致，已合并统一为 heartbeat；旧存储值仍兼容。）
-2. **用户委托闹钟**（`wake_reason: alarm`）：用户说"1 小时后提醒我"，模型用 `proactive_set` 给自己订闹钟，到点把用户唤醒；安静时段内用户委托提醒依然放行，预算耗尽也不跳过。
+- **三种类型**：`once`（单次）/ `every`（循环间隔）/ `cron`（五字段表达式），三类型统一支持 `jitter_seconds` 随机延迟。
+- **一个开关**：`respect_quiet_hours`——`false`（默认）表示用户委托提醒：安静时段照常触发、不占日预算；`true` 表示模型自主跟进：遵从安静时段与日预算。
+- **三个目标会话**：`resume`（既有会话，默认）/ `fork`（从源会话 fork 出新会话）/ `new`（新建空会话）。
 
 ## 与 dsh-schedule 的区别
 
@@ -39,12 +40,11 @@ dsh plugin --profile web add file:/root/projects/dsh-proactive/packages/dsh-proa
   "maxConcurrentPerSession": 1,                // 每会话并发在途唤醒数
   "bootOverduePolicy": "fire",                 // fire | notify-only | drop
   "maxRetriesPerFire": 3,                      // 单次唤醒的 busy/failed 重试上限
-  "maxPromptLength": 4000,
-  "heartbeatPrompt": "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。"
+  "maxPromptLength": 4000
 }
 ```
 
-环境变量覆盖：`DSH_PROACTIVE_ENABLED`、`DSH_PROACTIVE_MAX_DELIVERIES_PER_DAY`、`DSH_PROACTIVE_DATA_DIR`、`DSH_PROACTIVE_TIME_ZONE`。
+环境变量覆盖：`DSH_PROACTIVE_ENABLED`、`DSH_PROACTIVE_MAX_DELIVERIES_PER_DAY`、`DSH_PROACTIVE_DATA_DIR`。
 
 ## GUI 管理面板（v4）
 
@@ -52,15 +52,15 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 
 **对话页「主动唤醒」tab（会话视角）**——每个会话的对话页头部与 Chat/轨迹 并列出现「主动唤醒」页签：
 
-- **会话闹钟**：只显示**当前会话**的闹钟（状态/模式/下次触发/唤醒原因），可新建、暂停/恢复、立即触发、编辑、取消；会话内的操作带归属校验，不能越权管理其他会话的闹钟。
-- **每闹钟历史**：每个闹钟行可展开查看自己的唤醒记录（决策/预算增量/思考与回复摘要）。
+- **会话闹钟**：只显示**当前会话**的闹钟（类型/目标/状态/下次触发），可新建、暂停/恢复、立即触发、编辑、取消；会话内的操作带归属校验，不能越权管理其他会话的闹钟。
+- **每闹钟历史**：每个闹钟行可展开查看自己的唤醒记录（决策/预算增量/思考与回复摘要）；fork/new 子会话的唤醒也归入 owner 历史。
 - 激活的 tab 由框架记忆（切走再回仍是「主动唤醒」）。
 
 **设置页「主动唤醒」节（全局视角）**：
 
-- **全局配置**：启用开关、每日预算、安静时段（起止与时区）、心跳唤醒默认指令，均可直接编辑保存（`update_config` 动作持久化 `config.json` 并热应用，与工具同一套校验）。
-- **单一闹钟表格**：列出**所有会话**的闹钟，可**筛选**（状态/模式/会话）与**排序**（下次触发/创建时间/指令），可暂停/恢复、立即触发、**编辑**（改指令/间隔/抖动/唤醒原因，保留 id 与历史）、删除；每个闹钟行可展开查看自己的唤醒历史。所属会话列显示**会话标题**（能解析时），标题旁的复制图标一键复制会话 id。
-- **新建闹钟带目标会话**：新建表单显示「目标会话」选择器（取自现有闹钟归属 + 全局），不再产生无归属孤儿闹钟。
+- **全局配置**：启用开关、每日预算、安静时段（起止与时区），均可直接编辑保存（`update_config` 动作持久化 `config.json` 并热应用，与工具同一套校验）。
+- **单一闹钟表格**：列出**所有会话**的闹钟，可**筛选**（状态/类型/会话）与**排序**（下次触发/创建时间/指令），可暂停/恢复、立即触发、**编辑**（改指令/类型参数/jitter/目标/免打扰开关，保留 id 与历史）、删除；每个闹钟行可展开查看自己的唤醒历史。所属会话列显示**会话标题**（能解析时），标题旁的复制图标一键复制会话 id。
+- **新建闹钟带目标会话**：新建表单选择「归属会话」以及目标模式（resume/fork 时选源会话 / new 新建空会话）；不再产生无归属孤儿闹钟。
 - **实时刷新**：两个面板都订阅 SSE 推送（`/api/dsh-proactive/events`），任一来源的变更（模型工具、面板、调度器）都会自动刷新；另提供 `/api/dsh-proactive/state`（快照，可带 `?session=`）与 `/api/dsh-proactive/action`（命令）。
 - 无 webserver 的环境（headless profile）自动跳过面板路由，模型工具不受影响。
 
@@ -68,26 +68,20 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 
 | 工具 | 作用 |
 |---|---|
-| `proactive_set` | 建闹钟：`prompt` + 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(>=300)；可选 `time_zone`、`wake_reason`；`every_seconds` 可选 `jitter`(0..1) 让每次间隔随机抖动。`prompt` 对 `wake_reason=heartbeat` 可选（省略即用默认心跳提示词，见下） |
-| `proactive_list` | 列出本会话活跃闹钟 |
+| `proactive_set` | 建闹钟：`prompt`（必填）+ 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(>=300) / `cron`(五字段，相邻触发 >=300s)；可选 `jitter_seconds`(0..86400，三类型通用)、`time_zone`（缺省 = 会话浏览器时区 → 宿主时区）、`respect_quiet_hours`(默认 false)、`target_mode`(resume/fork/new) + `target_session_id` |
+| `proactive_list` | 列出本会话的活跃闹钟（含类型/目标/下次触发/状态） |
 | `proactive_cancel` | 按 id 取消 |
-| `proactive_no_reply` | **唤醒回合专用**：静默收尾（`concludesTurn`），需单独调用且不产出文本 |
-| `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours`/`heartbeat_prompt` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
+| `proactive_no_reply` | **唤醒回合专用**：静默收尾（`concludesTurn`），需单独调用且不产出文本；每次唤醒均可用 |
+| `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
 
-唤醒回合的 framing 报文包含两条回复规则（需要时简短回复、无需用户感知或静默更合适就 no_reply），并如实给出今日预算用量。`proactive_no_reply` 对**任何唤醒原因**（含用户委托 alarm）都可用——角色扮演等场景允许"不理用户更真实"的静默收尾。
+唤醒回合的 framing 报文说明唤醒类型、`respect_quiet_hours`、今日预算用量，并给出两条回复规则（需要时简短回复、无需用户感知或静默更合适就 no_reply）。
 
-### heartbeat 提示词的默认前置
+### 随机延迟（jitter_seconds）
 
-`wake_reason=heartbeat` 的唤醒指令**始终**以配置的默认心跳提示词（`heartbeatPrompt`，设置面板可改）开头——那是经过调校的通用措辞，效果最好；`proactive_set` 的 `prompt` 只提供**额外方向**，在默认提示词之后追加（空或省略则只有默认提示词）。`proactive_update_settings` 的 `heartbeat_prompt` 可随时调整该默认值。
+三种类型的闹钟都可带一个 `jitter_seconds`（0..86400，`every` 要求 ≤ 间隔）：每次计划触发时刻后追加 `uniform(0, jitter_seconds)` 秒的随机延迟，创建/恢复时抽取并**烘焙进 nextDueAt**——调度循环本身从不等待。效果类似 systemd 的 `RandomizedDelaySec`，避免多闹钟整点同步扎堆，也更像人的节奏。
 
-### 重复间隔的随机抖动（jitter）
-
-固定间隔的重复闹钟（`every_seconds`）可以带一个 `jitter`（0..1）：从**第 2 次唤醒起**，每次实际间隔按 `(1 ± jitter·uniform(0,1))` 独立缩放，连续唤醒不再是节拍器——心跳更像人，也避免多会话在整点同步扎堆。首个周期固定（创建时 `now + every_seconds`，不抖动），之后每个间隔独立。细节：
-
-- **何时生效**：`proactive_set` 或面板创建/编辑重复闹钟时显式传 `jitter`。未传则保持固定间隔（向后兼容）。
-- **语义**：基于"上次唤醒之后再过一抖动间隔"，始终严格在未来（错过不补跑、不扎堆）；抖动再大也不会低于 300 秒的间隔下限。
-- **面板展示**：重复闹钟行会显示 `±N%` 徽标；下一次触发时间如实反映抖动后的值。
-- **每闹钟配置**：间隔与抖动没有全局/会话级默认偏好，每次创建或编辑重复闹钟时按闹钟单独填写（`proactive_set` 的 `every_seconds`/`jitter` 或面板表单）。
+- **面板展示**：带 jitter 的闹钟行显示 `±Ns` 徽标；下次触发时间如实反映延迟后的值。
+- **每闹钟配置**：`proactive_set` 的 `jitter_seconds` 或面板表单，按闹钟单独填写。
 
 ### 配置的双入口语义
 
@@ -102,9 +96,9 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 
 ## 预算与安静时段
 
-- **预算**：唤醒回合写了可见聊天文本 1 单位/次，按 UTC 日累计，上限 `maxDeliveriesPerDay`；`no_reply` 免费不计。预算用尽后，主动型唤醒（heartbeat）不再触发；用户委托的 alarm 仍会触发（用户显式要求优先，允许轻微超限）。
-- **安静时段**：非 alarm 唤醒在安静时段内延迟（每 5 分钟重评估），结束时若有遗漏自动补一次；alarm 不受限。
-- **失败处理**：busy/failed 递增重试，超过 `maxRetriesPerFire` 后按一次 skipped 记账并推进；重复闹钟错过的时间片不补跑，只推进到下一个锚点（对齐创建时刻）。
+- **预算**：唤醒回合写了可见聊天文本 1 单位/次，按 UTC 日累计，上限 `maxDeliveriesPerDay`；`no_reply` 免费不计。预算用尽后，`respect_quiet_hours=true` 的自主跟进闹钟提前跳过（记一次 skip 并推进到下一个计划点）；`false` 的用户委托闹钟照常触发（用户显式要求优先，允许轻微超限）。
+- **安静时段**：`respect_quiet_hours=true` 的闹钟在安静时段内延迟（每 5 分钟重评估一次）；`false` 的闹钟不受限，照常触发。
+- **失败处理**：busy/failed 递增重试，超过 `maxRetriesPerFire` 后按一次 skipped 记账并推进；重复/循环闹钟错过的时间片不补跑，只推进到下一个计划点；cron 对齐 `alarm.timeZone`（缺省 = 会话浏览器时区 → 宿主时区）。
 
 ## 数据文件（$DSH_HOME/proactive/）
 
@@ -122,8 +116,8 @@ npm run build    # tsc -p tsconfig.build.json -> lib/
 npm test         # 编译 + node:test
 ```
 
-## 已知限制（v1）
+## 已知限制
 
 - 唤醒后进程内 handle 会 dispose；若服务在唤醒途中重启，在途闹钟标记为 in-flight，重启后按 boot 策略重试/推进。
-- 每个会话同一时刻最多一个在途唤醒；模型端需遵守 framing 规则按需告知用户。
+- fork/new 目标在 host 缺少会话持久化（headless profile）时降级为 failed 并如实记录，不会假装成功。
 - 安静时段/预算的判定基于 UTC 日 + 配置时区，不随用户时区自动迁移（重启后读取最新配置）。

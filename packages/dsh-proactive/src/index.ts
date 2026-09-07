@@ -19,7 +19,7 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import { resolveConfig } from "./config.js";
 import { ProactiveStore } from "./store.js";
 import { ProactiveScheduler } from "./scheduler.js";
-import { WakeDriver } from "./wake.js";
+import { WakeDriver, type WakeDriverDeps } from "./wake.js";
 import { registerProactiveTools } from "./tools.js";
 import { ProactivePanelService } from "./panel/service.js";
 import { installPanelRoutes } from "./panel/routes.js";
@@ -67,6 +67,12 @@ function resolveSessionTitle(_ctx: unknown): (sessionId: string) => string {
   return () => "";
 }
 
+/** Session-owned events from the live in-memory store (cordis augmentation not typed here). */
+function sessionEventsOf(ctx: unknown): (sessionId: string) => readonly unknown[] | undefined {
+  const sessions = (ctx as { sessions?: { get?: (id: string) => { events?: readonly unknown[] } | undefined } }).sessions;
+  return (sessionId) => sessions?.get?.(sessionId)?.events;
+}
+
 export async function apply(ctx: Context): Promise<() => Promise<void>> {
   ctx.logger.info("dsh-proactive: applying (trace).");
   const config = resolveConfig();
@@ -84,6 +90,11 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
 
   const driver = new WakeDriver({
     agents: ctx.agents,
+    // Cold-parent fork seed reads go through the same persistence service the
+    // web host uses; degraded to a logged failed wake when absent (headless).
+    // Access is defensive: the cordis augmentation for sessionPersistence only
+    // exists when dsh-session-persistence types are loaded into the profile.
+    sessionPersistence: (ctx as unknown as Record<string, unknown>)["sessionPersistence"] as WakeDriverDeps["sessionPersistence"] | undefined,
     modelSelection: () => currentModelSelection(ctx),
     store,
     config,
@@ -127,7 +138,8 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     dataDir: config.dataDir,
     now: () => Date.now(),
     log: (level, message) => ctx.logger[level](message),
-    sessionTitle: resolveSessionTitle(ctx)
+    sessionTitle: resolveSessionTitle(ctx),
+    sessionEvents: sessionEventsOf(ctx)
   });
 
   // Optional surfaces: panel HTTP routes (needs the host webserver) and the

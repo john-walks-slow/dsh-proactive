@@ -1,14 +1,26 @@
 /**
- * dsh-proactive durable domain: alarm records, run records, validation, and closed error codes.
+ * dsh-proactive durable domain (v2): alarm records, run records, validation, and closed error codes.
  * Local-time resolution ports the DST-correct algorithm from @deepseek-ai/dsh-schedule
  * (MIT): overlaps choose the earlier instant, gaps are rejected, and the zone is
  * never imported from the process or browser.
+ *
+ * v2 model (260907-proactive-alarm-v2):
+ *   - wake_reason (heartbeat|alarm) is gone; every alarm carries its own
+ *     `respectQuietHours` switch (true = deferred inside quiet hours and gated
+ *     by the daily budget; false = user-requested, exempt from both).
+ *   - alarm `type`: "once" | "every" | "cron"; all three support a unified
+ *     `jitterSeconds` random delay drawn after each scheduled instant.
+ *   - the wake destination is decoupled from the creator: `ownerSessionId`
+ *     (tools/panel ownership) vs `target` (resume existing / fork from an
+ *     existing session / create a new session).
  */
 
 export const PROACTIVE_PLUGIN = "dsh-proactive";
 export const MIN_EVERY_SECONDS = 300;
 export const MAX_PROMPT_LENGTH = 4000;
 export const MAX_NO_REPLY_REASON_LENGTH = 200;
+/** Upper bound for the per-occurrence random delay (24h). */
+export const MAX_JITTER_SECONDS = 86400;
 
 /** dsh session ids are alphanumeric plus `._-`; anything else (slashes, traversals, spaces, UTF-8) is rejected. */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -21,21 +33,98 @@ export function isValidSessionId(sessionId: string): boolean {
   return SESSION_ID_PATTERN.test(sessionId);
 }
 
-/**
- * Why a wake fires. Only two reasons exist: `alarm` (user-requested reminder,
- * exempt from quiet hours and the daily budget) and `heartbeat` (model-initiated
- * periodic check-in, gated by quiet hours + budget). Earlier builds used
- * `check_in`, `interval`, and `companion`; every model-initiated value behaved
- * identically, so they were merged into `heartbeat`. Stored alarms may still
- * carry those legacy values — framing and views keep them readable instead of
- * breaking ("check_in" is treated as the same gate class, i.e. non-alarm).
- */
-export type WakeReason = "heartbeat" | "alarm";
-export type AlarmMode = "one-shot" | "repeat";
+export type AlarmType = "once" | "every" | "cron";
+export type TargetMode = "resume" | "fork" | "new";
 export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
 export type RunDecision = "no_reply" | "reply" | "skipped" | "failed";
 
-export const WAKE_REASONS: readonly WakeReason[] = ["heartbeat", "alarm"];
+/** Where the wake should land. `resume`/`fork` name an existing session; `new` creates one. */
+export type AlarmTarget =
+  | { mode: "resume"; sessionId: string }
+  | { mode: "fork"; sessionId: string }
+  | { mode: "new" };
+
+export interface OnceTrigger {
+  /** Canonical RFC 3339 UTC instant. */
+  at: string;
+}
+
+export interface EveryTrigger {
+  everySeconds: number;
+  /** Grid anchor: occurrences stay aligned to this instant (misses are skipped, never re-fired). */
+  anchor: string;
+  /** Optional per-occurrence random delay in seconds; absent/0 = exact grid. */
+  jitterSeconds?: number;
+}
+
+export interface CronTrigger {
+  /** Five-field numeric cron expression (minute hour dom month dow). */
+  expr: string;
+  /** Optional per-occurrence random delay in seconds; absent/0 = exact cron moments. */
+  jitterSeconds?: number;
+}
+
+export type AlarmTrigger = OnceTrigger | EveryTrigger | CronTrigger;
+
+export interface Alarm {
+  id: string;
+  /** Creator session; scopes proactive_list/cancel and the panel ownership guard. */
+  ownerSessionId: string;
+  /** Wake destination, decoupled from the creator. */
+  target: AlarmTarget;
+  type: AlarmType;
+  trigger: AlarmTrigger;
+  prompt: string;
+  /** true = defer inside quiet hours and gate by the daily budget; false = user-requested, exempt from both. */
+  respectQuietHours: boolean;
+  /** IANA zone for cron/every alignment and quiet-hours display; "UTC" default. */
+  timeZone: string;
+  status: AlarmStatus;
+  nextDueAt: string;
+  createdAt: string;
+  updatedAt: string;
+  runCount: number;
+  lastRunAt: string | null;
+}
+
+export interface RunRecord {
+  id: string;
+  alarmId: string;
+  /** The session the wake actually ran in (a fork/new child for those target modes). */
+  sessionId: string;
+  firedAt: string;
+  decision: RunDecision;
+  budgetDelta: number;
+  note?: string;
+  /** Truncated reasoning (thinking) summary of the wake turn, for the panel history. */
+  reasoningSummary?: string;
+  /** Truncated visible-reply summary of the wake turn, for the panel history. */
+  replySummary?: string;
+}
+
+/**
+ * Wire view of one alarm. `sessionId` deliberately keeps its old meaning of
+ * OWNER so the GUI (filters, session column, copy-id) stays source-compatible;
+ * the wake destination is surfaced separately via targetMode/targetSessionId.
+ */
+export type AlarmView = {
+  id: string;
+  sessionId: string;
+  type: AlarmType;
+  targetMode: TargetMode;
+  /** Present for resume/fork targets. */
+  targetSessionId?: string;
+  respectQuietHours: boolean;
+  prompt: string;
+  nextDueAt: string;
+  state: "scheduled" | "overdue" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
+  deliveryMode: "host";
+  /** Unified per-occurrence random delay in seconds; present only when > 0. */
+  jitterSeconds?: number;
+  everySeconds?: number;
+  cron?: string;
+  at?: string;
+}
 
 export type ProactiveErrorCode =
   | "invalid_prompt"
@@ -53,63 +142,6 @@ export type ToolError = {
   code: ProactiveErrorCode;
   message: string;
 };
-
-export interface AlarmTriggerAt {
-  at: string;
-}
-
-export interface AlarmTriggerEvery {
-  everySeconds: number;
-  anchor: string;
-  /** Optional randomness 0..1: each repeat interval is scaled by (1 ± jitter·uniform(0,1)). Absent/0 = fixed rate. */
-  jitter?: number;
-}
-
-export type AlarmTrigger = AlarmTriggerAt | AlarmTriggerEvery;
-
-export interface Alarm {
-  id: string;
-  sessionId: string;
-  mode: AlarmMode;
-  trigger: AlarmTrigger;
-  prompt: string;
-  wakeReason: WakeReason;
-  /** IANA zone for repeat alignment and quiet-hours display; "UTC" default. */
-  timeZone: string;
-  status: AlarmStatus;
-  nextDueAt: string;
-  createdAt: string;
-  updatedAt: string;
-  runCount: number;
-  lastRunAt: string | null;
-}
-
-export interface RunRecord {
-  id: string;
-  alarmId: string;
-  sessionId: string;
-  firedAt: string;
-  decision: RunDecision;
-  budgetDelta: number;
-  note?: string;
-  /** Truncated reasoning (thinking) summary of the wake turn, for the panel history. */
-  reasoningSummary?: string;
-  /** Truncated visible-reply summary of the wake turn, for the panel history. */
-  replySummary?: string;
-}
-
-export type AlarmView = {
-  id: string;
-  sessionId: string;
-  mode: AlarmMode;
-  prompt: string;
-  wakeReason: WakeReason;
-  nextDueAt: string;
-  state: "scheduled" | "overdue" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
-  deliveryMode: "host";
-  /** Repeat randomness 0..1; present only for jittered repeats. */
-  jitter?: number;
-}
 
 /** Input failure that maps to a closed, stable public code. */
 export class ProactiveInputError extends Error {
@@ -187,8 +219,29 @@ export function instantEpoch(value: string): number {
   return Date.parse(value);
 }
 
+/**
+ * A local-time projector over one epoch: exact wall-clock fields plus the zone
+ * offset that produced them. Structured so callers (quiet-hours, cron) share
+ * one DST-correct projection machinery that never consults the process zone.
+ */
+export function makeLocalFormatter(timeZone: string, extra?: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-US-u-ca-iso8601-nu-latn", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+    hourCycle: "h23",
+    timeZoneName: "longOffset",
+    ...extra
+  });
+}
+
 /** Project one epoch into exact local fields plus the zone offset that produced them. */
-function localProjection(formatter: Intl.DateTimeFormat, epoch: number): { year: number; month: number; day: number; hour: number; minute: number; second: number; millisecond: number; offset: number } {
+export function localProjection(formatter: Intl.DateTimeFormat, epoch: number): { year: number; month: number; day: number; hour: number; minute: number; second: number; millisecond: number; offset: number; weekday?: string } {
   const values = Object.fromEntries(formatter.formatToParts(epoch).map((part) => [part.type, part.value]));
   const zoneName = values["timeZoneName"];
   const offsetMatch = typeof zoneName === "string" ? OFFSET_NAME.exec(zoneName) : null;
@@ -204,25 +257,15 @@ function localProjection(formatter: Intl.DateTimeFormat, epoch: number): { year:
     minute: Number(values["minute"]),
     second: Number(values["second"]),
     millisecond: Number(values["fractionalSecond"]),
-    offset
+    offset,
+    ...(typeof values["weekday"] === "string" ? { weekday: values["weekday"] } : {})
   };
 }
 
 /** Resolve local wall-clock fields in a zone: earlier instant on overlap, reject gaps. */
 export function resolveLocalInstant(parts: { year: number; month: number; day: number; hour: number; minute: number; second: number; millisecond: number }, timeZone: string): number {
   const localEpoch = calendarEpoch(parts);
-  const formatter = new Intl.DateTimeFormat("en-US-u-ca-iso8601-nu-latn", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    fractionalSecondDigits: 3,
-    hourCycle: "h23",
-    timeZoneName: "longOffset"
-  });
+  const formatter = makeLocalFormatter(timeZone);
   const offsets = new Set<number>();
   for (const delta of [-1728e5, -864e5, 0, 864e5, 1728e5]) {
     const sample = Math.min(MAX_FOUR_DIGIT_YEAR_MS, Math.max(MIN_FOUR_DIGIT_YEAR_MS, localEpoch + delta));
@@ -348,35 +391,32 @@ export function nextEveryOccurrence(anchorEpoch: number, everySeconds: number, n
 /** Uniform(0,1) source for jitter; default Math.random. */
 export type RandomSource = () => number;
 
-/**
- * One jittered repeat interval in seconds: the base every_seconds scaled by
- * (1 ± jitter · uniform(0,1)), floored at MIN_EVERY_SECONDS so a heavily
- * jittered interval can never collapse below the validator's floor.
- */
-export function jitterInterval(everySeconds: number, jitter: number, random: RandomSource = Math.random): number {
-  const j = Math.min(1, Math.max(0, jitter));
-  const scale = 1 + (random() * 2 - 1) * j;
-  return Math.max(MIN_EVERY_SECONDS, Math.round(everySeconds * scale));
-}
-
-/**
- * The next occurrence of a jittered repeat: the wake fires roughly
- * every_seconds after the previous one, with each interval independently
- * scaled by (1 ± jitter). The walk is based on now rather than the original
- * anchor so consecutive wakes stay human rather than metronomic, and it is
- * always strictly in the future (a miss is skipped, never re-fired).
- * jitter 0 degenerates to the exact anchor-aligned grid of nextEveryOccurrence.
- */
-export function nextJitteredOccurrence(anchorEpoch: number, everySeconds: number, now: number, jitter: number, random: RandomSource = Math.random): number {
-  if (jitter === undefined || jitter === 0) {
-    return nextEveryOccurrence(anchorEpoch, everySeconds, now);
+/** Validate the unified jitter knob: integer seconds 0..MAX_JITTER_SECONDS. */
+export function validateJitterSeconds(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0 || raw > MAX_JITTER_SECONDS) {
+    throw new ProactiveInputError("invalid_trigger", "jitter_seconds must be an integer in 0..{max}.".replace("{max}", String(MAX_JITTER_SECONDS)));
   }
-  nextEveryOccurrence(anchorEpoch, everySeconds, now); // validates everySeconds + floor
-  const intervalMs = jitterInterval(everySeconds, jitter, random) * 1e3;
-  return Math.max(now + 1, now + intervalMs);
+  return raw;
 }
 
-/** Whether the alarm target is still in the future. */
+/** One random delay in milliseconds for jitter_seconds; 0 when the knob is absent/zero. */
+export function jitterDelay(jitterSeconds: number | undefined, random: RandomSource = Math.random): number {
+  if (jitterSeconds === undefined || jitterSeconds <= 0) return 0;
+  return Math.floor(random() * jitterSeconds * 1000);
+}
+
+/**
+ * The next occurrence of an every alarm: the anchor-aligned grid instant plus
+ * a random delay drawn now. The grid itself never drifts (delays are applied
+ * to the fire time, not to the interval), and a miss is skipped, never
+ * re-fired (strictly after now). jitterSeconds 0 degenerates to the exact grid.
+ */
+export function nextJitteredOccurrence(anchorEpoch: number, everySeconds: number, now: number, jitterSeconds: number | undefined, random: RandomSource = Math.random): number {
+  const scheduled = nextEveryOccurrence(anchorEpoch, everySeconds, now);
+  return scheduled + jitterDelay(jitterSeconds, random);
+}
+
+/** Whether the alarm target time is still in the future. */
 export function requireFuture(epoch: number, now: number): void {
   if (epoch <= now) throw new ProactiveInputError("not_future", "The target must be in the future.");
 }
@@ -389,14 +429,22 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
   const overdue = alarm.status === "scheduled" && instantEpoch(alarm.nextDueAt) <= now;
   return {
     id: alarm.id,
-    sessionId: alarm.sessionId,
-    mode: alarm.mode,
+    sessionId: alarm.ownerSessionId,
+    type: alarm.type,
+    targetMode: alarm.target.mode,
+    ...("sessionId" in alarm.target ? { targetSessionId: alarm.target.sessionId } : {}),
+    respectQuietHours: alarm.respectQuietHours,
     prompt: alarm.prompt,
-    wakeReason: alarm.wakeReason,
     nextDueAt: alarm.nextDueAt,
     state: overdue ? "overdue" : alarm.status,
     deliveryMode: "host",
-    ...(alarm.mode === "repeat" && "everySeconds" in alarm.trigger && typeof alarm.trigger["jitter"] === "number" && alarm.trigger["jitter"] > 0 ? { jitter: alarm.trigger["jitter"] } : {})
+    ...(alarm.type === "every" && "everySeconds" in alarm.trigger
+      ? { everySeconds: alarm.trigger["everySeconds"], ...(typeof alarm.trigger["jitterSeconds"] === "number" && alarm.trigger["jitterSeconds"] > 0 ? { jitterSeconds: alarm.trigger["jitterSeconds"] } : {}) }
+      : {}),
+    ...(alarm.type === "cron" && "expr" in alarm.trigger
+      ? { cron: alarm.trigger["expr"], ...(typeof alarm.trigger["jitterSeconds"] === "number" && alarm.trigger["jitterSeconds"] > 0 ? { jitterSeconds: alarm.trigger["jitterSeconds"] } : {}) }
+      : {}),
+    ...(alarm.type === "once" && "at" in alarm.trigger ? { at: alarm.trigger["at"] } : {})
   };
 }
 

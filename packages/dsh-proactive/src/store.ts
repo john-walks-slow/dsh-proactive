@@ -7,10 +7,17 @@
  *
  * A corrupt alarms.json never bricks the plugin: load() falls back to an empty
  * store and surfaces { code: "corrupt_store" } from tools that would mutate it.
+ *
+ * v2 (260907-proactive-alarm-v2): STORE_VERSION moved 1 -> 2. Legacy v1
+ * records are normalized in memory on load (sessionId -> ownerSessionId +
+ * target.resume; wakeReason "alarm" -> respectQuietHours false, any other ->
+ * true; repeat jitter 0..1 rounded onto the unified jitterSeconds; unknown
+ * legacy fields such as deliveryHint dropped). The on-disk file is rewritten
+ * as version 2 on the next persist.
  */
 
 import { mkdir, readFile, rename, writeFile, appendFile } from "node:fs/promises";
-import { isRecord, type Alarm, type RunRecord } from "./domain.js";
+import { isRecord, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
 
 export interface StoreState {
   version: number;
@@ -22,13 +29,79 @@ export interface BudgetState {
   delivered: number;
 }
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 const STORE_FILE = "alarms.json";
 const RUNS_FILE = "runs.jsonl";
 const STATE_FILE = "state.json";
 
+const LEGACY_REASONS = { alarm: false, heartbeat: true } as const;
+
+const TARGET_MODES: readonly string[] = ["resume", "fork", "new"];
+const ALARM_TYPES: readonly string[] = ["once", "every", "cron"];
+const ALARM_STATUSES: readonly string[] = ["scheduled", "in-flight", "completed", "cancelled", "failed", "paused"];
+
+function isTriggerForType(type: AlarmType, trigger: unknown): boolean {
+  if (!isRecord(trigger)) return false;
+  if (type === "once") return typeof trigger["at"] === "string";
+  if (type === "every") return typeof trigger["everySeconds"] === "number" && typeof trigger["anchor"] === "string" && (trigger["jitterSeconds"] === undefined || typeof trigger["jitterSeconds"] === "number");
+  return typeof trigger["expr"] === "string";
+}
+
 function alarmIsValid(value: unknown): value is Alarm {
-  return isRecord(value) && typeof value["id"] === "string" && typeof value["sessionId"] === "string" && typeof value["nextDueAt"] === "string";
+  if (!isRecord(value)) return false;
+  if (typeof value["id"] !== "string" || typeof value["ownerSessionId"] !== "string") return false;
+  if (typeof value["prompt"] !== "string" || typeof value["respectQuietHours"] !== "boolean") return false;
+  if (typeof value["timeZone"] !== "string" || typeof value["nextDueAt"] !== "string") return false;
+  if (typeof value["type"] !== "string" || !ALARM_TYPES.includes(value["type"])) return false;
+  const type = value["type"] as AlarmType;
+  if (!ALARM_STATUSES.includes(value["status"] as string)) return false;
+  const target = value["target"];
+  if (!isRecord(target) || typeof target["mode"] !== "string" || !TARGET_MODES.includes(target["mode"])) return false;
+  if (target["mode"] === "resume" || target["mode"] === "fork") {
+    if (typeof target["sessionId"] !== "string") return false;
+  }
+  return isTriggerForType(type, value["trigger"]);
+}
+
+/** Map a legacy v1 alarm record onto the v2 model; undefined when the record is unusable. */
+function normalizeV1(value: unknown): Alarm | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value["id"] !== "string" || typeof value["sessionId"] !== "string" || typeof value["nextDueAt"] !== "string") return undefined;
+  const id = value["id"];
+  const ownerSessionId = value["sessionId"];
+  const legacyMode = value["mode"];
+  const nowIso = new Date().toISOString();
+  let type: AlarmType;
+  let trigger: AlarmTrigger;
+  if (legacyMode === "one-shot" && isRecord(value["trigger"]) && typeof value["trigger"]["at"] === "string") {
+    type = "once";
+    trigger = { at: value["trigger"]["at"] };
+  } else if (legacyMode === "repeat" && isRecord(value["trigger"]) && typeof value["trigger"]["everySeconds"] === "number" && typeof value["trigger"]["anchor"] === "string") {
+    type = "every";
+    const everySeconds = value["trigger"]["everySeconds"];
+    const jitter = value["trigger"]["jitter"];
+    const jitterSeconds = typeof jitter === "number" && jitter > 0 ? Math.min(everySeconds, Math.max(0, Math.round(jitter * everySeconds))) : undefined;
+    trigger = { everySeconds, anchor: value["trigger"]["anchor"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}) };
+  } else {
+    return undefined;
+  }
+  const legacyReason = typeof value["wakeReason"] === "string" && value["wakeReason"] in LEGACY_REASONS ? value["wakeReason"] as keyof typeof LEGACY_REASONS : "heartbeat";
+  return {
+    id,
+    ownerSessionId,
+    target: { mode: "resume", sessionId: ownerSessionId },
+    type,
+    trigger,
+    prompt: typeof value["prompt"] === "string" ? value["prompt"] : "",
+    respectQuietHours: LEGACY_REASONS[legacyReason],
+    timeZone: typeof value["timeZone"] === "string" ? value["timeZone"] : "UTC",
+    status: typeof value["status"] === "string" && ALARM_STATUSES.includes(value["status"]) ? value["status"] as Alarm["status"] : "scheduled",
+    nextDueAt: value["nextDueAt"],
+    createdAt: typeof value["createdAt"] === "string" ? value["createdAt"] : nowIso,
+    updatedAt: typeof value["updatedAt"] === "string" ? value["updatedAt"] : nowIso,
+    runCount: typeof value["runCount"] === "number" ? value["runCount"] : 0,
+    lastRunAt: typeof value["lastRunAt"] === "string" ? value["lastRunAt"] : null
+  };
 }
 
 export class ProactiveStore {
@@ -63,9 +136,25 @@ export class ProactiveStore {
     try {
       const raw = await readFile(dataDir + "/" + STORE_FILE, "utf8");
       const parsed: unknown = JSON.parse(raw);
-      if (isRecord(parsed) && parsed["version"] === STORE_VERSION && Array.isArray(parsed["alarms"])) {
-        store.state = { version: STORE_VERSION, alarms: parsed["alarms"].filter(alarmIsValid) };
-        if (store.state.alarms.length !== (parsed["alarms"] as unknown[]).length) corrupt = true;
+      if (isRecord(parsed) && Array.isArray(parsed["alarms"])) {
+        const records = parsed["alarms"] as unknown[];
+        const alarms: Alarm[] = [];
+        if (parsed["version"] === STORE_VERSION) {
+          for (const record of records) {
+            if (alarmIsValid(record)) alarms.push(record);
+            else corrupt = true;
+          }
+        } else if (parsed["version"] === 1) {
+          // v1 -> v2 in-memory normalization; the file is rewritten on next persist.
+          for (const record of records) {
+            const migrated = normalizeV1(record);
+            if (migrated !== undefined) alarms.push(migrated);
+            else corrupt = true;
+          }
+        } else {
+          corrupt = true;
+        }
+        store.state = { version: STORE_VERSION, alarms };
       } else {
         corrupt = true;
       }

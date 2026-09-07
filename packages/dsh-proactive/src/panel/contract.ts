@@ -3,6 +3,11 @@
  * service. One dialect is shared with the model tools through the closed
  * validation in alarm-factory.ts, so a UI action and a proactive_set call
  * accept the same create shape and surface the same error codes.
+ *
+ * v2 (260907-proactive-alarm-v2): the form carries a three-way kind
+ * (once/every/cron), the unified jitterSeconds, the respectQuietHours switch
+ * and the target_mode/target_session_id destination — the same vocabulary as
+ * proactive_set, mapped through createArgsFromForm.
  */
 
 import type { AlarmView, ProactiveErrorCode, RunDecision } from "../domain.js";
@@ -23,15 +28,13 @@ export interface RunView {
 
 /**
  * Read-only configuration summary the panel displays in the settings header.
- * Global interval/jitter defaults were removed on purpose: every alarm picks
- * its own every_seconds/jitter at create/edit time (per-reminder config).
+ * The repo-wide default heartbeat prompt was removed in v2: every alarm
+ * carries its own prompt and respect_quiet_hours switch.
  */
 export interface ConfigView {
   enabled: boolean;
   maxDeliveriesPerDay: number;
   quietHours: { start: string; end: string; timeZone: string };
-  /** Default heartbeat (check-in) prompt — the wake wording baseline. */
-  heartbeatPrompt: string;
 }
 
 /** One alarm row plus the owning session's display title (empty = unknown). */
@@ -40,10 +43,6 @@ export interface AlarmRowView extends AlarmView {
   sessionTitle: string;
   /** Creation instant (for sorting). */
   createdAt: string;
-  /** Repeat interval, present for repeat alarms (for the edit form prefill). */
-  everySeconds?: number;
-  /** Absolute due instant, present for one-shot alarms (for the edit form prefill). */
-  at?: string;
 }
 
 export interface PanelSnapshot {
@@ -55,8 +54,9 @@ export interface PanelSnapshot {
 
 /**
  * Closed panel action vocabulary. `create`/`edit` carry the same argument root
- * as proactive_set (prompt/at|after_seconds|every_seconds/time_zone/
- * wake_reason) and are validated by the exact same function.
+ * as proactive_set (prompt/at|after_seconds|every_seconds|cron/jitter_seconds/
+ * respect_quiet_hours/target_mode/target_session_id/time_zone) and are
+ * validated by the exact same function.
  *
  * Scope rule (single source of truth = the route's `?session=` query):
  *   - the host-wide settings view has NO scope → mutate anything.
@@ -83,31 +83,62 @@ export interface PanelError {
 
 export type PanelResult = { ok: true; snapshot: PanelSnapshot } | { ok: false; error: PanelError };
 
-/** Create/edit arguments from the panel form (a superset of the tool dialect keys). */
+/**
+ * Create/edit arguments from the panel form. `kind` selects the create shape:
+ * once = afterSeconds (relative delay) or atDate+atTime (local absolute),
+ * every = everySeconds (+ jitterSeconds), cron = cron expression
+ * (+ jitterSeconds). respectQuietHours and the target destination are
+ * independent of the type.
+ */
 export interface PanelCreateForm {
   prompt: string;
+  kind: "once" | "every" | "cron";
   /** Owning session (host-wide view only; the conversation tab pins its own). */
   sessionId?: string;
-  at?: string;
+  /** once: relative delay in seconds (alternative to atDate/atTime). */
   afterSeconds?: number;
+  /** once: local absolute date (alternative to afterSeconds). */
+  atDate?: string;
+  /** once: local absolute time HH:mm (alternative to afterSeconds). */
+  atTime?: string;
+  /** every: fixed interval in seconds (>= 300). */
   everySeconds?: number;
-  /** Repeat randomness 0..1; only meaningful together with everySeconds. */
-  jitter?: number;
+  /** cron: five-field expression. */
+  cron?: string;
+  /** Unified per-occurrence random delay in seconds; 0/absent = exact timing. */
+  jitterSeconds?: number;
   timeZone?: string;
-  wakeReason?: string;
+  /** false (default) = user-requested, exempt from quiet hours + budget. */
+  respectQuietHours?: boolean;
+  targetMode?: "resume" | "fork" | "new";
+  /** Destination for resume/fork; omitted = owner. Ignored for new. */
+  targetSessionId?: string;
 }
 
 /** Map a form to the shared argument root so one validator serves both surfaces. */
 export function createArgsFromForm(form: PanelCreateForm): Record<string, unknown> {
   const args: Record<string, unknown> = { prompt: form.prompt };
-  if (form.at !== undefined && form.at !== "") args["at"] = form.at;
-  if (form.afterSeconds !== undefined) args["after_seconds"] = form.afterSeconds;
-  if (form.everySeconds !== undefined) args["every_seconds"] = form.everySeconds;
-  // Jitter is only meaningful with every_seconds: never carry a stale jitter
-  // (e.g. from a form that previously held a repeat) into after_seconds
-  // creations, which the shared validator would reject as invalid_trigger.
-  if (form.everySeconds !== undefined && form.jitter !== undefined) args["jitter"] = form.jitter;
+  if (form.kind === "every") {
+    if (form.everySeconds !== undefined) args["every_seconds"] = form.everySeconds;
+  } else if (form.kind === "cron") {
+    if (form.cron !== undefined && form.cron !== "") args["cron"] = form.cron;
+  } else {
+    // once — either a relative delay or a local absolute instant.
+    if (form.afterSeconds !== undefined) {
+      args["after_seconds"] = form.afterSeconds;
+    } else if (form.atDate !== undefined && form.atDate !== "" && form.atTime !== undefined && form.atTime !== "") {
+      // Local absolute instant: the zone is resolved host-side through the
+      // same default chain as top-level time_zone (client zone -> host zone),
+      // so an empty slot here means "the caller's zone", never a hardcoded UTC.
+      args["at"] = { date: form.atDate, time: form.atTime + ":00", time_zone: form.timeZone ?? "" };
+    }
+  }
+  // Jitter is a first-class knob on all three types (v2: once/every/cron all
+  // accept a per-occurrence random delay); stale zero values are simply dropped.
+  if (form.jitterSeconds !== undefined && form.jitterSeconds > 0) args["jitter_seconds"] = form.jitterSeconds;
   if (form.timeZone !== undefined && form.timeZone !== "") args["time_zone"] = form.timeZone;
-  if (form.wakeReason !== undefined && form.wakeReason !== "") args["wake_reason"] = form.wakeReason;
+  if (form.respectQuietHours !== undefined) args["respect_quiet_hours"] = form.respectQuietHours;
+  if (form.targetMode !== undefined && form.targetMode !== "resume") args["target_mode"] = form.targetMode;
+  if (form.targetSessionId !== undefined && form.targetSessionId !== "") args["target_session_id"] = form.targetSessionId;
   return args;
 }

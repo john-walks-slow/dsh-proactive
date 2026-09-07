@@ -3,19 +3,28 @@
  *
  * One serialized drive loop owns all firing decisions:
  *   - due detection (nextDueAt <= now), boot overdue policy, quiet-hours
- *     gating, hourly wake cap, and daily budget gating for non-alarm wakes;
+ *     gating, hourly wake cap, and daily budget gating for alarms that
+ *     respect quiet hours;
  *   - one alarm at a time through the WakeDriver, then advances its state
- *     from the analyzed outcome: one-shot -> completed, repeat -> next anchor;
+ *     from the analyzed outcome: once -> completed, every/cron -> next due;
  *   - bounded retries for busy/failed fires, coalesced re-arming.
  *
  * The loop never busy-waits: every pass ends by arming a single timer at the
  * nearest due alarm (split across the 24.8-day setTimeout ceiling) or by
  * scheduling an explicit deferral for busy/deferred outcomes.
+ *
+ * v2 (260907-proactive-alarm-v2): the alarm/heartbeat wake_reason split is
+ * gone; `respectQuietHours` is a per-alarm switch. true = defer inside quiet
+ * hours and gate by the daily budget; false = user-requested, quiet hours and
+ * budget exempt. Formal gating order: quiet(+respect) -> hourly cap -> budget
+ * (+respect) -> fire. every/cron jitter is pre-drawn into nextDueAt so this
+ * loop never waits.
  */
 
 import type { Alarm, RunDecision } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
 import { instantEpoch, isRecord, nextEveryOccurrence, nextJitteredOccurrence } from "./domain.js";
+import { nextCronOccurrence } from "./cron.js";
 import { isInQuietHours } from "./config.js";
 import type { ProactiveStore } from "./store.js";
 
@@ -30,8 +39,8 @@ export type FireResult = "completed" | "advanced" | "skipped" | "retry" | "faile
 export interface SchedulerDeps {
   store: ProactiveStore;
   config: ProactiveConfig;
-  /** Runs one alarm through the agent world; returns ok + analysis or busy/failed. */
-  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; analysis?: { decision: RunDecision; budgetDelta: number; leaked?: boolean; note?: string; reasoningSummary?: string; replySummary?: string } }>;
+  /** Runs one alarm through the agent world; returns ok + analysis + the session the wake actually ran in (fork/new children differ from the owner). */
+  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; analysis?: { decision: RunDecision; budgetDelta: number; leaked?: boolean; note?: string; reasoningSummary?: string; replySummary?: string } }>;
   now?: () => number;
   /** Uniform(0,1) source for jittered repeats; defaults to Math.random. */
   random?: () => number;
@@ -166,7 +175,7 @@ export class ProactiveScheduler {
       return "skipped";
     }
     await this.recordSkip(alarm, "boot overdue: drop policy");
-    if (alarm.mode === "repeat") this.advancePast(alarm, now, "skipped");
+    if (alarm.type !== "once") this.advancePast(alarm, now, "skipped");
     else this.terminate(alarm, "cancelled", "boot overdue: drop policy");
     return "skipped";
   }
@@ -174,7 +183,7 @@ export class ProactiveScheduler {
   /** Gate + run one due alarm; returns the transition the loop should apply. */
   private async fireOne(alarm: Alarm, now: number): Promise<FireResult> {
     const quiet = isInQuietHours(now, this.config);
-    if (quiet && alarm.wakeReason !== "alarm") {
+    if (quiet && alarm.respectQuietHours) {
       // Defer to the (rare) end of quiet hours by re-probing in 5 minutes.
       this.deflect(alarm, QUIET_DEFER_MS);
       return "skipped";
@@ -183,7 +192,7 @@ export class ProactiveScheduler {
       this.deflect(alarm, QUIET_DEFER_MS);
       return "skipped";
     }
-    if (alarm.wakeReason !== "alarm") {
+    if (alarm.respectQuietHours) {
       const used = this.deps.store.budgetFor(new Date(now).toISOString().slice(0, 10));
       if (used >= this.config.maxDeliveriesPerDay) {
         await this.recordSkip(alarm, "daily budget exhausted (" + used + "/" + this.config.maxDeliveriesPerDay + ")");
@@ -215,7 +224,7 @@ export class ProactiveScheduler {
     if (result.outcome === "failed") {
       this.bumpRetry(alarm);
       const attempt = this.retries.get(alarm.id)!;
-      await this.recordRun(alarm, "failed", 0, "wake failed (attempt " + attempt + ")");
+      await this.recordRun(alarm, "failed", 0, "wake failed (attempt " + attempt + ")", result.sessionId);
       if (attempt >= this.config.maxRetriesPerFire) {
         this.terminate(alarm, "failed", "persistent wake failure");
         this.retries.delete(alarm.id);
@@ -228,6 +237,7 @@ export class ProactiveScheduler {
     this.recentFires.push(this.now());
     this.retries.delete(alarm.id);
     const analysis = result.analysis!;
+    const actualSessionId = result.sessionId;
     const utcDate = new Date(this.now()).toISOString().slice(0, 10);
     if (analysis.budgetDelta > 0) {
       await this.deps.store.spendBudget(utcDate, analysis.budgetDelta);
@@ -237,7 +247,7 @@ export class ProactiveScheduler {
       this.deps.log("warn", "leak: alarm " + alarm.id + " called no_reply after visible text (charged 1)");
     }
     const note = analysis.note ?? (analysis.leaked ? "leak: no_reply after visible text (charged 1)" : undefined);
-    await this.recordRun(alarm, analysis.decision, analysis.budgetDelta, note, analysis.reasoningSummary, analysis.replySummary);
+    await this.recordRun(alarm, analysis.decision, analysis.budgetDelta, note, analysis.reasoningSummary, analysis.replySummary, actualSessionId);
     this.advancePast(alarm, now, analysis.decision);
     return "advanced";
   }
@@ -246,11 +256,13 @@ export class ProactiveScheduler {
     this.retries.set(alarm.id, (this.retries.get(alarm.id) ?? 0) + 1);
   }
 
-  private async recordRun(alarm: Alarm, decision: RunDecision, budgetDelta: number, note?: string, reasoningSummary?: string, replySummary?: string): Promise<void> {
+  private async recordRun(alarm: Alarm, decision: RunDecision, budgetDelta: number, note?: string, reasoningSummary?: string, replySummary?: string, sessionIdOverride?: string): Promise<void> {
     const rec = {
       id: "run_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       alarmId: alarm.id,
-      sessionId: alarm.sessionId,
+      // The session the wake actually ran in (a fork/new child for those
+      // target modes); for skips/failures without a real wake it is the owner.
+      sessionId: sessionIdOverride ?? alarm.ownerSessionId,
       firedAt: new Date().toISOString(),
       decision,
       budgetDelta,
@@ -265,7 +277,7 @@ export class ProactiveScheduler {
     await this.recordRun(alarm, "skipped", 0, reason);
   }
 
-  /** One-shot: terminate. Repeat: move to the next anchor strictly after now. */
+  /** Once: terminate. every/cron: move to the next occurrence strictly after now. */
   private advancePast(alarm: Alarm, now: number, _decision: RunDecision): void {
     const updated = this.advance(alarm, now);
     this.deps.store.replaceAlarm(updated);
@@ -274,23 +286,38 @@ export class ProactiveScheduler {
 
   private advance(alarm: Alarm, now: number): Alarm {
     const stamp = new Date(now).toISOString();
-    if (alarm.mode === "one-shot") {
+    if (alarm.type === "once") {
       return { ...alarm, status: "completed", lastRunAt: stamp, runCount: alarm.runCount + 1, updatedAt: stamp };
     }
     const trigger = alarm.trigger;
-    // Corrupt repeat data (missing/invalid trigger) must fail closed instead of
-    // throwing into the drive loop: mark failed so it leaves the due set.
-    if (!isRecord(trigger) || !("everySeconds" in trigger) || typeof trigger["everySeconds"] !== "number" || !Number.isSafeInteger(trigger["everySeconds"]) || typeof trigger["anchor"] !== "string") {
-      return { ...alarm, status: "failed", lastRunAt: stamp, runCount: alarm.runCount + 1, updatedAt: stamp };
+    let nextDueEpoch: number;
+    if (alarm.type === "every") {
+      // Corrupt every data (missing/invalid trigger) must fail closed instead
+      // of throwing into the drive loop: mark failed so it leaves the due set.
+      if (!isRecord(trigger) || !("everySeconds" in trigger) || typeof trigger["everySeconds"] !== "number" || !Number.isSafeInteger(trigger["everySeconds"]) || typeof trigger["anchor"] !== "string") {
+        return { ...alarm, status: "failed", lastRunAt: stamp, runCount: alarm.runCount + 1, updatedAt: stamp };
+      }
+      // jitterSeconds is an enhancement field: a corrupt/malformed value
+      // degrades softly to the deterministic grid instead of killing the
+      // alarm — the anchor+everySeconds pair is the load-bearing part.
+      const jitterSeconds = typeof trigger["jitterSeconds"] === "number" && Number.isFinite(trigger["jitterSeconds"]) && trigger["jitterSeconds"] > 0 ? trigger["jitterSeconds"] : undefined;
+      nextDueEpoch = jitterSeconds === undefined
+        ? nextEveryOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now)
+        : nextJitteredOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now, jitterSeconds, this.deps.random ?? Math.random);
+    } else {
+      // cron — the expression and zone are the load-bearing parts; a corrupt
+      // pair fails closed to "failed" and leaves the due set.
+      if (!isRecord(trigger) || !("expr" in trigger) || typeof trigger["expr"] !== "string") {
+        return { ...alarm, status: "failed", lastRunAt: stamp, runCount: alarm.runCount + 1, updatedAt: stamp };
+      }
+      try {
+        const base = nextCronOccurrence(trigger["expr"], alarm.timeZone, now);
+        const jitterSeconds = typeof trigger["jitterSeconds"] === "number" && Number.isFinite(trigger["jitterSeconds"]) && trigger["jitterSeconds"] > 0 ? trigger["jitterSeconds"] : undefined;
+        nextDueEpoch = base + (jitterSeconds === undefined ? 0 : Math.floor((this.deps.random ?? Math.random)() * jitterSeconds * 1000));
+      } catch (error) {
+        return { ...alarm, status: "failed", lastRunAt: stamp, runCount: alarm.runCount + 1, updatedAt: stamp };
+      }
     }
-    const jitter = trigger["jitter"];
-    // jitter is an enhancement field: a corrupt/malformed value (string, NaN,
-    // out of range) degrades softly to the deterministic grid instead of
-    // killing the alarm — the anchor+everySeconds pair is the load-bearing
-    // part of a repeat trigger.
-    const nextDueEpoch = typeof jitter === "number" && Number.isFinite(jitter) && jitter > 0
-      ? nextJitteredOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now, jitter, this.deps.random ?? Math.random)
-      : nextEveryOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now);
     return {
       ...alarm,
       status: "scheduled",

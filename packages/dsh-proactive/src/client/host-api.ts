@@ -9,10 +9,37 @@
 
 import type { PanelAction } from "../panel/contract.js";
 
+/**
+ * One alarm row on the wire (v2): `sessionId` keeps its historical meaning of
+ * OWNER; the wake destination is surface separately via targetMode /
+ * targetSessionId (owner ⇔ create-side, target ⇔ wake-side).
+ */
+export interface AlarmRowDto {
+  id: string;
+  sessionId: string;
+  sessionTitle: string;
+  type: "once" | "every" | "cron";
+  targetMode: "resume" | "fork" | "new";
+  /** Present for resume/fork targets. */
+  targetSessionId?: string;
+  /** Display title of the target session (client-enriched; empty = unknown). */
+  targetSessionTitle?: string;
+  respectQuietHours: boolean;
+  prompt: string;
+  nextDueAt: string;
+  createdAt: string;
+  state: string;
+  deliveryMode: string;
+  jitterSeconds?: number;
+  everySeconds?: number;
+  cron?: string;
+  at?: string;
+}
+
 export interface PanelSnapshotDto {
   server: { now: string; dataDir: string; corrupt: boolean };
-  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; heartbeatPrompt: string };
-  alarms: Array<{ id: string; sessionId: string; sessionTitle: string; mode: string; prompt: string; wakeReason: string; nextDueAt: string; createdAt: string; state: string; deliveryMode: string; jitter?: number; everySeconds?: number; at?: string }>;
+  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string } };
+  alarms: AlarmRowDto[];
   runs: Array<{ id: string; alarmId: string; sessionId: string; firedAt: string; decision: string; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string }>;
 }
 
@@ -109,7 +136,12 @@ export class ProactiveHostTransport {
   }
 }
 
-/** Overlay the session-title map onto alarm rows (server title wins, then map, then raw id). */
+/**
+ * Overlay the session-title map onto alarm rows (server title wins, then map,
+ * then raw id). Both the owner (`sessionId`) and the wake target
+ * (`targetSessionId`) get display titles, so the table can show either as a
+ * readable name without fetching session.list again.
+ */
 function withSessionTitles(snapshot: PanelSnapshotDto, titles: Map<string, string>): PanelSnapshotDto {
   if (titles.size === 0) return snapshot;
   return {
@@ -117,7 +149,12 @@ function withSessionTitles(snapshot: PanelSnapshotDto, titles: Map<string, strin
     alarms: snapshot.alarms.map((alarm) => {
       if (alarm.sessionTitle !== undefined && alarm.sessionTitle !== "") return alarm;
       const title = titles.get(alarm.sessionId);
-      return { ...alarm, sessionTitle: title ?? "" };
+      const targetTitle = alarm.targetSessionId !== undefined ? titles.get(alarm.targetSessionId) : undefined;
+      return {
+        ...alarm,
+        sessionTitle: title ?? "",
+        ...(targetTitle !== undefined && targetTitle !== "" ? { targetSessionTitle: targetTitle } : {})
+      };
     })
   };
 }

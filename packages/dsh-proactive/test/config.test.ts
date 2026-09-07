@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CONFIG, isInQuietHours, localClockMinutes, parseClockTime, resolveConfig } from "../src/config.js";
-import { MAX_PROMPT_LENGTH } from "../src/domain.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,27 +74,14 @@ test("resolveConfig honors env overrides", () => {
   }
 });
 
-test("heartbeat defaults resolve and the interval clamps to the floor", () => {
+test("a leftover v1 heartbeatPrompt in config.json is ignored (dial deleted in v2)", () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-hb-"));
   try {
     const cfg = resolveConfig(dir);
-    assert.ok(cfg.heartbeatPrompt.includes("heartbeat reminder"));
+    assert.ok(!("heartbeatPrompt" in cfg), "v2 config has no heartbeatPrompt field");
     writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatPrompt: "ping" }));
     const over = resolveConfig(dir);
-    assert.equal(over.heartbeatPrompt, "ping");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("config.json heartbeatPrompt longer than the schema cap is clamped, not rejected", () => {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-hb-clamp-"));
-  try {
-    const tooLong = "x".repeat(MAX_PROMPT_LENGTH + 100);
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatPrompt: "  " + tooLong + "  " }));
-    const cfg = resolveConfig(dir);
-    assert.equal(cfg.heartbeatPrompt.length, MAX_PROMPT_LENGTH); // whitespace trimmed first, then sliced to the schema cap
-    assert.ok(cfg.heartbeatPrompt.startsWith("x")); // leading whitespace was trimmed before clamping
+    assert.ok(!("heartbeatPrompt" in over), "legacy heartbeatPrompt must not resurface");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

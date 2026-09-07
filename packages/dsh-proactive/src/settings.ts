@@ -8,8 +8,8 @@
 
 import z from "schemastery";
 import type { Context } from "@deepseek-ai/cordis";
-import { DEFAULT_CONFIG, type ProactiveConfig, type BootOverduePolicy, type QuietHours } from "./config.js";
-import { MAX_PROMPT_LENGTH, canonicalizeTimeZone, isRecord, type ToolError } from "./domain.js";
+import { type ProactiveConfig, type BootOverduePolicy, type QuietHours } from "./config.js";
+import { canonicalizeTimeZone, isRecord, type ToolError } from "./domain.js";
 
 /** The hot-updatable configuration subset, excluding the immutable dataDir. */
 export interface HotConfig {
@@ -21,7 +21,6 @@ export interface HotConfig {
   bootOverduePolicy: BootOverduePolicy;
   maxRetriesPerFire: number;
   maxPromptLength: number;
-  heartbeatPrompt: string;
 }
 
 /**
@@ -38,8 +37,7 @@ export function hotSubset(config: ProactiveConfig): HotConfig {
     maxConcurrentPerSession: config.maxConcurrentPerSession,
     bootOverduePolicy: config.bootOverduePolicy,
     maxRetriesPerFire: config.maxRetriesPerFire,
-    maxPromptLength: config.maxPromptLength,
-    heartbeatPrompt: config.heartbeatPrompt
+    maxPromptLength: config.maxPromptLength
   };
 }
 
@@ -90,7 +88,7 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
   const allowed = new Set([
     "enabled", "max_deliveries_per_day", "quiet_hours",
     "max_wakeups_per_hour", "max_concurrent_per_session", "boot_overdue_policy",
-    "max_retries_per_fire", "max_prompt_length", "heartbeat_prompt"
+    "max_retries_per_fire", "max_prompt_length"
   ]);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) {
@@ -162,16 +160,6 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
     }
     write("maxPromptLength", n);
   }
-  if ("heartbeat_prompt" in raw) {
-    if (typeof raw["heartbeat_prompt"] !== "string" || raw["heartbeat_prompt"].trim().length === 0) {
-      return { code: "invalid_prompt", message: "heartbeat_prompt must be a non-empty string." };
-    }
-    const trimmed = (raw["heartbeat_prompt"] as string).trim();
-    if (trimmed.length > MAX_PROMPT_LENGTH) {
-      return { code: "invalid_prompt", message: "heartbeat_prompt must be at most " + MAX_PROMPT_LENGTH + " characters." };
-    }
-    write("heartbeatPrompt", trimmed);
-  }
   return { patch };
 }
 
@@ -190,8 +178,7 @@ export const proactiveSettingsSchema = z.object({
   maxConcurrentPerSession: z.number().min(1).max(16).default(1),
   bootOverduePolicy: z.union([z.const("fire"), z.const("notify-only"), z.const("drop")]).default("fire"),
   maxRetriesPerFire: z.number().min(0).max(16).default(3),
-  maxPromptLength: z.number().min(100).max(100000).default(4000),
-  heartbeatPrompt: z.string().min(1).max(MAX_PROMPT_LENGTH).default(DEFAULT_CONFIG.heartbeatPrompt)
+  maxPromptLength: z.number().min(100).max(100000).default(4000)
 });
 
 export interface SettingsWire {

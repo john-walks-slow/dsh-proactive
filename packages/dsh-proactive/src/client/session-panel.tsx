@@ -4,15 +4,21 @@
  * so the framework hands it the session-scoped standard kit: `sessionId`,
  * `useSession`, `useProjection`. All data is scoped to that session via the
  * `?session=` routes; mutations carry the ownership guard on the host side.
+ *
+ * v2: the create/edit form defaults to resume-on-this-session and pins the
+ * fork source / resume target to the current session (`fixedSession`); "new"
+ * wakes in a fresh empty session.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConvViewProps } from "@deepseek-ai/dsh-client-ui-conversation/client";
 import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
-import { AlarmTable, CreateForm, formFromSnapshot, type AlarmRow, type RunRow } from "./sections.js";
+import { AlarmTable, CreateForm, formFromAlarm, type AlarmRow, type RunRow } from "./sections.js";
 import { useProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
+
+const EMPTY_FORM: PanelCreateForm = { prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" };
 
 export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement {
   const copy = useProactiveLocale();
@@ -23,7 +29,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<PanelCreateForm>({ prompt: "", afterSeconds: 3600 });
+  const [form, setForm] = useState<PanelCreateForm>(EMPTY_FORM);
   // Refs: a session switch must not let the earlier session's in-flight
   // response overwrite the current session's snapshot.
   const sessionRef = useRef(sessionId);
@@ -83,7 +89,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       setSnapshot(next);
       setShowForm(false);
       setEditingId(null);
-      setForm({ prompt: "", afterSeconds: 3600 });
+      setForm(EMPTY_FORM);
     } catch (reason) {
       if (sessionRef.current !== requested) return;
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -104,25 +110,15 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
 
   const openCreate = useCallback(() => {
     setEditingId(null);
-    setForm({ ...formFromSnapshot(snapshot), afterSeconds: 3600 });
+    setForm({ ...EMPTY_FORM });
     setShowForm(true);
-  }, [snapshot]);
+  }, []);
 
   const openEdit = useCallback((id: string) => {
     const alarm = snapshot?.alarms.find((a) => a.id === id);
     if (alarm === undefined) return;
-    const next: PanelCreateForm = { prompt: alarm.prompt, wakeReason: alarm.wakeReason };
-    if (alarm.mode === "repeat" && alarm.everySeconds !== undefined) {
-      next.everySeconds = alarm.everySeconds;
-      next.jitter = alarm.jitter ?? 0;
-    } else if (alarm.at !== undefined) {
-      const remaining = Math.max(1, Math.floor((new Date(alarm.at).getTime() - Date.now()) / 1000));
-      next.afterSeconds = remaining;
-    } else {
-      next.afterSeconds = 3600;
-    }
     setEditingId(id);
-    setForm(next);
+    setForm(formFromAlarm(alarm));
     setShowForm(true);
   }, [snapshot]);
 
@@ -154,7 +150,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} editing={editingId !== null}
+          copy={copy} editing={editingId !== null} fixedSession={sessionId}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 

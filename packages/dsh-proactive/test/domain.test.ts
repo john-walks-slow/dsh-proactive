@@ -8,13 +8,15 @@ import {
   inputError,
   internalError,
   isToolError,
-  jitterInterval,
+  jitterDelay,
+  validateJitterSeconds,
   nextEveryOccurrence,
   nextJitteredOccurrence,
   requireFuture,
   resolveAtInput,
   toAlarmView,
   validatePrompt,
+  MAX_JITTER_SECONDS,
   type Alarm
 } from "../src/domain.js";
 
@@ -87,29 +89,37 @@ test("nextEveryOccurrence aligns to the anchor and enforces the floor", () => {
   assert.throws(() => nextEveryOccurrence(anchor, 1.5, anchor), errCode("frequency_too_high"));
 });
 
-test("jitterInterval scales within (1 ± jitter) and floors at MIN_EVERY_SECONDS", () => {
-  // random() = 1 -> scale 1 + jitter; 0 -> scale 1 - jitter.
-  assert.equal(jitterInterval(3600, 0.1, () => 1), Math.round(3600 * 1.1));
-  assert.equal(jitterInterval(3600, 0.1, () => 0), Math.round(3600 * 0.9));
-  assert.equal(jitterInterval(3600, 0, () => 1), 3600); // jitter 0 -> exact
-  // Heavy jitter cannot collapse below the floor.
-  assert.equal(jitterInterval(300, 1, () => 0), 300); // max(300, round(300*0)) = 300
-  // Out-of-range jitter is clamped to [0,1].
-  assert.equal(jitterInterval(3600, 2, () => 1), Math.round(3600 * 2));
-  assert.equal(jitterInterval(3600, -1, () => 0), 3600);
+test("validateJitterSeconds bounds the unified knob", () => {
+  assert.equal(validateJitterSeconds(0), 0);
+  assert.equal(validateJitterSeconds(600), 600);
+  assert.equal(validateJitterSeconds(MAX_JITTER_SECONDS), MAX_JITTER_SECONDS);
+  assert.throws(() => validateJitterSeconds(-1), errCode("invalid_trigger"));
+  assert.throws(() => validateJitterSeconds(MAX_JITTER_SECONDS + 1), errCode("invalid_trigger"));
+  assert.throws(() => validateJitterSeconds(1.5), errCode("invalid_trigger"));
+  assert.throws(() => validateJitterSeconds("60"), errCode("invalid_trigger"));
 });
 
-test("nextJitteredOccurrence stays strictly future and walks around now", () => {
+test("jitterDelay is a uniform delay in milliseconds, 0 for absent/zero", () => {
+  assert.equal(jitterDelay(undefined), 0);
+  assert.equal(jitterDelay(0), 0);
+  // random = 1 -> 599999ms capped below jitter_seconds*1000? No: floor(1*600*1000)=600000 would equal jitter*1000; uniform(0,1) excludes 1, so the delay is in [0, j*1000).
+  assert.equal(jitterDelay(600, () => 0), 0);
+  assert.equal(jitterDelay(600, () => 0.5), 300_000);
+  assert.equal(jitterDelay(600, () => 1), 600_000);
+  const d = jitterDelay(10, () => 0.25);
+  assert.ok(d >= 0 && d < 10_000);
+});
+
+test("nextJitteredOccurrence stays strictly future and adds the delay on top of the grid", () => {
   const anchor = Date.parse("2026-09-01T00:00:00.000Z");
   // jitter 0 degenerates to the exact grid.
   assert.equal(nextJitteredOccurrence(anchor, 300, anchor + 1, 0), nextEveryOccurrence(anchor, 300, anchor + 1));
-  // The walk is based on now, not the anchor phase; always strictly in the future.
-  const plus = nextJitteredOccurrence(anchor, 300, anchor + 10_000, 0.1, () => 1);
-  assert.ok(plus > anchor + 10_000);
-  const minus = nextJitteredOccurrence(anchor, 300, anchor + 10_000, 0.1, () => 0);
-  assert.ok(minus > anchor + 10_000);
+  // The grid step is computed from now (anchor-aligned), then the delay lands on top.
+  const planned = nextEveryOccurrence(anchor, 300, anchor + 10_000);
+  assert.equal(nextJitteredOccurrence(anchor, 300, anchor + 10_000, 600, () => 0.5), planned + 300_000);
+  assert.equal(nextJitteredOccurrence(anchor, 300, anchor + 10_000, 600, () => 0), planned);
   // Validation still applies: sub-floor every_seconds rejects.
-  assert.throws(() => nextJitteredOccurrence(anchor, 299, anchor + 1, 0.1), errCode("frequency_too_high"));
+  assert.throws(() => nextJitteredOccurrence(anchor, 299, anchor + 1, 600), errCode("frequency_too_high"));
 });
 
 test("requireFuture rejects the past", () => {
@@ -118,49 +128,76 @@ test("requireFuture rejects the past", () => {
   assert.throws(() => requireFuture(now, now), errCode("not_future"));
 });
 
-test("toAlarmView marks overdue", () => {
-  const alarm: Alarm = {
+function v2Alarm(overrides: Partial<Alarm> = {}): Alarm {
+  return {
     id: "a1",
-    sessionId: "s1",
-    mode: "one-shot",
+    ownerSessionId: "s1",
+    target: { mode: "resume", sessionId: "s1" },
+    type: "once",
     trigger: { at: "2026-09-01T00:00:00.000Z" },
     prompt: "p",
-    wakeReason: "alarm",
+    respectQuietHours: false,
     timeZone: "UTC",
     status: "scheduled",
     nextDueAt: "2026-08-31T00:00:00.000Z",
     createdAt: "2026-08-30T00:00:00.000Z",
     updatedAt: "2026-08-30T00:00:00.000Z",
     runCount: 0,
-    lastRunAt: null
+    lastRunAt: null,
+    ...overrides
   };
-  const view = toAlarmView(alarm, Date.parse("2026-09-01T00:00:00.000Z"));
+}
+
+test("toAlarmView v2: overdue + owner + target fields", () => {
+  const view = toAlarmView(v2Alarm(), Date.parse("2026-09-01T00:00:00.000Z"));
   assert.equal(view.state, "overdue");
   assert.equal(view.deliveryMode, "host");
+  assert.equal(view.sessionId, "s1"); // wire keeps owner under the legacy name
+  assert.equal(view.type, "once");
+  assert.equal(view.targetMode, "resume");
+  assert.equal(view.targetSessionId, "s1");
+  assert.equal(view.respectQuietHours, false);
+  assert.equal(view.at, "2026-09-01T00:00:00.000Z");
+  assert.equal(view.everySeconds, undefined);
+  assert.equal(view.jitterSeconds, undefined);
 });
 
-test("toAlarmView surfaces jitter only for jittered repeats", () => {
-  const base: Alarm = {
-    id: "a1",
-    sessionId: "s1",
-    mode: "repeat",
-    trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z" },
-    prompt: "p",
-    wakeReason: "heartbeat",
-    timeZone: "UTC",
-    status: "scheduled",
-    nextDueAt: "2026-09-01T01:00:00.000Z",
-    createdAt: "2026-09-01T00:00:00.000Z",
-    updatedAt: "2026-09-01T00:00:00.000Z",
-    runCount: 0,
-    lastRunAt: null
-  };
+test("toAlarmView v2: every carries interval + jitter, new targets carry no targetSessionId", () => {
+  const every = v2Alarm({
+    type: "every",
+    trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z", jitterSeconds: 600 },
+    respectQuietHours: true
+  });
   const nowMs = Date.parse("2026-08-31T00:00:00.000Z");
-  assert.equal(toAlarmView(base, nowMs).jitter, undefined);
-  const jittered: Alarm = { ...base, trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z", jitter: 0.2 } };
-  assert.equal(toAlarmView(jittered, nowMs).jitter, 0.2);
-  const zeroJitter: Alarm = { ...base, trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z", jitter: 0 } };
-  assert.equal(toAlarmView(zeroJitter, nowMs).jitter, undefined);
+  const view = toAlarmView(every, nowMs);
+  assert.equal(view.everySeconds, 3600);
+  assert.equal(view.jitterSeconds, 600);
+  assert.equal(view.respectQuietHours, true);
+  assert.equal(view.at, undefined);
+
+  const bare: Alarm = { ...every, trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z" } };
+  assert.equal(toAlarmView(bare, nowMs).jitterSeconds, undefined);
+
+  const forkView = toAlarmView(v2Alarm({ target: { mode: "fork", sessionId: "sParent" } }), nowMs);
+  assert.equal(forkView.targetMode, "fork");
+  assert.equal(forkView.targetSessionId, "sParent");
+
+  const newView = toAlarmView(v2Alarm({ target: { mode: "new" } }), nowMs);
+  assert.equal(newView.targetMode, "new");
+  assert.equal(newView.targetSessionId, undefined);
+});
+
+test("toAlarmView v2: cron exposes the expression", () => {
+  const cron: Alarm = v2Alarm({
+    type: "cron",
+    trigger: { expr: "0 9 * * 1-5", jitterSeconds: 120 },
+    timeZone: "Asia/Shanghai"
+  });
+  const view = toAlarmView(cron, Date.parse("2026-08-31T00:00:00.000Z"));
+  assert.equal(view.cron, "0 9 * * 1-5");
+  assert.equal(view.jitterSeconds, 120);
+  assert.equal(view.everySeconds, undefined);
+  assert.equal(view.at, undefined);
 });
 
 test("error helpers stay closed and stable", () => {

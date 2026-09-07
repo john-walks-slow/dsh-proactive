@@ -1,24 +1,33 @@
 /**
  * Wake driver: the agent-world mechanics behind one alarm fire.
  *
- *   live session  -> reuse the live agent handle (follow-up queued politely)
- *   cold session  -> ctx.agents.resume() on the same session id, then follow-up.
- *                    The resumed agent gets a model-selection installed on its
- *                    scope (mirroring the web host's selectionFor), so its
- *                    first buildRequest resolves provider/model even when
- *                    AgentOptions are empty: the session's own committed
- *                    request header wins, agentDefaultModel is the fallback.
+ *   target resume -> reuse the live agent handle (follow-up queued politely)
+ *                    or ctx.agents.resume() on the same session id when cold.
+ *   target fork   -> copy the parent's completed-turn prefix (host session.fork
+ *                    semantics: last `turn/end` boundary, seedLength metadata,
+ *                    parentSession lineage) into a brand-new child session and
+ *                    drive the wake there.
+ *   target new    -> drive the wake in a brand-new empty session.
+ *                    Fork/new children are real persisted sessions and stay in
+ *                    the sidebar once created.
+ *
+ * Every created/resumed agent gets a model-selection installed on its scope
+ * (mirroring the web host's selectionFor), so its first buildRequest resolves
+ * provider/model even when AgentOptions are empty: the session's own committed
+ * request header wins, agentDefaultModel is the fallback.
+ *
  *   busy agent    -> runMaintenance throws; caller retries after a short delay
  *   deep silence  -> the framing + proactive_no_reply contract; the observer
  *                    derives the decision from the committed session log
  *
- * The handle is always disposed when this driver created it (a resumed agent
- * is a process-local runtime; the persisted session itself stays intact).
+ * The handle is always disposed when this driver created it (a resumed/created
+ * agent is a process-local runtime; the persisted session itself stays intact).
  */
 
 import type { Agent, AgentOptions, AgentSetup, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
-import type { EpochHeader } from "@deepseek-ai/dsh-session";
+import type { EpochHeader, SessionEvent } from "@deepseek-ai/dsh-session";
+import { randomUUID } from "node:crypto";
 import type { Alarm, RunDecision } from "./domain.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveConfig } from "./config.js";
@@ -36,14 +45,24 @@ export interface WakeAnalysisResult {
 }
 
 export type WakeFireResult =
-  | { outcome: "ok"; analysis: WakeAnalysisResult }
+  | { outcome: "ok"; analysis: WakeAnalysisResult; /** The session the wake actually ran in. */ sessionId: string }
   | { outcome: "busy" }
-  | { outcome: "failed"; error: string };
+  | { outcome: "failed"; error: string; sessionId?: string };
 
 /** Narrow facade over the pieces of AgentRegistry / agents we actually use. */
 export interface AgentsFacade {
   get(sessionId: string): Agent | undefined;
   resume(options: ResumeFacadeOptions): Promise<AgentHandleLike>;
+  create(options: CreateFacadeOptions): Promise<AgentHandleLike>;
+}
+
+/**
+ * Read-only view of one persisted session, used to fork from a cold parent.
+ * The plugin wires this to ctx.sessionPersistence.inspect; the narrow shape
+ * keeps the driver independent of dsh-session-persistence internals.
+ */
+export interface SessionInspectLike {
+  inspect(sessionId: string): Promise<{ meta?: { cwd?: string }; events: readonly SessionEvent[] }>;
 }
 
 /**
@@ -59,6 +78,14 @@ export interface ResumeFacadeOptions {
   setup?: WakeResumeSetup;
 }
 
+export interface CreateFacadeOptions {
+  sessionId: string;
+  seed?: readonly SessionEvent[];
+  agentOptions?: AgentOptions;
+  setup?: AgentSetup;
+  meta?: { cwd?: string; parentSession?: string; seedLength?: number };
+}
+
 /** The handle surface we consume (dsh-agent AgentHandle). */
 export interface AgentHandleLike {
   agent: Agent;
@@ -67,7 +94,9 @@ export interface AgentHandleLike {
 
 export interface WakeDriverDeps {
   agents: AgentsFacade;
-  /** Provider/model override for resumed agents (from ctx.agentDefaultModel or config). */
+  /** Persisted-session reader for forking from cold parents (optional: fork degrades to failed when absent). */
+  sessionPersistence?: SessionInspectLike;
+  /** Provider/model override for resumed/created agents (from ctx.agentDefaultModel or config). */
   modelSelection: () => { provider?: string; model?: string } | undefined;
   store: ProactiveStore;
   config: ProactiveConfig;
@@ -75,9 +104,32 @@ export interface WakeDriverDeps {
   log: (level: "info" | "warn" | "error", message: string) => void;
 }
 
+/**
+ * Host session.fork seed cut, mirrored verbatim: the seed is the balanced
+ * completed-turn prefix ending at the LAST `turn/end` (extended over trailing
+ * non-turn events up to the next `turn/start`), contiguous from seq 0. 0 when
+ * the parent has no completed turn (fork unavailable).
+ */
+export function completedTurnCut(events: readonly { seq: number; type: string }[]): number {
+  let boundary = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type === "turn/end") {
+      boundary = i;
+      break;
+    }
+  }
+  if (boundary === -1) return 0;
+  let cut = events[boundary].seq + 1;
+  while (cut < events.length && events[cut]?.type !== "turn/start") cut++;
+  return cut;
+}
+
 export class WakeDriver {
   private readonly deps: WakeDriverDeps;
-  private readonly inflight = new Set<string>();
+  /** Re-fire guard per alarm id. */
+  private readonly inflightByAlarm = new Set<string>();
+  /** Wake-turn guard per session (guards proactive_no_reply by session id). */
+  private readonly inflightBySession = new Set<string>();
 
   constructor(deps: WakeDriverDeps) {
     this.deps = deps;
@@ -85,55 +137,70 @@ export class WakeDriver {
 
   /** Whether a wake for this session is currently in flight (guards proactive_no_reply). */
   isActiveWake(sessionId: string): boolean {
-    return this.inflight.has(sessionId);
+    return this.inflightBySession.has(sessionId);
   }
 
   /**
-   * Model selection for a resumed agent: the session's own committed request
-   * header wins (the same model the live session last used), agentDefaultModel
-   * is the fallback for sessions without any header. Installed on the agent's
-   * scope so the first buildRequest resolves provider/model even when
-   * AgentOptions are empty — the web host's exact pattern (selectionFor).
+   * Model selection for a resumed/created agent: the session's own committed
+   * request header wins (the same model the live session last used),
+   * agentDefaultModel is the fallback for sessions without any header.
+   * Installed on the agent's scope so the first buildRequest resolves
+   * provider/model even when AgentOptions are empty — the web host's exact
+   * pattern (selectionFor).
    */
   private createWakeSelection(agent: Agent): ModelSelectionRef {
     return createWakeSelectionRef(agent.session.requestHeader(), this.deps.modelSelection, this.deps.log);
   }
 
-  async fire(alarm: Alarm): Promise<WakeFireResult> {
-    if (this.inflight.has(alarm.sessionId)) {
-      return { outcome: "busy" };
-    }
-    this.inflight.add(alarm.sessionId);
-    let ownedHandle: AgentHandleLike | null = null;
-    try {
-      let agent = this.deps.agents.get(alarm.sessionId);
-      let presence: UserPresence = "live";
-      if (agent === undefined) {
-        const model = this.deps.modelSelection();
-        const agentOptions: AgentOptions | undefined =
-          model !== undefined && (model.provider !== undefined || model.model !== undefined)
-            ? (model.provider !== undefined ? { provider: model.provider, ...(model.model !== undefined ? { model: model.model } : {}) } : model.model !== undefined ? { model: model.model } : {})
-            : undefined;
-        ownedHandle = await this.deps.agents.resume({
-          resumeSessionId: alarm.sessionId,
-          agentOptions,
-          setup: (agentCtx) => {
-            const agent = (agentCtx as unknown as { agent: Agent }).agent;
-            // react-loop installs `agent` on the scoped ctx before setup runs;
-            // absence means the setup contract drifted — fail loudly instead of
-            // silently reproducing the original "no provider/model" error
-            if (agent === undefined) {
-              throw new Error("wake resume: resumed agent has no scoped .agent (dsh-agent setup contract drift)");
-            }
-            installModelSelection(agentCtx, this.createWakeSelection(agent));
-          }
-        });
-        agent = ownedHandle.agent;
-        presence = "cold";
-      }
+  private agentOptions(): AgentOptions | undefined {
+    const model = this.deps.modelSelection();
+    if (model === undefined || (model.provider === undefined && model.model === undefined)) return undefined;
+    const options: AgentOptions = {};
+    if (model.provider !== undefined) options.provider = model.provider;
+    if (model.model !== undefined) options.model = model.model;
+    return options;
+  }
 
+  private installSelection(agentCtx: unknown): void {
+    const agent = (agentCtx as unknown as { agent: Agent }).agent;
+    // react-loop installs `agent` on the scoped ctx before setup runs;
+    // absence means the setup contract drifted — fail loudly instead of
+    // silently reproducing the original "no provider/model" error
+    if (agent === undefined) {
+      throw new Error("wake resume: resumed agent has no scoped .agent (dsh-agent setup contract drift)");
+    }
+    installModelSelection(agentCtx as Parameters<typeof installModelSelection>[0], this.createWakeSelection(agent));
+  }
+
+  /** Events + workspace cwd of a parent session, live agent first, then persistence. */
+  private async parentLog(parentId: string): Promise<{ events: readonly SessionEvent[]; cwd?: string } | undefined> {
+    const live = this.deps.agents.get(parentId);
+    if (live !== undefined) {
+      return {
+        events: live.session.events as unknown as SessionEvent[],
+        cwd: (live.session as unknown as { meta?: { cwd?: string } }).meta?.cwd
+      };
+    }
+    if (this.deps.sessionPersistence === undefined) return undefined;
+    try {
+      const inspected = await this.deps.sessionPersistence.inspect(parentId);
+      return { events: inspected.events, cwd: inspected.meta?.cwd };
+    } catch {
+      return undefined;
+    }
+  }
+
+  async fire(alarm: Alarm): Promise<WakeFireResult> {
+    if (this.inflightByAlarm.has(alarm.id)) return { outcome: "busy" };
+    this.inflightByAlarm.add(alarm.id);
+    let ownedHandle: AgentHandleLike | null = null;
+    let agent: Agent | undefined;
+    let presence: UserPresence = "live";
+    // The session the wake will actually run in (differs from the owner for fork/new).
+    let actualSessionId = "";
+    const drive = async (): Promise<WakeFireResult> => {
       const now = this.deps.now?.() ?? Date.now();
-      const startIndex = agent.session.events.length;
+      const startIndex = agent!.session.events.length;
       const budgetUsed = this.deps.store.budgetFor(new Date(now).toISOString().slice(0, 10));
       const context: FramingContext = {
         alarm,
@@ -142,26 +209,24 @@ export class WakeDriver {
         quiet: isInQuietHours(now, this.deps.config),
         now: new Date(now),
         userPresence: presence,
-        configQuietHours: this.deps.config.quietHours,
-        heartbeatPrompt: this.deps.config.heartbeatPrompt
+        configQuietHours: this.deps.config.quietHours
       };
       const message = createFramingMessage(context);
-
       let claimed = false;
       try {
-        claimed = await agent.runMaintenance(() => {
-          agent.followup(message);
+        claimed = await agent!.runMaintenance(() => {
+          agent!.followup(message);
           return Promise.resolve(true);
         });
       } catch (_busy) {
         claimed = false;
       }
       if (!claimed) return { outcome: "busy" };
-
-      await agent.whenIdle();
-      const analysis = analyzeWakeTurn(agent.session.events as unknown as MinimalEvent[], startIndex);
+      await agent!.whenIdle();
+      const analysis = analyzeWakeTurn(agent!.session.events as unknown as MinimalEvent[], startIndex);
       return {
         outcome: "ok",
+        sessionId: actualSessionId,
         analysis: {
           decision: analysis.decision,
           budgetDelta: analysis.budgetDelta,
@@ -171,12 +236,62 @@ export class WakeDriver {
           ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {})
         }
       };
+    };
+    try {
+      if (alarm.target.mode === "resume") {
+        if (this.inflightBySession.has(alarm.target.sessionId)) return { outcome: "busy" };
+        this.inflightBySession.add(alarm.target.sessionId);
+        actualSessionId = alarm.target.sessionId;
+        agent = this.deps.agents.get(alarm.target.sessionId);
+        if (agent === undefined) {
+          ownedHandle = await this.deps.agents.resume({
+            resumeSessionId: alarm.target.sessionId,
+            agentOptions: this.agentOptions(),
+            setup: (agentCtx) => this.installSelection(agentCtx)
+          });
+          agent = ownedHandle.agent;
+          presence = "cold";
+        }
+        return await drive();
+      }
+      // fork / new — build the child session and drive it there.
+      if (alarm.target.mode === "fork") {
+        const parent = await this.parentLog(alarm.target.sessionId);
+        if (parent === undefined) {
+          return { outcome: "failed", error: "fork unavailable: parent session could not be read", sessionId: alarm.target.sessionId };
+        }
+        const cut = completedTurnCut(parent.events);
+        if (cut === 0) {
+          return { outcome: "failed", error: "fork unavailable: parent session has no completed turn", sessionId: alarm.target.sessionId };
+        }
+        const meta = { parentSession: alarm.target.sessionId, seedLength: cut, ...(parent.cwd !== undefined ? { cwd: parent.cwd } : {}) };
+        actualSessionId = "session-" + randomUUID();
+        ownedHandle = await this.deps.agents.create({
+          sessionId: actualSessionId,
+          seed: parent.events.slice(0, cut),
+          meta,
+          agentOptions: this.agentOptions(),
+          setup: (agentCtx) => this.installSelection(agentCtx)
+        });
+      } else {
+        actualSessionId = "session-" + randomUUID();
+        ownedHandle = await this.deps.agents.create({
+          sessionId: actualSessionId,
+          agentOptions: this.agentOptions(),
+          setup: (agentCtx) => this.installSelection(agentCtx)
+        });
+      }
+      this.inflightBySession.add(actualSessionId);
+      agent = ownedHandle.agent;
+      presence = "cold";
+      return await drive();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + message);
-      return { outcome: "failed", error: message };
+      return { outcome: "failed", error: message, ...(actualSessionId !== undefined ? { sessionId: actualSessionId } : {}) };
     } finally {
-      this.inflight.delete(alarm.sessionId);
+      this.inflightByAlarm.delete(alarm.id);
+      if (agent !== undefined) this.inflightBySession.delete(actualSessionId);
       if (ownedHandle !== null) {
         await ownedHandle.dispose().catch((error) => {
           this.deps.log("warn", "dispose failed for resumed handle: " + String(error && error.message || error));
@@ -242,4 +357,3 @@ export function createWakeSelectionRef(
     assembled: void 0
   };
 }
-

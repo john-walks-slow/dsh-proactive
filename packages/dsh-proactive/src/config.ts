@@ -10,7 +10,7 @@
 
 import { readFileSync } from "node:fs";
 import { writeFile, rename, mkdir } from "node:fs/promises";
-import { MAX_PROMPT_LENGTH, canonicalizeTimeZone, isRecord } from "./domain.js";
+import { canonicalizeTimeZone, isRecord } from "./domain.js";
 
 export interface QuietHours {
   /** "HH:MM" wall-clock in the configured time zone; start inclusive, end exclusive. */
@@ -37,8 +37,6 @@ export interface ProactiveConfig {
   maxRetriesPerFire: number;
   /** Upper bound for alarm prompts. */
   maxPromptLength: number;
-  /** Default heartbeat check-in prompt. */
-  heartbeatPrompt: string;
   /** Absolute directory for alarms.json / runs.jsonl / state.json / config.json. */
   dataDir: string;
 }
@@ -52,7 +50,6 @@ export const DEFAULT_CONFIG: ProactiveConfig = {
   bootOverduePolicy: "fire",
   maxRetriesPerFire: 3,
   maxPromptLength: 4000,
-  heartbeatPrompt: "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。",
   dataDir: "/root/.dsh/proactive"
 };
 
@@ -152,9 +149,6 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     bootOverduePolicy: file["bootOverduePolicy"] === "notify-only" || file["bootOverduePolicy"] === "drop" ? file["bootOverduePolicy"] : "fire",
     maxRetriesPerFire: Math.max(0, positiveInt(file["maxRetriesPerFire"], DEFAULT_CONFIG.maxRetriesPerFire, 10)),
     maxPromptLength: Math.max(1, positiveInt(file["maxPromptLength"], DEFAULT_CONFIG.maxPromptLength, 20000)),
-    heartbeatPrompt: typeof file["heartbeatPrompt"] === "string" && file["heartbeatPrompt"].trim().length > 0
-      ? file["heartbeatPrompt"].trim().slice(0, MAX_PROMPT_LENGTH) // same cap as the settings schema, keeps prefill valid
-      : DEFAULT_CONFIG.heartbeatPrompt,
     dataDir: dir
   };
   if (env["DSH_PROACTIVE_ENABLED"] === "0" || env["DSH_PROACTIVE_ENABLED"] === "false") config.enabled = false;

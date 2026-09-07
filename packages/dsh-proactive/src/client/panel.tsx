@@ -2,14 +2,14 @@
  * The settings.section panel — the host-wide Proactive view. Shows the
  * editable global config, the single alarm table (all sessions, filterable /
  * sortable / editable / deletable / per-alarm history), and the create form
- * with an explicit target-session picker. Session-scoped management lives in
- * the conversation-page tab (session-panel.tsx).
+ * with explicit owner + wake-target pickers. Session-scoped management lives
+ * in the conversation-page tab (session-panel.tsx).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ProactiveHostTransport, type PanelSnapshotDto, type SessionInfo } from "./host-api.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
-import { AlarmTable, CreateForm, HOST_PANEL_SESSION, formFromSnapshot, fmtSession, type AlarmRow, type RunRow } from "./sections.js";
+import { AlarmTable, CreateForm, HOST_PANEL_SESSION, formFromSnapshot, formFromAlarm, fmtSession, type AlarmRow, type RunRow } from "./sections.js";
 import { useProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
 
@@ -22,7 +22,6 @@ interface ConfigDraft {
   maxDeliveriesPerDay: string;
   quietStart: string;
   quietEnd: string;
-  heartbeatPrompt: string;
 }
 
 function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
@@ -30,8 +29,7 @@ function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
     enabled: snapshot.config.enabled,
     maxDeliveriesPerDay: String(snapshot.config.maxDeliveriesPerDay),
     quietStart: snapshot.config.quietHours.start,
-    quietEnd: snapshot.config.quietHours.end,
-    heartbeatPrompt: snapshot.config.heartbeatPrompt
+    quietEnd: snapshot.config.quietHours.end
   };
 }
 
@@ -44,7 +42,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<PanelCreateForm>({ prompt: "", afterSeconds: 3600 });
+  const [form, setForm] = useState<PanelCreateForm>({ prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" });
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -97,7 +95,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
       setSessions(list);
       setShowForm(false);
       setEditingId(null);
-      setForm({ prompt: "", afterSeconds: 3600 });
+      setForm({ prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       void refresh();
@@ -122,16 +120,15 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
       patch: {
         enabled: draft.enabled,
         max_deliveries_per_day: Number(draft.maxDeliveriesPerDay),
-        quiet_hours: { start: draft.quietStart, end: draft.quietEnd, time_zone: snapshot.config.quietHours.timeZone },
-        heartbeat_prompt: draft.heartbeatPrompt
+        quiet_hours: { start: draft.quietStart, end: draft.quietEnd, time_zone: snapshot.config.quietHours.timeZone }
       }
     });
   }, [run, draft, snapshot]);
 
   const alarms: AlarmRow[] = snapshot?.alarms ?? [];
 
-  // Target-session picker options: the full host session list when available;
-  // fall back to the distinct sessions seen across alarms (e.g. the session
+  // Owner-session picker options: the full host session list when available;
+  // fall back to the distinct owners seen across alarms (e.g. the session
   // list fetch failed, or legacy rows outlive their sessions).
   const pickerOptions = useMemo(() => {
     if (sessions.length > 0) return sessions;
@@ -148,6 +145,8 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     return options.find((s) => s.id.startsWith("session-"))?.id ?? options[0].id;
   }, []);
 
+  const resetForm = (): PanelCreateForm => ({ prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" });
+
   const openCreate = useCallback(() => {
     setEditingId(null);
     setForm({ ...formFromSnapshot(snapshot), sessionId: preferredSession(pickerOptions) });
@@ -157,22 +156,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
   const openEdit = useCallback((id: string) => {
     const alarm = snapshot?.alarms.find((a) => a.id === id);
     if (alarm === undefined) return;
-    const next: PanelCreateForm = {
-      prompt: alarm.prompt,
-      wakeReason: alarm.wakeReason,
-      sessionId: alarm.sessionId
-    };
-    if (alarm.mode === "repeat" && alarm.everySeconds !== undefined) {
-      next.everySeconds = alarm.everySeconds;
-      next.jitter = alarm.jitter ?? 0;
-    } else if (alarm.at !== undefined) {
-      // One-shot at instant → offer "from now" so the edit form stays
-      // one dialect; the row keeps showing its planned instant until saved.
-      const remaining = Math.max(1, Math.floor((new Date(alarm.at).getTime() - Date.now()) / 1000));
-      next.afterSeconds = remaining;
-    } else {
-      next.afterSeconds = 3600;
-    }
+    const next = { ...formFromAlarm(alarm), sessionId: alarm.sessionId };
     setEditingId(id);
     setForm(next);
     setShowForm(true);
@@ -248,11 +232,6 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
                 <input className="dshp-input" type="time" value={(draft ?? configDraftFrom(snapshot)).quietEnd} disabled={busy}
                   onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), quietEnd: e.target.value })} />
               </div>
-            </div>
-            <div className="dshp-field">
-              <label className="dshp-field-label">心跳唤醒指令（默认值）</label>
-              <textarea className="dshp-input dshp-grow" rows={2} value={(draft ?? configDraftFrom(snapshot)).heartbeatPrompt} disabled={busy}
-                onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), heartbeatPrompt: e.target.value })} />
             </div>
             <div className="dshp-btn-row">
               <button className="dshp-btn dshp-btn-primary" disabled={busy} onClick={() => { void submitConfig(); }}>{copy.saveConfig}</button>

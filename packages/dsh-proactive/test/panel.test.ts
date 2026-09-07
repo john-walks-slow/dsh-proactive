@@ -2,6 +2,9 @@
  * Panel + settings-wiring unit tests: the host side of the GUI feature.
  * Covers the closed action vocabulary end-to-end over an in-memory store,
  * hot-config application, and the store change hooks powering SSE.
+ *
+ * v2 (260907-proactive-alarm-v2): ownership is the alarm's creator
+ * (ownerSessionId); fork/new child wakes appear in the owner's run history.
  */
 
 import { test } from "node:test";
@@ -22,6 +25,8 @@ interface Harness {
   service: ProactivePanelService;
   drives: () => number;
   config: ProactiveConfig;
+  /** Advance the harness clock; alarms become overdue / anchor-aligned as time moves. */
+  advance: (ms: number) => void;
 }
 
 async function harness(titleOverrides?: Record<string, string>): Promise<Harness> {
@@ -29,21 +34,25 @@ async function harness(titleOverrides?: Record<string, string>): Promise<Harness
   const store = new ProactiveStore(dir);
   const config: ProactiveConfig = { ...DEFAULT_CONFIG, quietHours: { ...DEFAULT_CONFIG.quietHours } };
   const drives: { count: number } = { count: 0 };
+  let clock = NOW;
   const service = new ProactivePanelService({
     store,
     config,
     scheduler: { requestDrive: () => { drives.count += 1; } },
     dataDir: dir,
-    now: () => NOW,
+    now: () => clock,
     log: () => undefined,
-    sessionTitle: (sessionId) => titleOverrides?.[sessionId] ?? ""
+    sessionTitle: (sessionId) => titleOverrides?.[sessionId] ?? "",
+    sessionEvents: (sessionId) => (sessionId.startsWith("sess-") ? [{ type: "user/message", source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } }] : undefined)
   });
-  return { store, service, drives: () => drives.count, config };
+  return { store, service, drives: () => drives.count, config, advance: (ms) => { clock += ms; } };
 }
 
 function createAction(session: string, extra: Record<string, unknown> = {}): unknown {
   return { action: { kind: "create", sessionId: session, args: { prompt: "Check in with the user", after_seconds: 60, ...extra } } };
 }
+
+const row = (snap: { alarms: Array<Record<string, unknown>> }, index = 0): Record<string, unknown> => snap.alarms[index] as Record<string, unknown>;
 
 test("panel: create -> visible in snapshot -> cancel -> not_found", async () => {
   const h = await harness();
@@ -75,11 +84,15 @@ test("panel: create rejects a bad trigger through the shared validator", async (
   assert.equal(twoSelectors.ok, false);
 });
 
-test("panel: toggle pauses then resumes a repeat alarm", async () => {
+test("panel: toggle pauses then resumes an every alarm", async () => {
   const h = await harness();
-  const created = await h.service.action(createAction("sess-a", { every_seconds: 3600 }));
+  const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "Check in with the user", every_seconds: 3600 } } });
+  assert.equal(created.ok, true, "every create must not silently fail");
   if (!created.ok) return;
   const id = created.snapshot.alarms[0].id;
+  // Move the clock past the first occurrence so resume visibly re-anchors
+  // instead of resolving to the same instant (constant-clock footgun).
+  h.advance(7200_000);
   const paused = await h.service.action({ action: { kind: "toggle", id } });
   assert.equal(paused.ok, true);
   if (!paused.ok) return;
@@ -88,7 +101,7 @@ test("panel: toggle pauses then resumes a repeat alarm", async () => {
   assert.equal(resumed.ok, true);
   if (!resumed.ok) return;
   assert.equal(resumed.snapshot.alarms[0].state, "scheduled");
-  assert.ok(resumed.snapshot.alarms[0].nextDueAt > created.snapshot.alarms[0].nextDueAt, "repeat resumes to the next anchor");
+  assert.ok(resumed.snapshot.alarms[0].nextDueAt > created.snapshot.alarms[0].nextDueAt, "every resumes to the next anchor");
 });
 
 test("panel: fire re-arms an alarm at now and requests a drive", async () => {
@@ -113,22 +126,22 @@ test("panel: unknown action kind and malformed envelope are rejected", async () 
   assert.equal(noEnvelope.ok, false);
 });
 
-test("panel snapshot carries configuration summary", async () => {
+test("panel snapshot carries configuration summary (no heartbeat dial)", async () => {
   const h = await harness();
   const snap = await h.service.snapshot();
   assert.equal(snap.config.enabled, h.config.enabled);
   assert.equal(snap.config.quietHours.start, h.config.quietHours.start);
-  assert.equal(snap.config.heartbeatPrompt, h.config.heartbeatPrompt);
+  assert.ok(!("heartbeatPrompt" in snap.config), "v2 config view has no heartbeatPrompt");
   assert.equal(snap.server.dataDir, h.store.dataDir);
 });
 
-test("panel: jittered repeat appears in the snapshot", async () => {
+test("panel: jittered every appears in the snapshot", async () => {
   const h = await harness();
-  const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "p", every_seconds: 3600, jitter: 0.2 } } });
+  const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "p", every_seconds: 3600, jitter_seconds: 120 } } });
   assert.equal(created.ok, true);
   if (!created.ok) return;
-  assert.equal(created.snapshot.alarms[0].jitter, 0.2);
-  assert.equal(created.snapshot.alarms[0].everySeconds, 3600, "repeat rows carry everySeconds for the edit form");
+  assert.equal(created.snapshot.alarms[0].jitterSeconds, 120);
+  assert.equal(created.snapshot.alarms[0].everySeconds, 3600, "every rows carry everySeconds for the edit form");
   const id = created.snapshot.alarms[0].id;
   // Pause + resume keeps the alarm alive; the resumed due is strictly future.
   const paused = await h.service.action({ action: { kind: "toggle", id } });
@@ -141,6 +154,26 @@ test("panel: jittered repeat appears in the snapshot", async () => {
   assert.ok(Date.parse(resumed.snapshot.alarms[0].nextDueAt) > NOW);
 });
 
+test("panel: create without time_zone uses the selector session's browser zone", async () => {
+  const h = await harness();
+  const created = await h.service.action(createAction("sess-a"));
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  assert.equal(h.store.listAlarms().find((alarm) => alarm.ownerSessionId === "sess-a")?.timeZone, "Asia/Tokyo");
+  // A local at instant flows through the same chain when the form left the
+  // at zone empty (the panel has no zone field at all).
+  const at = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "p", at: { date: "2026-09-02", time: "14:30:00", time_zone: "" } } } });
+  assert.equal(at.ok, true);
+  if (!at.ok) return;
+  const atAlarm = h.store.listAlarms().filter((alarm) => alarm.ownerSessionId === "sess-a").at(-1);
+  assert.equal(atAlarm?.timeZone, "Asia/Tokyo");
+  // explicit time_zone still wins
+  const explicit = await h.service.action({ action: { kind: "create", sessionId: "sess-b", args: { prompt: "p", after_seconds: 60, time_zone: "UTC" } } });
+  assert.equal(explicit.ok, true);
+  if (!explicit.ok) return;
+  assert.equal(h.store.listAlarms().find((alarm) => alarm.ownerSessionId === "sess-b")?.timeZone, "UTC");
+});
+
 test("panel: one-shot rows carry the absolute at instant for the edit form", async () => {
   const h = await harness();
   const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "p", at: "2026-08-30T14:00:00+08:00" } } });
@@ -150,6 +183,15 @@ test("panel: one-shot rows carry the absolute at instant for the edit form", asy
   assert.equal(created.snapshot.alarms[0].everySeconds, undefined);
 });
 
+test("panel: cron rows carry the expression for the edit form", async () => {
+  const h = await harness();
+  const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "p", cron: "0 9 * * 1-5", jitter_seconds: 60, time_zone: "Asia/Shanghai" } } });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  assert.equal(created.snapshot.alarms[0].cron, "0 9 * * 1-5");
+  assert.equal(created.snapshot.alarms[0].jitterSeconds, 60);
+});
+
 test("panel: edit replaces prompt and trigger while keeping identity and history", async () => {
   const h = await harness();
   const created = await h.service.action(createAction("sess-a", { every_seconds: 3600 }));
@@ -157,14 +199,14 @@ test("panel: edit replaces prompt and trigger while keeping identity and history
   const original = created.snapshot.alarms[0];
   await h.store.appendRun({ id: "r1", alarmId: original.id, sessionId: "sess-a", firedAt: new Date(NOW).toISOString(), decision: "reply", budgetDelta: 1 });
 
-  const edited = await h.service.action({ action: { kind: "edit", id: original.id, args: { prompt: "edited prompt", every_seconds: 1800, jitter: 0.1 } } });
+  const edited = await h.service.action({ action: { kind: "edit", id: original.id, args: { prompt: "edited prompt", every_seconds: 1800, jitter_seconds: 60 } } });
   assert.equal(edited.ok, true);
   if (!edited.ok) return;
   const row = edited.snapshot.alarms[0];
   assert.equal(row.id, original.id, "edit keeps the alarm identity");
   assert.equal(row.prompt, "edited prompt");
   assert.equal(row.everySeconds, 1800);
-  assert.equal(row.jitter, 0.1);
+  assert.equal(row.jitterSeconds, 60);
   assert.equal(edited.snapshot.runs.length, 1, "run history survives the edit");
   const stored = h.store.getAlarm(original.id);
   assert.equal(stored?.runCount, 0, "runCount untouched");
@@ -175,7 +217,6 @@ test("panel: edit of an in-flight or completed alarm is rejected", async () => {
   const created = await h.service.action(createAction("sess-a"));
   if (!created.ok) return;
   const id = created.snapshot.alarms[0].id;
-  // Modern store API: mark completed directly.
   const alarm = h.store.getAlarm(id);
   assert.ok(alarm !== undefined);
   h.store.replaceAlarm({ ...alarm, status: "in-flight" });
@@ -200,15 +241,71 @@ test("panel: edit respects the session ownership guard", async () => {
   assert.equal(allowed.snapshot.alarms[0].prompt, "mine");
 });
 
+test("panel: create rolls back and reports persistence_uncertain when persist fails", async () => {
+  const h = await harness();
+  const originalPersist = h.store.persist.bind(h.store);
+  h.store.persist = async () => { throw new Error("disk full"); };
+  try {
+    const created = await h.service.action(createAction("sess-a"));
+    assert.equal(created.ok, false);
+    if (created.ok) return;
+    assert.equal(created.error.code, "persistence_uncertain");
+    assert.equal(h.store.listAlarms().length, 0); // rolled back in memory
+    assert.equal(h.drives(), 0); // no re-arm for a rolled-back change
+  } finally {
+    h.store.persist = originalPersist;
+  }
+});
+
+test("panel: cancel rolls back and reports persistence_uncertain when persist fails", async () => {
+  const h = await harness();
+  const created = await h.service.action(createAction("sess-a"));
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const id = created.snapshot.alarms[0].id;
+  const originalPersist = h.store.persist.bind(h.store);
+  h.store.persist = async () => { throw new Error("disk full"); };
+  try {
+    const cancelled = await h.service.action({ action: { kind: "cancel", id } });
+    assert.equal(cancelled.ok, false);
+    if (cancelled.ok) return;
+    assert.equal(cancelled.error.code, "persistence_uncertain");
+    assert.equal(h.store.listAlarms().length, 1); // alarm survives the rollback
+  } finally {
+    h.store.persist = originalPersist;
+  }
+});
+
+test("panel: edit rolls back to the exact prior alarm when persist fails", async () => {
+  const h = await harness();
+  const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "Check in with the user", every_seconds: 3600 } } });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const id = created.snapshot.alarms[0].id;
+  const before = h.store.getAlarm(id);
+  const originalPersist = h.store.persist.bind(h.store);
+  h.store.persist = async () => { throw new Error("disk full"); };
+  try {
+    const edited = await h.service.action({ action: { kind: "edit", id, args: { prompt: "changed", every_seconds: 7200 } } });
+    assert.equal(edited.ok, false);
+    if (edited.ok) return;
+    assert.equal(edited.error.code, "persistence_uncertain");
+    const after = h.store.getAlarm(id);
+    assert.deepEqual(after, before); // identity, trigger, and history all preserved
+  } finally {
+    h.store.persist = originalPersist;
+  }
+});
+
 test("panel: update_config persists and hot-applies a partial patch", async () => {
   const h = await harness();
   const result = await h.service.action({
-    action: { kind: "update_config", patch: { max_deliveries_per_day: 5, heartbeat_prompt: " 新文案 " } }
+    action: { kind: "update_config", patch: { max_deliveries_per_day: 5 } }
   });
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.snapshot.config.maxDeliveriesPerDay, 5);
-  assert.equal(result.snapshot.config.heartbeatPrompt, "新文案");
+  assert.ok(!("heartbeatPrompt" in result.snapshot.config));
   assert.equal(h.config.maxDeliveriesPerDay, 5, "hot apply reached the live config");
 });
 
@@ -221,27 +318,45 @@ test("panel: update_config rejects invalid patches without side effects", async 
   assert.equal(h.config.enabled, true, "no hot apply on a rejected patch");
 });
 
-test("createArgsFromForm matches the tool dialect (after_seconds form)", () => {
-  const form: PanelCreateForm = { prompt: "p", afterSeconds: 900, timeZone: "Asia/Shanghai", wakeReason: "heartbeat" };
+test("createArgsFromForm maps the v2 form to the tool dialect (once)", () => {
+  const form: PanelCreateForm = { prompt: "p", kind: "once", afterSeconds: 900, timeZone: "Asia/Shanghai" };
   const args = createArgsFromForm(form);
   assert.equal(args["after_seconds"], 900);
   assert.equal(args["prompt"], "p");
-  assert.equal(args["wake_reason"], "heartbeat");
-  assert.ok(!("delivery" in args), "no delivery fields leak into the tool dialect");
+  assert.equal(args["time_zone"], "Asia/Shanghai");
+  assert.ok(!("every_seconds" in args) && !("cron" in args) && !("at" in args), "once selects exactly one selector");
+  assert.ok(!("delivery" in args) && !("wake_reason" in args), "legacy dials never leak into the tool dialect");
 });
 
-test("createArgsFromForm carries jitter for the every_seconds form", () => {
-  const form: PanelCreateForm = { prompt: "p", everySeconds: 3600, jitter: 0.15 };
+test("createArgsFromForm maps local date/time for once", () => {
+  const form: PanelCreateForm = { prompt: "p", kind: "once", atDate: "2026-09-02", atTime: "14:30", timeZone: "Asia/Shanghai" };
   const args = createArgsFromForm(form);
-  assert.equal(args["every_seconds"], 3600);
-  assert.equal(args["jitter"], 0.15);
+  assert.deepEqual(args["at"], { date: "2026-09-02", time: "14:30:00", time_zone: "Asia/Shanghai" });
+  assert.ok(!("after_seconds" in args));
+  // No zone field on the form (the panel never shows one): the at slot is left
+  // empty and the host default chain (client zone -> host zone) fills it.
+  const formless: PanelCreateForm = { prompt: "p", kind: "once", atDate: "2026-09-02", atTime: "14:30" };
+  const wired = createArgsFromForm(formless);
+  assert.deepEqual(wired["at"], { date: "2026-09-02", time: "14:30:00", time_zone: "" });
 });
 
-test("P1 regression: createArgsFromForm never carries stale jitter into after_seconds", () => {
-  const form: PanelCreateForm = { prompt: "p", afterSeconds: 900, jitter: 0.1 };
-  const args = createArgsFromForm(form);
-  assert.equal(args["after_seconds"], 900);
-  assert.ok(!("jitter" in args), "stale jitter must not leak into after_seconds args");
+test("createArgsFromForm maps every/cron plus jitter, target and respect switch", () => {
+  const every = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 3600, jitterSeconds: 120 } satisfies PanelCreateForm);
+  assert.equal(every["every_seconds"], 3600);
+  assert.equal(every["jitter_seconds"], 120);
+  const cron = createArgsFromForm({ prompt: "p", kind: "cron", cron: "0 9 * * 1-5", jitterSeconds: 60 } satisfies PanelCreateForm);
+  assert.equal(cron["cron"], "0 9 * * 1-5");
+  assert.equal(cron["jitter_seconds"], 60);
+  const target = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 300, respectQuietHours: true, targetMode: "fork", targetSessionId: "sParent" } satisfies PanelCreateForm);
+  assert.equal(target["respect_quiet_hours"], true);
+  assert.equal(target["target_mode"], "fork");
+  assert.equal(target["target_session_id"], "sParent");
+  const fresh = createArgsFromForm({ prompt: "p", kind: "new" as PanelCreateForm["kind"], cron: "0 9 * * *", targetMode: "new" } satisfies PanelCreateForm);
+  assert.equal(fresh["target_mode"], "new");
+  assert.ok(!("target_session_id" in fresh));
+  // once also carries jitter (all three types support it in v2).
+  const onceJittered = createArgsFromForm({ prompt: "p", kind: "once", afterSeconds: 900, jitterSeconds: 30 } satisfies PanelCreateForm);
+  assert.equal(onceJittered["jitter_seconds"], 30);
 });
 
 test("applyHotConfig mutates only the hot subset and reports change", () => {
@@ -249,12 +364,10 @@ test("applyHotConfig mutates only the hot subset and reports change", () => {
   const next = hotSubset(config);
   next.maxDeliveriesPerDay = 5;
   next.bootOverduePolicy = "drop";
-  next.heartbeatPrompt = "hb";
   const changed = applyHotConfig(config, next);
   assert.equal(changed, true);
   assert.equal(config.maxDeliveriesPerDay, 5);
   assert.equal(config.bootOverduePolicy, "drop");
-  assert.equal(config.heartbeatPrompt, "hb");
   assert.equal(config.dataDir, DEFAULT_CONFIG.dataDir);
   const again = applyHotConfig(config, next);
   assert.equal(again, false);
@@ -273,20 +386,28 @@ test("store: change listeners fire on mutation and dispose works", async () => {
 
 test("panel: session-scoped snapshot filters alarms and runs", async () => {
   const h = await harness();
-  await h.service.action(createAction("sess-a"));
-  await h.service.action(createAction("sess-b"));
-  await h.store.appendRun({ id: "r1", alarmId: "a1", sessionId: "sess-a", firedAt: new Date(NOW).toISOString(), decision: "reply", budgetDelta: 1 });
-  await h.store.appendRun({ id: "r2", alarmId: "a2", sessionId: "sess-b", firedAt: new Date(NOW).toISOString(), decision: "no_reply", budgetDelta: 0 });
+  const a = await h.service.action(createAction("sess-a"));
+  const b = await h.service.action(createAction("sess-b"));
+  if (!a.ok || !b.ok) return;
+  // Snapshot rows come back host-wide; resolve each owner's actual alarm id
+  // from the store instead of assuming snapshot order.
+  const aId = h.store.listAlarms().find((alarm) => alarm.ownerSessionId === "sess-a")!.id;
+  const bId = h.store.listAlarms().find((alarm) => alarm.ownerSessionId === "sess-b")!.id;
+  await h.store.appendRun({ id: "r1", alarmId: aId, sessionId: "sess-a", firedAt: new Date(NOW).toISOString(), decision: "reply", budgetDelta: 1 });
+  await h.store.appendRun({ id: "r2", alarmId: bId, sessionId: "sess-b", firedAt: new Date(NOW).toISOString(), decision: "no_reply", budgetDelta: 0 });
+  // A fork/new child wake: its run session is NOT the owner, but the run still
+  // belongs to the owner's history because the alarm is owned by sess-a.
+  await h.store.appendRun({ id: "r3", alarmId: aId, sessionId: "session-child-1", firedAt: new Date(NOW).toISOString(), decision: "reply", budgetDelta: 1 });
 
   const global = await h.service.snapshot();
   assert.equal(global.alarms.length, 2);
-  assert.equal(global.runs.length, 2);
+  assert.equal(global.runs.length, 3);
 
   const scoped = await h.service.snapshot("sess-a");
   assert.equal(scoped.alarms.length, 1);
   assert.equal(scoped.alarms[0].sessionId, "sess-a");
-  assert.equal(scoped.runs.length, 1);
-  assert.equal(scoped.runs[0].sessionId, "sess-a");
+  assert.equal(scoped.runs.length, 2);
+  assert.deepEqual(scoped.runs.map((run) => run.id).sort(), ["r1", "r3"], "owner runs + fork-child runs both show");
 });
 
 test("panel: alarm rows carry the resolved session title", async () => {
@@ -348,7 +469,7 @@ test("panel: host-wide cancel still works without a session scope", async () => 
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.snapshot.alarms.length, 1);
-  assert.equal(h.store.listAlarms()[0].sessionId, "sess-b");
+  assert.equal(h.store.listAlarms()[0].ownerSessionId, "sess-b");
 });
 
 test("panel: scope rule — create under a session scope must name that session", async () => {

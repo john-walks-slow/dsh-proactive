@@ -2,6 +2,11 @@
  * Locale dictionaries for the Proactive surfaces (settings section + the
  * conversation-page tab). Registered through ctx.locale.register so the tab
  * label and all copy follow the current UI language.
+ *
+ * v2 (260907-proactive-alarm-v2): wake_reason / mode / jitter-ratio /
+ * heartbeatPrompt copy removed; the vocabulary is now the three alarm types
+ * (once/every/cron), the three target modes (resume/fork/new), the
+ * per-alarm respect-quiet-hours switch and the unified jitter seconds.
  */
 
 export interface ProactivePanelCopy {
@@ -28,27 +33,35 @@ export interface ProactivePanelCopy {
   alarms: string;
   session: string;
   prompt: string;
-  wakeReason: string;
   state: string;
   nextDue: string;
-  mode: string;
+  type: string;
+  target: string;
   emptyAlarms: string;
   emptyRuns: string;
   filterAllStates: string;
   filterAllSessions: string;
-  filterAllModes: string;
+  filterAllTypes: string;
   sortBy: string;
   sortNextDue: string;
   sortCreated: string;
   sortPrompt: string;
   /* create/edit form */
-  triggerKind: string;
-  afterSeconds: string;
+  delaySeconds: string;
+  atDateTime: string;
   everySeconds: string;
-  jitter: string;
+  cronExpression: string;
+  cronPlaceholder: string;
+  jitterSeconds: string;
+  jitterPlaceholder: string;
+  jitterEveryHint: string;
+  respectQuietHours: string;
+  quietHint: string;
   targetSession: string;
+  forkSourceSession: string;
   selectSession: string;
   selectSessionFail: string;
+  newSessionHint: string;
   /* global config */
   budget: string;
   quietHours: string;
@@ -87,26 +100,34 @@ export const zh: ProactivePanelCopy = {
   alarms: "闹钟",
   session: "所属会话",
   prompt: "唤醒指令",
-  wakeReason: "唤醒原因",
   state: "状态",
   nextDue: "下次触发",
-  mode: "模式",
+  type: "类型",
+  target: "目标",
   emptyAlarms: "暂无闹钟。创建一个，模型到点会主动跟进。",
   emptyRuns: "还没有唤醒记录。",
   filterAllStates: "全部状态",
   filterAllSessions: "全部会话",
-  filterAllModes: "全部模式",
+  filterAllTypes: "全部类型",
   sortBy: "排序",
   sortNextDue: "下次触发",
   sortCreated: "创建时间",
   sortPrompt: "指令",
-  triggerKind: "触发方式",
-  afterSeconds: "延迟秒数",
+  delaySeconds: "延迟秒数（从现在起）",
+  atDateTime: "指定日期时间",
   everySeconds: "固定间隔秒数",
-  jitter: "随机抖动 (±比例 0-1)",
+  cronExpression: "Cron 表达式",
+  cronPlaceholder: "5 段，如 0 9 * * 1-5（分 时 日 月 周）",
+  jitterSeconds: "随机抖动（秒）",
+  jitterPlaceholder: "0 = 准时触发",
+  jitterEveryHint: "建议 ≤ 间隔秒数",
+  respectQuietHours: "遵从免打扰时段",
+  quietHint: "不勾选 = 你明确要求：免打扰时段也照常触发，且不受每日预算限制",
   targetSession: "目标会话",
+  forkSourceSession: "分支源会话",
   selectSession: "请选择会话…",
   selectSessionFail: "无法获取会话列表",
+  newSessionHint: "唤醒时新建一个空会话，不依赖任何既有会话",
   budget: "每日预算",
   quietHours: "安静时段",
   globalView: "全局视图",
@@ -141,28 +162,36 @@ export const en: ProactivePanelCopy = {
   copyId: "Copy session ID",
   copied: "Copied",
   alarms: "Alarms",
-  session: "Session",
+  session: "Owner session",
   prompt: "Wake-up instruction",
-  wakeReason: "Wake reason",
   state: "State",
   nextDue: "Next due",
-  mode: "Mode",
+  type: "Type",
+  target: "Target",
   emptyAlarms: "No alarms yet. Create one and the model will proactively follow up on schedule.",
   emptyRuns: "No wake runs yet.",
   filterAllStates: "All states",
   filterAllSessions: "All sessions",
-  filterAllModes: "All modes",
+  filterAllTypes: "All types",
   sortBy: "Sort by",
   sortNextDue: "Next due",
   sortCreated: "Created",
   sortPrompt: "Prompt",
-  triggerKind: "Trigger",
-  afterSeconds: "Delay seconds",
+  delaySeconds: "Delay seconds (from now)",
+  atDateTime: "Pick date & time",
   everySeconds: "Fixed interval seconds",
-  jitter: "Random jitter (±ratio 0-1)",
+  cronExpression: "Cron expression",
+  cronPlaceholder: "5 fields, e.g. 0 9 * * 1-5 (min hour dom month dow)",
+  jitterSeconds: "Jitter seconds",
+  jitterPlaceholder: "0 = exact",
+  jitterEveryHint: "should be ≤ interval",
+  respectQuietHours: "Respect quiet hours",
+  quietHint: "Unchecked = your explicit request: fires even in quiet hours, exempt from the daily budget",
   targetSession: "Target session",
+  forkSourceSession: "Fork source session",
   selectSession: "Select a session…",
   selectSessionFail: "session list unavailable",
+  newSessionHint: "The wake runs in a fresh empty session.",
   budget: "Daily budget",
   quietHours: "Quiet hours",
   globalView: "Global view",

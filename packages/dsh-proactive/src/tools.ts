@@ -10,6 +10,12 @@
  *
  * The stores they touch are host-level (the plugin singleton), so they work
  * identically in cold-wake turns and in ordinary user turns.
+ *
+ * v2 (260907-proactive-alarm-v2): the wake_reason dial is gone; proactive_set
+ * now takes exactly one of at | after_seconds | every_seconds | cron (the
+ * alarm type falls out of it) plus the unified jitter_seconds, the
+ * respect_quiet_hours switch (default false) and the target_mode /
+ * target_session_id destination (default: this session, i.e. resume).
  */
 
 import type { Context } from "@deepseek-ai/cordis";
@@ -18,31 +24,22 @@ import type { ContentBlock } from "@deepseek-ai/dsh-llm";
 import type { JsonValue } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
+  MAX_JITTER_SECONDS,
   MAX_NO_REPLY_REASON_LENGTH,
-  MAX_PROMPT_LENGTH,
-  MIN_EVERY_SECONDS,
-  WAKE_REASONS,
   inputError,
   internalError,
   isToolError,
-  isRecord,
-  nextEveryOccurrence,
-  requireFuture,
-  resolveAtInput,
   toAlarmView,
-  validatePrompt,
   type Alarm,
-  type AlarmTrigger,
-  type AtInput,
-  type ToolError,
-  type WakeReason
+  type ToolError
 } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
 import { writeConfigFile } from "./config.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveScheduler } from "./scheduler.js";
 import type { WakeDriver } from "./wake.js";
-import { buildAlarm, validateCreateArgs, type CreateSpec } from "./alarm-factory.js";
+import { buildAlarm, validateCreateArgs } from "./alarm-factory.js";
+import { effectiveTimeZone, wireTimeZones } from "./zone.js";
 import { applyHotConfig, hotSubset, validateSettingsPatch, type HotConfig } from "./settings.js";
 
 export interface ToolServices {
@@ -68,22 +65,24 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
   additionalProperties: false,
   properties: {
     id: { type: "string", required: true },
-    mode: { type: "string", required: true, enum: ["one-shot", "repeat"] },
-    // Deliberately no enum: persisted alarms may still carry legacy wake
-    // reasons ("interval"/"companion" from before the merge). dsh-tools
-    // validates tool OUTPUT against this schema at runtime, so an enum here
-    // would make proactive_list throw INVALID_TOOL_OUTPUT for such alarms.
-    // Creation stays closed: proactive_set's parameter enum is the gate.
-    wakeReason: { type: "string", required: true },
+    sessionId: { type: "string", required: true },
+    type: { type: "string", required: true, enum: ["once", "every", "cron"] },
+    targetMode: { type: "string", required: true, enum: ["resume", "fork", "new"] },
+    // Present only for resume/fork targets; "new" never carries one.
+    targetSessionId: { type: "string" },
+    respectQuietHours: { type: "boolean", required: true },
     prompt: { type: "string", required: true },
     nextDueAt: { type: "string", required: true },
-    state: { type: "string", required: true, enum: ["scheduled", "overdue", "in-flight", "completed", "cancelled", "failed"] },
+    state: { type: "string", required: true, enum: ["scheduled", "overdue", "in-flight", "completed", "cancelled", "failed", "paused"] },
     deliveryMode: { type: "string", required: true, const: "host" },
-    // Optional repeat randomness; only present for jittered repeats. Deliberately
-    // NOT required: dsh-tools compiles required:true per-property into the top-level
-    // required array, so requiring it here would break non-jittered alarms on the
-    // runtime output gate (INVALID_TOOL_OUTPUT: missing required).
-    jitter: { type: "number" }
+    // Optional trigger specifics; present only for the matching alarm type.
+    // Deliberately NOT required: dsh-tools compiles required:true per-property
+    // into the top-level required array, so requiring these here would break
+    // the runtime output gate (INVALID_TOOL_OUTPUT: missing required).
+    everySeconds: { type: "integer" },
+    cron: { type: "string" },
+    at: { type: "string" },
+    jitterSeconds: { type: "integer" }
   }
 };
 
@@ -107,8 +106,7 @@ const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
     max_concurrent_per_session: { type: "integer", required: true },
     boot_overdue_policy: { type: "string", required: true },
     max_retries_per_fire: { type: "integer", required: true },
-    max_prompt_length: { type: "integer", required: true },
-    heartbeat_prompt: { type: "string", required: true }
+    max_prompt_length: { type: "integer", required: true }
   }
 };
 
@@ -121,16 +119,26 @@ function presentCard(title: string, rawInput: string): ToolCallView {
 }
 
 
-/** Build the four tool definitions bound to one agent + its host services. */
+/**
+ * The executor's session events (live in-memory store), or undefined when the
+ * host didn't expose one — callers then fall back to the host zone.
+ */
+function sessionEventsOf(agent: Agent): readonly unknown[] | undefined {
+  const ctx = agent.ctx as unknown as { sessions?: { get?: (id: string) => { events?: readonly unknown[] } | undefined } } | undefined;
+  return ctx?.sessions?.get?.(agent.session.id)?.events;
+}
+
+/** Build the five tool definitions bound to one agent + its host services. */
 export function proactiveToolDefinitions(agent: Agent, services: ToolServices): ToolDefinition[] {
   return [
         defineTool({
           name: "proactive_set",
-          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, or every_seconds of at least 300 for a fixed-rate repeat (optionally with jitter 0..1 for randomized intervals). The prompt is required for wake_reason alarm (the user's instruction); it is optional for wake_reason heartbeat, where the configured default heartbeat wording is always used as the base and an optional prompt adds extra direction. The alarm fires even when this session is cold; the wake turn is framed so the model can stay silent with proactive_no_reply.",
+          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, or a five-field cron expression (minute hour day-of-month month day-of-week; occurrences at least 300 seconds apart). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required. The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent with proactive_no_reply.",
           parameters: {
             prompt: {
               type: "string",
-              description: "What the wake turn should do, in the user's language and context. Plain, concrete instruction. Optional for wake_reason=heartbeat: an omitted prompt means \"just the configured default heartbeat wording\" (the wake always leads with it); supply one only for extra direction. Required for wake_reason=alarm."
+              required: true,
+              description: "What the wake turn should do, in the user's language and context. Plain, concrete instruction; always required."
             },
             at: {
               oneOf: [
@@ -140,10 +148,13 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
               description: "Absolute target with an explicit or implied time zone."
             },
             after_seconds: { type: "integer", description: "Positive delay in seconds from now." },
-            every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; without jitter, occurrences align to creation time and missed ones are skipped." },
-            jitter: { type: "number", description: "Optional repeat randomness 0..1: each interval is scaled by (1 ± jitter·uniform(0,1)) so consecutive wakes are not metronomic. 0/default = fixed rate. Only meaningful with every_seconds." },
-            time_zone: { type: "string", description: "IANA Area/Location used for at alignment and quiet-hours reporting (default UTC)." },
-            wake_reason: { type: "string", enum: WAKE_REASONS, description: "heartbeat: model-initiated periodic check-in (gated by quiet hours and daily budget) | alarm: user-requested reminder (quiet-hours and budget exempt). Default alarm." }
+            every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; occurrences align to creation time and missed ones are skipped." },
+            cron: { type: "string", description: "Five-field numeric cron expression, e.g. '0 9 * * 1-5' (minute hour day-of-month month day-of-week; 0 and 7 = Sunday; dom/dow OR rule; no names, '?' or seconds)." },
+            jitter_seconds: { type: "integer", description: "Unified per-occurrence random delay in seconds, 0.." + MAX_JITTER_SECONDS + " (0 = exact timing). Each fire is delayed by a uniform random amount drawn from (0, jitter_seconds]; absent/0 = no jitter." },
+            respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: defers inside the quiet window and is skipped when the daily budget is exhausted." },
+            target_mode: { type: "string", enum: ["resume", "fork", "new"], description: "resume (default): wake the target session itself. fork: copy the target session's completed history into a new child session and wake it there. new: wake in a brand-new empty session. Fork/new children are real sessions that stay in the sidebar." },
+            target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is this session. Must be omitted when target_mode is new." },
+            time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." }
           },
           output: {
             schema: { oneOf: [ALARM_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -151,7 +162,12 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
           },
           async execute(args, exec) {
             if (exec.agent !== agent) return internalError();
-            const shape = validateCreateArgs(args as Record<string, unknown>);
+            // time_zone is optional: resolve the caller's zone (explicit wins —
+            // including a zone-bearing at object — else the session's browser
+            // zone, else the host zone) before the closed validation sees an
+            // empty slot.
+            const wired = wireTimeZones(args as Record<string, unknown>, sessionEventsOf(agent));
+            const shape = validateCreateArgs(wired, agent.session.id);
             if (isToolError(shape)) return shape;
             if (services.store.corrupt) return { code: "corrupt_store", message: "The alarm store is corrupt; fix or remove alarms.json." } as ToolError;
             const built = buildAlarm(agent.session.id, shape, services.now());
@@ -183,7 +199,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             const now = services.now();
             const alarms = services.store
               .listAlarms()
-              .filter((alarm) => alarm.sessionId === agent.session.id && (alarm.status === "scheduled" || alarm.status === "in-flight"))
+              .filter((alarm) => alarm.ownerSessionId === agent.session.id && (alarm.status === "scheduled" || alarm.status === "in-flight"))
               .map((alarm) => toAlarmView(alarm, now));
             return alarms;
           },
@@ -204,7 +220,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             if (exec.agent !== agent) return internalError();
             const id = typeof args["id"] === "string" ? args["id"] : "";
             const alarm = services.store.getAlarm(id);
-            if (alarm === undefined || alarm.sessionId !== agent.session.id || alarm.status === "completed" || alarm.status === "cancelled") {
+            if (alarm === undefined || alarm.ownerSessionId !== agent.session.id || alarm.status === "completed" || alarm.status === "cancelled") {
               return { code: "not_found", message: "No active alarm with id " + id + " in this session." } as ToolError;
             }
             services.store.removeAlarm(id);
@@ -222,7 +238,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
 
         defineTool({
           name: "proactive_no_reply",
-          description: "Conclude the current proactive wake turn in complete silence (available on every wake reason, including user-requested alarms): call it as the ONLY action with no chat text so the wake stays invisible to the user. Any chat text already committed before this call still counts toward the daily budget.",
+          description: "Conclude the current proactive wake turn in complete silence: call it as the ONLY action with no chat text so the wake stays invisible to the user. Any chat text already committed before this call still counts toward the daily budget.",
           parameters: {
             reason: { type: "string", description: "Short internal reason for the run log, at most " + MAX_NO_REPLY_REASON_LENGTH + " characters." }
           },
@@ -247,7 +263,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
 
         defineTool({
           name: "proactive_update_settings",
-          description: "Partially update host-level dsh-proactive settings: only the fields you pass are changed, the rest keep their current values. The update is persisted to config.json and hot-applied to the running scheduler immediately, so it also affects future wake gating and heartbeat framing. Supply at least one field.",
+          description: "Partially update host-level dsh-proactive settings: only the fields you pass are changed, the rest keep their current values. The update is persisted to config.json and hot-applied to the running scheduler immediately. Supply at least one field.",
           parameters: {
             enabled: { type: "boolean", description: "Master toggle: false pauses all proactive wakes (user-requested alarms still fire)." },
             max_deliveries_per_day: { type: "integer", description: "Visible chat-text deliveries per UTC day; 0..50." },
@@ -259,14 +275,13 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
                 end: { type: "string", required: true, description: "HH:MM wall-clock in time_zone; window end exclusive." },
                 time_zone: { type: "string", required: true, description: "IANA Area/Location." }
               },
-              description: "Quiet window; only wake_reason alarm fires inside it."
+              description: "Quiet window; alarms that respect quiet hours defer inside it."
             },
             max_wakeups_per_hour: { type: "integer", description: "Host-wide cap on proactive wake turns per rolling hour; 1..60." },
             max_concurrent_per_session: { type: "integer", description: "Concurrent in-flight wake turns per session; 1..4." },
             boot_overdue_policy: { type: "string", enum: ["fire", "notify-only", "drop"], description: "How boot-time overdue alarms are treated." },
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
-            max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
-            heartbeat_prompt: { type: "string", description: "Default heartbeat wording every heartbeat wake leads with (max " + MAX_PROMPT_LENGTH + " chars)." }
+            max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -300,8 +315,7 @@ function settingsView(config: ProactiveConfig): JsonValue {
     max_concurrent_per_session: config.maxConcurrentPerSession,
     boot_overdue_policy: config.bootOverduePolicy,
     max_retries_per_fire: config.maxRetriesPerFire,
-    max_prompt_length: config.maxPromptLength,
-    heartbeat_prompt: config.heartbeatPrompt
+    max_prompt_length: config.maxPromptLength
   };
 }
 
@@ -322,4 +336,4 @@ export function registerProactiveTools(agentCtx: Context, agent: Agent, services
   };
 }
 
-export type { Alarm, WakeReason };
+export type { Alarm };

@@ -23,8 +23,8 @@ import { zh, en } from "./locales.js";
 
 declare module "@deepseek-ai/dsh-client-ui-slots" {
   interface LocaleNamespaceMap {
-    /** Panel + tab surface copy. */
-    "dsh-proactive": "tabLabel" | "globalTitle" | "sessionTitle" | "sessionSubtitle" | "refresh" | "newAlarm" | "create" | "save" | "cancel" | "pause" | "resume" | "fire" | "edit" | "history" | "hideHistory" | "copyId" | "copied" | "alarms" | "session" | "prompt" | "wakeReason" | "state" | "nextDue" | "mode" | "emptyAlarms" | "emptyRuns" | "filterAllStates" | "filterAllSessions" | "filterAllModes" | "sortBy" | "sortNextDue" | "sortCreated" | "sortPrompt" | "triggerKind" | "afterSeconds" | "everySeconds" | "jitter" | "targetSession" | "selectSession" | "selectSessionFail" | "budget" | "quietHours" | "globalView" | "configSectionTitle" | "configSectionDesc" | "enabledToggle" | "saveConfig" | "saved" | "loadFailure" | "close" | "openSettings" | "error" | "confirmCancel";
+    /** Panel + tab surface copy (v2 vocabulary: once/every/cron + resume/fork/new). */
+    "dsh-proactive": "tabLabel" | "globalTitle" | "sessionTitle" | "sessionSubtitle" | "refresh" | "newAlarm" | "create" | "save" | "cancel" | "pause" | "resume" | "fire" | "edit" | "history" | "hideHistory" | "copyId" | "copied" | "alarms" | "session" | "prompt" | "state" | "nextDue" | "type" | "target" | "emptyAlarms" | "emptyRuns" | "filterAllStates" | "filterAllSessions" | "filterAllTypes" | "sortBy" | "sortNextDue" | "sortCreated" | "sortPrompt" | "delaySeconds" | "atDateTime" | "everySeconds" | "cronExpression" | "cronPlaceholder" | "jitterSeconds" | "jitterPlaceholder" | "jitterEveryHint" | "respectQuietHours" | "quietHint" | "targetSession" | "forkSourceSession" | "selectSession" | "selectSessionFail" | "newSessionHint" | "budget" | "quietHours" | "globalView" | "configSectionTitle" | "configSectionDesc" | "enabledToggle" | "saveConfig" | "saved" | "loadFailure" | "close" | "openSettings" | "error" | "confirmCancel";
   }
 }
 
