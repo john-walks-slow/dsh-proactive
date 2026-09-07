@@ -42,7 +42,7 @@ async function harness(titleOverrides?: Record<string, string>): Promise<Harness
 }
 
 function createAction(session: string, extra: Record<string, unknown> = {}): unknown {
-  return { action: { kind: "create", sessionId: session, args: { prompt: "Check in with the user", after_seconds: 60, delivery: { chat: true, push: true, wechat: false }, ...extra } } };
+  return { action: { kind: "create", sessionId: session, args: { prompt: "Check in with the user", after_seconds: 60, ...extra } } };
 }
 
 test("panel: create -> visible in snapshot -> cancel -> not_found", async () => {
@@ -227,7 +227,7 @@ test("createArgsFromForm matches the tool dialect (after_seconds form)", () => {
   assert.equal(args["after_seconds"], 900);
   assert.equal(args["prompt"], "p");
   assert.equal(args["wake_reason"], "heartbeat");
-  assert.deepEqual(args["delivery"], { chat: true, push: false, wechat: false });
+  assert.ok(!("delivery" in args), "no delivery fields leak into the tool dialect");
 });
 
 test("createArgsFromForm carries jitter for the every_seconds form", () => {

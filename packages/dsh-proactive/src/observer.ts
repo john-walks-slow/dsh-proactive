@@ -8,8 +8,8 @@
  * and the final assistant message. The slice is anchored to the wake framing
  * notice (user/message with source.kind=plugin) so a pending pre-wake turn is
  * never misattributed. A model that called proactive_no_reply and produced no
- * chat text is "no_reply" (deep silence); any visible output (chat text,
- * push_notify, send_wechat) is charged one budget unit.
+ * chat text is "no_reply" (deep silence); visible chat text is charged one
+ * budget unit.
  */
 
 import { isRecord, type RunDecision } from "./domain.js";
@@ -34,7 +34,6 @@ export interface WakeAnalysis {
 }
 
 const NO_REPLY_TOOL = "proactive_no_reply";
-const VISIBLE_TOOLS = new Set(["push_notify", "send_wechat"]);
 
 /** Per-field summary cap for the run history (reasoning + reply are stored truncated). */
 export const RUN_SUMMARY_MAX_LENGTH = 200;
@@ -135,7 +134,6 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
       if (name === NO_REPLY_TOOL) noReply = true;
     }
   }
-  const push = toolNames.some((name) => VISIBLE_TOOLS.has(name));
   const turnEnded = turnEndIndex >= 0;
   const errorEnd = turnEnded && isErrorEnd(effective[turnEndIndex]?.data);
 
@@ -144,9 +142,6 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   const leaked = noReply && hasText;
   if (noReply && !hasText) {
     decision = "no_reply";
-  } else if (push) {
-    decision = "push";
-    if (noReply) note = "no_reply raced a push tool";
   } else if (hasText) {
     decision = "reply";
     if (noReply) note = "leak: no_reply called after visible text (charged 1)";
@@ -159,7 +154,7 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   }
   return {
     decision,
-    budgetDelta: decision === "reply" || decision === "push" ? 1 : 0,
+    budgetDelta: decision === "reply" ? 1 : 0,
     leaked,
     toolNames,
     hasText,

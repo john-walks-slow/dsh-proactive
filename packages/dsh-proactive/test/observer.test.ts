@@ -116,13 +116,6 @@ test("visible chat reply costs one budget unit", () => {
   assert.equal(analysis.budgetDelta, 1);
 });
 
-test("push tool costs one budget unit", () => {
-  const events: MinimalEvent[] = [turnStart(), toolCall("push_notify"), assistantText("已推送"), turnEnd()];
-  const analysis = analyzeWakeTurn(events, 0);
-  assert.equal(analysis.decision, "push");
-  assert.equal(analysis.budgetDelta, 1);
-});
-
 test("unsettled turn is failed", () => {
   const events: MinimalEvent[] = [turnStart(), toolCall("proactive_list")];
   const analysis = analyzeWakeTurn(events, 0);

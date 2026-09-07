@@ -55,7 +55,7 @@ export interface PanelSnapshot {
 
 /**
  * Closed panel action vocabulary. `create`/`edit` carry the same argument root
- * as proactive_set (prompt/at|after_seconds|every_seconds/time_zone/delivery/
+ * as proactive_set (prompt/at|after_seconds|every_seconds/time_zone/
  * wake_reason) and are validated by the exact same function.
  *
  * Scope rule (single source of truth = the route's `?session=` query):
@@ -94,13 +94,12 @@ export interface PanelCreateForm {
   /** Repeat randomness 0..1; only meaningful together with everySeconds. */
   jitter?: number;
   timeZone?: string;
-  delivery?: { chat: boolean; push: boolean; wechat: boolean };
   wakeReason?: string;
 }
 
 /** Map a form to the shared argument root so one validator serves both surfaces. */
 export function createArgsFromForm(form: PanelCreateForm): Record<string, unknown> {
-  const args: Record<string, unknown> = { prompt: form.prompt, delivery: form.delivery ?? { chat: true, push: false, wechat: false } };
+  const args: Record<string, unknown> = { prompt: form.prompt };
   if (form.at !== undefined && form.at !== "") args["at"] = form.at;
   if (form.afterSeconds !== undefined) args["after_seconds"] = form.afterSeconds;
   if (form.everySeconds !== undefined) args["every_seconds"] = form.everySeconds;

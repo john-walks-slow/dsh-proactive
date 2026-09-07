@@ -33,7 +33,7 @@ dsh plugin --profile web add file:/root/projects/dsh-proactive/packages/dsh-proa
 ```jsonc
 {
   "enabled": true,
-  "maxDeliveriesPerDay": 3,                    // 每 UTC 日可见投递上限（聊天文本/push/微信各计 1）
+  "maxDeliveriesPerDay": 3,                    // 每 UTC 日可见聊天文本投递上限（no_reply 不计）
   "quietHours": { "start": "23:00", "end": "08:00", "timeZone": "Asia/Shanghai" },
   "maxWakeupsPerHour": 4,                      // 全 host 每小时唤醒次数上限
   "maxConcurrentPerSession": 1,                // 每会话并发在途唤醒数
@@ -68,13 +68,13 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 
 | 工具 | 作用 |
 |---|---|
-| `proactive_set` | 建闹钟：`prompt` + 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(>=300)；可选 `time_zone`、`delivery`、`wake_reason`；`every_seconds` 可选 `jitter`(0..1) 让每次间隔随机抖动。`prompt` 对 `wake_reason=heartbeat` 可选（省略即用默认心跳提示词，见下） |
+| `proactive_set` | 建闹钟：`prompt` + 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(>=300)；可选 `time_zone`、`wake_reason`；`every_seconds` 可选 `jitter`(0..1) 让每次间隔随机抖动。`prompt` 对 `wake_reason=heartbeat` 可选（省略即用默认心跳提示词，见下） |
 | `proactive_list` | 列出本会话活跃闹钟 |
 | `proactive_cancel` | 按 id 取消 |
 | `proactive_no_reply` | **唤醒回合专用**：静默收尾（`concludesTurn`），需单独调用且不产出文本 |
 | `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours`/`heartbeat_prompt` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
 
-唤醒回合的 framing 报文包含三条回复规则（用户需要时简短回复、冷会话且有时效走 push_notify/send_wechat、无需用户感知或静默更合适就 no_reply），并如实给出今日预算用量。`proactive_no_reply` 对**任何唤醒原因**（含用户委托 alarm）都可用——角色扮演等场景允许"不理用户更真实"的静默收尾。
+唤醒回合的 framing 报文包含两条回复规则（需要时简短回复、无需用户感知或静默更合适就 no_reply），并如实给出今日预算用量。`proactive_no_reply` 对**任何唤醒原因**（含用户委托 alarm）都可用——角色扮演等场景允许"不理用户更真实"的静默收尾。
 
 ### heartbeat 提示词的默认前置
 
@@ -102,7 +102,7 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 
 ## 预算与安静时段
 
-- **预算**：任何可见输出（聊天文本、push_notify、send_wechat）1 单位/次，按 UTC 日累计，上限 `maxDeliveriesPerDay`；`no_reply` 免费不计。预算用尽后，主动型唤醒（heartbeat）不再触发；用户委托的 alarm 仍会触发（用户显式要求优先，允许轻微超限）。
+- **预算**：唤醒回合写了可见聊天文本 1 单位/次，按 UTC 日累计，上限 `maxDeliveriesPerDay`；`no_reply` 免费不计。预算用尽后，主动型唤醒（heartbeat）不再触发；用户委托的 alarm 仍会触发（用户显式要求优先，允许轻微超限）。
 - **安静时段**：非 alarm 唤醒在安静时段内延迟（每 5 分钟重评估），结束时若有遗漏自动补一次；alarm 不受限。
 - **失败处理**：busy/failed 递增重试，超过 `maxRetriesPerFire` 后按一次 skipped 记账并推进；重复闹钟错过的时间片不补跑，只推进到下一个锚点（对齐创建时刻）。
 

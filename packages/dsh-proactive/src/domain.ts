@@ -33,7 +33,7 @@ export function isValidSessionId(sessionId: string): boolean {
 export type WakeReason = "heartbeat" | "alarm";
 export type AlarmMode = "one-shot" | "repeat";
 export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
-export type RunDecision = "no_reply" | "reply" | "push" | "skipped" | "failed";
+export type RunDecision = "no_reply" | "reply" | "skipped" | "failed";
 
 export const WAKE_REASONS: readonly WakeReason[] = ["heartbeat", "alarm"];
 
@@ -53,12 +53,6 @@ export type ToolError = {
   code: ProactiveErrorCode;
   message: string;
 };
-
-export interface DeliveryHint {
-  chat: boolean;
-  push: boolean;
-  wechat: boolean;
-}
 
 export interface AlarmTriggerAt {
   at: string;
@@ -80,7 +74,6 @@ export interface Alarm {
   trigger: AlarmTrigger;
   prompt: string;
   wakeReason: WakeReason;
-  deliveryHint: DeliveryHint;
   /** IANA zone for repeat alignment and quiet-hours display; "UTC" default. */
   timeZone: string;
   status: AlarmStatus;

@@ -20,7 +20,6 @@ function alarm(id = "a1"): Alarm {
     trigger: { at: "2026-09-02T00:00:00.000Z" },
     prompt: "进水提醒",
     wakeReason: "alarm",
-    deliveryHint: { chat: true, push: true, wechat: true },
     timeZone: "UTC",
     status: "scheduled",
     nextDueAt: "2026-09-01T00:00:00.000Z",

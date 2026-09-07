@@ -11,16 +11,16 @@
 - `src/store.ts` — alarms.json（原子写）/runs.jsonl/state.json 持久化；corrupt 降级
 - `src/scheduler.ts` — 串行 drive 循环：门控（安静/budget/hourly/boot 策略）、重试、单定时器重臂
 - `src/wake.ts` — WakeDriver：live/cold 双路径、冷 resume 装 `installModelSelection`（`createWakeSelectionRef`：会话 request header → agentDefaultModel → warn）、runMaintenance+followup、whenIdle、dispose、inflight 守卫
-- `src/framing.ts` — 唤醒报文（wake_reason/user_presence/budget/quiet_hours/alarm_prompt_json + 3 条回复规则）；notice-form 用户消息
-- `src/observer.ts` — 从会话日志切片判定 no_reply/reply/push/failed 与预算增量；leaked 标记
+- `src/framing.ts` — 唤醒报文（wake_reason/user_presence/budget/quiet_hours/alarm_prompt_json + 2 条回复规则）；notice-form 用户消息
+- `src/observer.ts` — 从会话日志切片判定 no_reply/reply/failed 与预算增量；leaked 标记
 - `src/tools.ts` — proactive_set/list/cancel/no_reply（no_reply 需 inflight 且【只调它不写文本】）
 - `src/index.ts` — 装配；agent/created 时对 roots 注册工具（resume 出的会话同样覆盖）
 
 ## 核心设计
 
 - 状态在 host 侧（store 单例），工具通过闭包访问；与 dsh-schedule 的会话内提醒互补
-- 静默 = framing 规则引导 + `exec.concludeTurn()` 机械结束（agent-loop 不再请求下一次补全）+ 不产出文本；GUI 对无文本 assistant 消息不渲染。文本先行的泄漏由 observer 标记并按可见输出计费，不阻断
-- 预算：任一可见输出（聊天文本/push_notify/send_wechat）1 单位/UTC 日，上限 `maxDeliveriesPerDay`；no_reply 免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
+- 静默 = framing 规则引导 + `exec.concludeTurn()` 机械结束（agent-loop 不再请求下一次补全）+ 不产出文本；GUI 对无文本 assistant 消息不渲染。文本先行的泄漏由 observer 标记并按可见文本计费，不阻断
+- 预算：唤醒回合写了可见聊天文本 1 单位/UTC 日，上限 `maxDeliveriesPerDay`；no_reply 免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
 - 安静时段（IANA 时区、跨午夜）：非 alarm 唤醒每 5 分钟延迟重评估；重复闹钟错过不补跑，推进到下一个锚点
 - 唤醒回合判定依据**已提交的会话日志**（startIndex 之后的事件切片），不信任运行期假设
 

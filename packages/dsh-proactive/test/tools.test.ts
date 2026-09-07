@@ -74,6 +74,8 @@ test("proactive_set validates selectors", async () => {
   assert.equal(code(await h.run("proactive_set", { prompt: "x", after_seconds: 10 * 365 * 86400 + 1 })), "invalid_trigger");
   assert.equal(code(await h.run("proactive_set", { prompt: "x", every_seconds: 299 })), "frequency_too_high");
   assert.equal(code(await h.run("proactive_set", { prompt: "x", every_seconds: 10 * 365 * 86400 + 1 })), "invalid_trigger");
+  // push-delivery coupling was removed: the delivery key is no longer accepted.
+  assert.equal(code(await h.run("proactive_set", { prompt: "x", after_seconds: 5, delivery: { chat: true, push: true } })), "invalid_trigger");
 });
 
 test("proactive_set validates jitter bounds and only with every_seconds", async () => {

@@ -17,7 +17,6 @@ import {
   type Alarm,
   type AlarmTrigger,
   type AtInput,
-  type DeliveryHint,
   type ToolError,
   type WakeReason
 } from "./domain.js";
@@ -34,15 +33,7 @@ export interface CreateSpec {
   /** Optional repeat randomness 0..1: each interval scaled by (1 ± jitter·uniform(0,1)). */
   jitter?: number;
   timeZone?: string;
-  delivery: DeliveryHint;
   wakeReason: WakeReason;
-}
-
-function normalizeDelivery(value: unknown): DeliveryHint | undefined {
-  if (value === undefined) return { chat: true, push: true, wechat: true };
-  if (!isRecord(value)) return undefined;
-  const booleans = (key: string): boolean => (typeof value[key] === "boolean" ? (value[key] as boolean) : true);
-  return { chat: booleans("chat"), push: booleans("push"), wechat: booleans("wechat") };
 }
 
 function allocateId(prefix: string): string {
@@ -55,9 +46,9 @@ function allocateId(prefix: string): string {
  * the model tools and the GUI accept exactly one dialect.
  */
 export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | ToolError {
-  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "jitter", "time_zone", "delivery", "wake_reason"]);
+  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "jitter", "time_zone", "wake_reason"]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, jitter, time_zone, delivery, wake_reason." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, jitter, time_zone, wake_reason." };
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined);
   if (selectors !== 1) return { code: "invalid_trigger", message: "proactive_set requires exactly one of at, after_seconds, or every_seconds." };
@@ -87,8 +78,6 @@ export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | 
       return inputError(error);
     }
   }
-  const delivery = normalizeDelivery(args["delivery"]);
-  if (delivery === undefined) return { code: "invalid_trigger", message: "delivery must be an object with boolean chat/push/wechat fields." };
   const timeZone = typeof args["time_zone"] === "string" && args["time_zone"].length > 0 ? args["time_zone"] : undefined;
   if (args["after_seconds"] !== undefined) {
     const value = args["after_seconds"];
@@ -98,7 +87,7 @@ export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | 
     if (value > MAX_DELAY_SECONDS) {
       return { code: "invalid_trigger", message: "after_seconds must not exceed " + MAX_DELAY_SECONDS + "." };
     }
-    return { prompt, kind: "after", afterSeconds: value, delivery, wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "after", afterSeconds: value, wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
   }
   if (args["every_seconds"] !== undefined) {
     const value = args["every_seconds"];
@@ -121,9 +110,9 @@ export function validateCreateArgs(args: Record<string, unknown>): CreateSpec | 
       }
       jitter = j;
     }
-    return { prompt, kind: "every", everySeconds: value, ...(jitter !== undefined ? { jitter } : {}), delivery, wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "every", everySeconds: value, ...(jitter !== undefined ? { jitter } : {}), wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
   }
-  return { prompt, kind: "at", at: args["at"], delivery, wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
+  return { prompt, kind: "at", at: args["at"], wakeReason, ...(timeZone !== undefined ? { timeZone } : {}) };
 }
 
 /** Resolve the canonical trigger + nextDueAt for a validated create request. */
@@ -158,7 +147,7 @@ export function buildAlarm(sessionId: string, spec: CreateSpec, nowStart: number
 
 export function newAlarm(
   sessionId: string,
-  spec: { prompt: string; delivery: DeliveryHint; wakeReason: WakeReason; timeZone?: string },
+  spec: { prompt: string; wakeReason: WakeReason; timeZone?: string },
   trigger: AlarmTrigger,
   epoch: number,
   stamp: string
@@ -170,7 +159,6 @@ export function newAlarm(
     trigger,
     prompt: spec.prompt,
     wakeReason: spec.wakeReason,
-    deliveryHint: spec.delivery,
     timeZone: spec.timeZone ?? "UTC",
     status: "scheduled",
     nextDueAt: new Date(epoch).toISOString(),

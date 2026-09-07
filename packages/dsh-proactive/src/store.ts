@@ -133,7 +133,7 @@ export class ProactiveStore {
     return this.budget.delivered;
   }
 
-  /** Add one (or zero/negative log) delivery unit for a UTC day and persist the counter. */
+  /** Add one (or zero/negative log) chat-text delivery unit for a UTC day and persist the counter. */
   async spendBudget(utcDate: string, delta: number): Promise<number> {
     if (this.budget.date !== utcDate) this.budget = { date: utcDate, delivered: 0 };
     this.budget.delivered = Math.max(0, this.budget.delivered + delta);

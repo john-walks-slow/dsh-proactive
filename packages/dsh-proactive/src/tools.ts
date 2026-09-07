@@ -34,7 +34,6 @@ import {
   type Alarm,
   type AlarmTrigger,
   type AtInput,
-  type DeliveryHint,
   type ToolError,
   type WakeReason
 } from "./domain.js";
@@ -144,7 +143,6 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; without jitter, occurrences align to creation time and missed ones are skipped." },
             jitter: { type: "number", description: "Optional repeat randomness 0..1: each interval is scaled by (1 ± jitter·uniform(0,1)) so consecutive wakes are not metronomic. 0/default = fixed rate. Only meaningful with every_seconds." },
             time_zone: { type: "string", description: "IANA Area/Location used for at alignment and quiet-hours reporting (default UTC)." },
-            delivery: { type: "object", additionalProperties: false, properties: { chat: { type: "boolean", description: "Chat text allowed (default true)" }, push: { type: "boolean", description: "push_notify allowed (default true)" }, wechat: { type: "boolean", description: "send_wechat allowed (default true)" } }, description: "Allowed delivery channels for the wake turn." },
             wake_reason: { type: "string", enum: WAKE_REASONS, description: "heartbeat: model-initiated periodic check-in (gated by quiet hours and daily budget) | alarm: user-requested reminder (quiet-hours and budget exempt). Default alarm." }
           },
           output: {
@@ -224,7 +222,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
 
         defineTool({
           name: "proactive_no_reply",
-          description: "Conclude the current proactive wake turn in complete silence (available on every wake reason, including user-requested alarms): call it as the ONLY action with no chat text so the wake stays invisible to the user. Any visible output already committed before this call still counts toward the delivery budget.",
+          description: "Conclude the current proactive wake turn in complete silence (available on every wake reason, including user-requested alarms): call it as the ONLY action with no chat text so the wake stays invisible to the user. Any chat text already committed before this call still counts toward the daily budget.",
           parameters: {
             reason: { type: "string", description: "Short internal reason for the run log, at most " + MAX_NO_REPLY_REASON_LENGTH + " characters." }
           },
@@ -252,7 +250,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
           description: "Partially update host-level dsh-proactive settings: only the fields you pass are changed, the rest keep their current values. The update is persisted to config.json and hot-applied to the running scheduler immediately, so it also affects future wake gating and heartbeat framing. Supply at least one field.",
           parameters: {
             enabled: { type: "boolean", description: "Master toggle: false pauses all proactive wakes (user-requested alarms still fire)." },
-            max_deliveries_per_day: { type: "integer", description: "Visible deliveries per UTC day (chat text, push_notify, send_wechat); 0..50." },
+            max_deliveries_per_day: { type: "integer", description: "Visible chat-text deliveries per UTC day; 0..50." },
             quiet_hours: {
               type: "object",
               additionalProperties: false,

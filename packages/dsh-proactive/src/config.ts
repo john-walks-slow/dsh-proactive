@@ -1,6 +1,6 @@
 /**
  * dsh-proactive configuration: defaults, $DSH_HOME/proactive/config.json overrides,
- * quiet-hours evaluation, and per-day/host delivery budget accounting.
+ * quiet-hours evaluation, and per-day/host chat-text delivery budget accounting.
  *
  * The plugin preference order (highest wins) is:
  *   1. environment variables DSH_PROACTIVE_* (numeric/enabled fields)
@@ -23,7 +23,7 @@ export type BootOverduePolicy = "fire" | "notify-only" | "drop";
 
 export interface ProactiveConfig {
   enabled: boolean;
-  /** Budget: visible deliveries (chat text that reaches the user, push_notify, send_wechat) per UTC day. */
+  /** Budget: visible chat-text deliveries per UTC day. */
   maxDeliveriesPerDay: number;
   /** Quiet hours during which only user-requested alarms (wake_reason "alarm") fire. */
   quietHours: QuietHours;
