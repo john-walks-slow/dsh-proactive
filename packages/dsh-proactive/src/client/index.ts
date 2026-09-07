@@ -24,7 +24,7 @@ import { zh, en } from "./locales.js";
 declare module "@deepseek-ai/dsh-client-ui-slots" {
   interface LocaleNamespaceMap {
     /** Panel + tab surface copy. */
-    "dsh-proactive": "tabLabel" | "globalTitle" | "sessionTitle" | "sessionSubtitle" | "refresh" | "newAlarm" | "create" | "save" | "cancel" | "pause" | "resume" | "fire" | "edit" | "history" | "hideHistory" | "copyId" | "copied" | "alarms" | "session" | "prompt" | "wakeReason" | "state" | "nextDue" | "mode" | "emptyAlarms" | "emptyRuns" | "filterAllStates" | "filterAllSessions" | "filterAllModes" | "sortBy" | "sortNextDue" | "sortCreated" | "sortPrompt" | "triggerKind" | "afterSeconds" | "everySeconds" | "jitter" | "targetSession" | "budget" | "quietHours" | "globalView" | "configSectionTitle" | "configSectionDesc" | "enabledToggle" | "saveConfig" | "saved" | "loadFailure" | "close" | "openSettings" | "error" | "confirmCancel";
+    "dsh-proactive": "tabLabel" | "globalTitle" | "sessionTitle" | "sessionSubtitle" | "refresh" | "newAlarm" | "create" | "save" | "cancel" | "pause" | "resume" | "fire" | "edit" | "history" | "hideHistory" | "copyId" | "copied" | "alarms" | "session" | "prompt" | "wakeReason" | "state" | "nextDue" | "mode" | "emptyAlarms" | "emptyRuns" | "filterAllStates" | "filterAllSessions" | "filterAllModes" | "sortBy" | "sortNextDue" | "sortCreated" | "sortPrompt" | "triggerKind" | "afterSeconds" | "everySeconds" | "jitter" | "targetSession" | "selectSession" | "selectSessionFail" | "budget" | "quietHours" | "globalView" | "configSectionTitle" | "configSectionDesc" | "enabledToggle" | "saveConfig" | "saved" | "loadFailure" | "close" | "openSettings" | "error" | "confirmCancel";
   }
 }
 

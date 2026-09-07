@@ -47,6 +47,8 @@ export interface ProactivePanelCopy {
   everySeconds: string;
   jitter: string;
   targetSession: string;
+  selectSession: string;
+  selectSessionFail: string;
   /* global config */
   budget: string;
   quietHours: string;
@@ -103,6 +105,8 @@ export const zh: ProactivePanelCopy = {
   everySeconds: "固定间隔秒数",
   jitter: "随机抖动 (±比例 0-1)",
   targetSession: "目标会话",
+  selectSession: "请选择会话…",
+  selectSessionFail: "无法获取会话列表",
   budget: "每日预算",
   quietHours: "安静时段",
   globalView: "全局视图",
@@ -157,6 +161,8 @@ export const en: ProactivePanelCopy = {
   everySeconds: "Fixed interval seconds",
   jitter: "Random jitter (±ratio 0-1)",
   targetSession: "Target session",
+  selectSession: "Select a session…",
+  selectSessionFail: "session list unavailable",
   budget: "Daily budget",
   quietHours: "Quiet hours",
   globalView: "Global view",

@@ -112,9 +112,11 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
         (sessionFilter === "" || alarm.sessionId === sessionFilter)
     );
     const sorted = [...filtered].sort((a, b) => {
-      if (sortKey === "created") return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0;
+      // Time keys sort newest/soonest-last → descending, so the freshest
+      // creation and the farthest next due sit on top; prompt stays alpha.
+      if (sortKey === "created") return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
       if (sortKey === "prompt") return a.prompt.localeCompare(b.prompt);
-      return a.nextDueAt < b.nextDueAt ? -1 : a.nextDueAt > b.nextDueAt ? 1 : 0;
+      return a.nextDueAt < b.nextDueAt ? 1 : a.nextDueAt > b.nextDueAt ? -1 : 0;
     });
     return sorted;
   }, [alarms, stateFilter, modeFilter, sessionFilter, sortKey]);
@@ -341,16 +343,24 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
         {sessions !== undefined ? (
           <div className="dshp-field">
             <label className="dshp-field-label">{copy.targetSession}</label>
-            <select className="dshp-input dshp-grow" value={form.sessionId ?? ""} onChange={(e) => setForm({ ...form, sessionId: e.target.value })}>
-              <option value="">{copy.loadFailure}…</option>
+            <select className="dshp-input dshp-grow" value={form.sessionId ?? ""} disabled={editing === true}
+              onChange={(e) => setForm({ ...form, sessionId: e.target.value })}>
+              <option value="">{copy.selectSession}</option>
               {sessions.map((session) => (
                 <option key={session.id} value={session.id}>{fmtSession(session.id, session.title)}</option>
               ))}
+              {editing === true && !sessions.some((session) => session.id === form.sessionId) ? (
+                // The alarm's owner may predate the live session list (e.g. the
+                // pseudo "host-panel" legacy rows); keep it visible in the
+                // disabled picker so the edit form shows the real owner.
+                <option value={form.sessionId ?? ""}>{fmtSession(form.sessionId ?? "")}</option>
+              ) : null}
             </select>
+            {sessions.length === 0 ? <div className="dshp-cell-dim">{copy.loadFailure}: {copy.selectSessionFail}</div> : null}
           </div>
         ) : null}
         <div className="dshp-btn-row">
-          <button className="dshp-btn dshp-btn-primary" disabled={busy || (form.prompt ?? "").trim() === ""} onClick={onSubmit}>{editing === true ? copy.save : copy.create}</button>
+          <button className="dshp-btn dshp-btn-primary" disabled={busy || (form.prompt ?? "").trim() === "" || (sessions !== undefined && (form.sessionId ?? "") === "")} onClick={onSubmit}>{editing === true ? copy.save : copy.create}</button>
           <button className="dshp-btn" onClick={() => setShowForm(false)}>{copy.cancel}</button>
         </div>
       </div>

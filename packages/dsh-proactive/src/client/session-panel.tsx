@@ -56,6 +56,22 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
     return unsubscribe;
   }, [reload, transport, sessionId]);
 
+  /**
+   * Silent data re-pull: refresh the table without touching the error banner.
+   * After a failed action a stale row (alarm vanished elsewhere, `not_found`)
+   * must leave the table instead of lingering next to the error message.
+   */
+  const refresh = useCallback(async () => {
+    const requested = sessionRef.current;
+    try {
+      const next = await transport.stateEnriched(requested);
+      if (sessionRef.current !== requested) return; // stale: a newer session is now active
+      setSnapshot(next);
+    } catch {
+      /* keep the current snapshot and the error banner */
+    }
+  }, [transport]);
+
   const run = useCallback(async (action: Parameters<typeof transport.action>[0]) => {
     if (busy) return;
     const requested = sessionRef.current;
@@ -71,10 +87,11 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
     } catch (reason) {
       if (sessionRef.current !== requested) return;
       setError(reason instanceof Error ? reason.message : String(reason));
+      void refresh();
     } finally {
       setBusy(false);
     }
-  }, [busy, transport]);
+  }, [busy, transport, refresh]);
 
   const submitCreate = useCallback(async () => {
     await run({ kind: "create", sessionId, args: createArgsFromForm(form) });

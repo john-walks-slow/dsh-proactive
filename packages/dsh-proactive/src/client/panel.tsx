@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
+import { ProactiveHostTransport, type PanelSnapshotDto, type SessionInfo } from "./host-api.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
 import { AlarmTable, CreateForm, HOST_PANEL_SESSION, formFromSnapshot, fmtSession, type AlarmRow, type RunRow } from "./sections.js";
 import { useProactiveLocale } from "./use-locale.js";
@@ -39,6 +39,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
   const copy = useProactiveLocale();
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -53,11 +54,28 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
 
   const reload = useCallback(async () => {
     try {
-      const next = await transport.stateEnriched();
+      const { snapshot: next, sessions: list } = await transport.stateForHost();
       setSnapshot(next);
+      setSessions(list);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [transport]);
+
+  /**
+   * Silent data re-pull: refresh the table (and the session picker) without
+   * touching the error banner. Used after a failed action — a stale row whose
+   * alarm vanished (e.g. cancelled elsewhere, `not_found`) must leave the
+   * table instead of lingering next to the error message.
+   */
+  const refresh = useCallback(async () => {
+    try {
+      const { snapshot: next, sessions: list } = await transport.stateForHost();
+      setSnapshot(next);
+      setSessions(list);
+    } catch {
+      /* keep the current snapshot and the error banner */
     }
   }, [transport]);
 
@@ -74,16 +92,19 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     setBusy(true);
     setError(null);
     try {
-      setSnapshot(await transport.actionEnriched(action));
+      const { snapshot: next, sessions: list } = await transport.actionForHost(action);
+      setSnapshot(next);
+      setSessions(list);
       setShowForm(false);
       setEditingId(null);
       setForm({ prompt: "", afterSeconds: 3600 });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      void refresh();
     } finally {
       setBusy(false);
     }
-  }, [busy, transport]);
+  }, [busy, transport, refresh]);
 
   const submitCreate = useCallback(async () => {
     await run({ kind: "create", sessionId: form.sessionId ?? "", args: createArgsFromForm(form) });
@@ -107,13 +128,31 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     });
   }, [run, draft, snapshot]);
 
+  const alarms: AlarmRow[] = snapshot?.alarms ?? [];
+
+  // Target-session picker options: the full host session list when available;
+  // fall back to the distinct sessions seen across alarms (e.g. the session
+  // list fetch failed, or legacy rows outlive their sessions).
+  const pickerOptions = useMemo(() => {
+    if (sessions.length > 0) return sessions;
+    const seen = new Map<string, string>();
+    for (const alarm of alarms) {
+      if (!seen.has(alarm.sessionId)) seen.set(alarm.sessionId, alarm.sessionTitle ?? "");
+    }
+    return [...seen.entries()].map(([id, title]) => ({ id, title }));
+  }, [sessions, alarms]);
+
+  /** First real conversation (session-*), then any session, then none. */
+  const preferredSession = useCallback((options: Array<{ id: string; title: string }>): string => {
+    if (options.length === 0) return "";
+    return options.find((s) => s.id.startsWith("session-"))?.id ?? options[0].id;
+  }, []);
+
   const openCreate = useCallback(() => {
     setEditingId(null);
-    const alarms = snapshot?.alarms ?? [];
-    const firstSession = alarms.length > 0 ? alarms[0].sessionId : HOST_PANEL_SESSION;
-    setForm({ ...formFromSnapshot(snapshot), sessionId: firstSession });
+    setForm({ ...formFromSnapshot(snapshot), sessionId: preferredSession(pickerOptions) });
     setShowForm(true);
-  }, [snapshot]);
+  }, [snapshot, pickerOptions, preferredSession]);
 
   const openEdit = useCallback((id: string) => {
     const alarm = snapshot?.alarms.find((a) => a.id === id);
@@ -149,7 +188,6 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     }
   }, [copy]);
 
-  const alarms: AlarmRow[] = snapshot?.alarms ?? [];
   const runsByAlarm = useMemo(() => {
     const map = new Map<string, RunRow[]>();
     for (const run of snapshot?.runs ?? []) {
@@ -159,15 +197,6 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     }
     return map;
   }, [snapshot]);
-
-  // Distinct sessions seen across alarms (for the target-session picker).
-  const sessionOptions = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const alarm of alarms) {
-      if (!seen.has(alarm.sessionId)) seen.set(alarm.sessionId, alarm.sessionTitle ?? "");
-    }
-    return [...seen.entries()].map(([id, title]) => ({ id, title }));
-  }, [alarms]);
 
   return (
     <div className="dshp-panel" data-testid="proactive-panel">
@@ -234,7 +263,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} sessions={sessionOptions} editing={editingId !== null}
+          copy={copy} sessions={pickerOptions} editing={editingId !== null}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 

@@ -21,6 +21,12 @@ export interface PanelErrorDto {
   message: string;
 }
 
+/** One host session for pickers: durable id plus its display title (empty = unknown). */
+export interface SessionInfo {
+  id: string;
+  title: string;
+}
+
 function isPanelError(body: PanelSnapshotDto | PanelErrorDto): body is PanelErrorDto {
   return typeof (body as PanelErrorDto).code === "string";
 }
@@ -50,6 +56,16 @@ export class ProactiveHostTransport {
     return withSessionTitles(snapshot, titles);
   }
 
+  /**
+   * Host-wide reload for the settings panel: the snapshot plus the complete
+   * session list for the target-session picker, in one round trip (titles are
+   * enriched from the very same list, so no duplicate session.list call).
+   */
+  async stateForHost(sessionId?: string): Promise<{ snapshot: PanelSnapshotDto; sessions: SessionInfo[] }> {
+    const [snapshot, sessions] = await Promise.all([this.state(sessionId), fetchSessionList()]);
+    return { snapshot: withSessionTitles(snapshot, toTitleMap(sessions)), sessions };
+  }
+
   /** Run one closed action; the returned snapshot follows the same scope. */
   async action(action: PanelAction, sessionId?: string): Promise<PanelSnapshotDto> {
     const response = await fetch(ACTION_URL + sessionQuery(sessionId), {
@@ -70,13 +86,24 @@ export class ProactiveHostTransport {
     return withSessionTitles(snapshot, titles);
   }
 
-  /** Subscribe to host change pushes; the listener re-pulls state on each event. */
+  /** Like `stateForHost` for the settings panel's closed actions. */
+  async actionForHost(action: PanelAction, sessionId?: string): Promise<{ snapshot: PanelSnapshotDto; sessions: SessionInfo[] }> {
+    const [snapshot, sessions] = await Promise.all([this.action(action, sessionId), fetchSessionList()]);
+    return { snapshot: withSessionTitles(snapshot, toTitleMap(sessions)), sessions };
+  }
+
+  /**
+   * Subscribe to host change pushes; the listener re-pulls state on each event
+   * and also whenever the stream (re)connects — a missed "changed" event during
+   * a disconnection (sleep, network drop) must not leave the panel stale.
+   */
   subscribe(listener: () => void): () => void {
     const source = new EventSource(EVENTS_URL);
     source.addEventListener("changed", () => listener());
     source.onmessage = () => listener();
+    source.onopen = () => listener();
     source.onerror = () => {
-      /* EventSource auto-reconnects; nothing to do but keep the last snapshot */
+      /* EventSource auto-reconnects; onopen re-pulls once the stream is back */
     };
     return () => source.close();
   }
@@ -110,25 +137,40 @@ const SESSION_LIST_URL = "/api/session.list";
  * One extra call to the host's session.list RPC, mirroring how the sidebar
  * derives display titles: the durable title lives in each entry's
  * `projections.values.title` (folded by the session-title projection), not in
- * the raw summary. Returns a {sessionId -> title} map (empty = unknown). Any
- * failure degrades to an empty map — the panel then shows the raw id.
+ * the raw summary. Returns the complete session list (empty = unknown /
+ * fetch failure — the panel then degrades to alarm-derived options). The
+ * settings panel's target-session picker uses this same list.
  */
-export async function fetchSessionTitles(): Promise<Map<string, string>> {
-  const titles = new Map<string, string>();
+export async function fetchSessionList(): Promise<SessionInfo[]> {
   try {
     const response = await fetch(SESSION_LIST_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "client-request", rpcId: "dsh-proactive:session-titles", method: "session.list", params: {}, payload: {} })
+      body: JSON.stringify({ type: "client-request", rpcId: "dsh-proactive:session-list", method: "session.list", params: {}, payload: {} })
     });
-    if (!response.ok) return titles;
+    if (!response.ok) return [];
     const body = (await response.json()) as SessionListResponse;
+    const sessions: SessionInfo[] = [];
     for (const entry of body?.result?.value?.items ?? []) {
       const title = entry.projections?.values?.title;
-      if (typeof title === "string" && title !== "") titles.set(entry.sessionId, title);
+      sessions.push({ id: entry.sessionId, title: typeof title === "string" && title !== "" ? title : "" });
     }
+    return sessions;
   } catch {
-    /* degrade to an empty map */
+    /* degrade to an empty list */
+    return [];
+  }
+}
+
+function toTitleMap(sessions: SessionInfo[]): Map<string, string> {
+  const titles = new Map<string, string>();
+  for (const session of sessions) {
+    if (session.title !== "") titles.set(session.id, session.title);
   }
   return titles;
+}
+
+/** {sessionId -> title} map over the live session list (empty = unknown). */
+export async function fetchSessionTitles(): Promise<Map<string, string>> {
+  return toTitleMap(await fetchSessionList());
 }
