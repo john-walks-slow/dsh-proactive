@@ -22,7 +22,6 @@ interface ConfigDraft {
   maxDeliveriesPerDay: string;
   quietStart: string;
   quietEnd: string;
-  quietTimeZone: string;
   heartbeatPrompt: string;
 }
 
@@ -32,7 +31,6 @@ function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
     maxDeliveriesPerDay: String(snapshot.config.maxDeliveriesPerDay),
     quietStart: snapshot.config.quietHours.start,
     quietEnd: snapshot.config.quietHours.end,
-    quietTimeZone: snapshot.config.quietHours.timeZone,
     heartbeatPrompt: snapshot.config.heartbeatPrompt
   };
 }
@@ -97,17 +95,17 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
   }, [run, editingId, form]);
 
   const submitConfig = useCallback(async () => {
-    if (draft === null) return;
+    if (draft === null || snapshot === null) return;
     await run({
       kind: "update_config",
       patch: {
         enabled: draft.enabled,
         max_deliveries_per_day: Number(draft.maxDeliveriesPerDay),
-        quiet_hours: { start: draft.quietStart, end: draft.quietEnd, time_zone: draft.quietTimeZone },
+        quiet_hours: { start: draft.quietStart, end: draft.quietEnd, time_zone: snapshot.config.quietHours.timeZone },
         heartbeat_prompt: draft.heartbeatPrompt
       }
     });
-  }, [run, draft]);
+  }, [run, draft, snapshot]);
 
   const openCreate = useCallback(() => {
     setEditingId(null);
@@ -220,11 +218,6 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
                 <label className="dshp-field-label">{copy.quietHours} 结束</label>
                 <input className="dshp-input" type="time" value={(draft ?? configDraftFrom(snapshot)).quietEnd} disabled={busy}
                   onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), quietEnd: e.target.value })} />
-              </div>
-              <div className="dshp-field" style={{ flex: 1, minWidth: 140 }}>
-                <label className="dshp-field-label">时区</label>
-                <input className="dshp-input" value={(draft ?? configDraftFrom(snapshot)).quietTimeZone} disabled={busy}
-                  onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), quietTimeZone: e.target.value })} />
               </div>
             </div>
             <div className="dshp-field">

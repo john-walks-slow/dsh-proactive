@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConvViewProps } from "@deepseek-ai/dsh-client-ui-conversation/client";
 import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
-import { AlarmTable, CreateForm, type AlarmRow, type RunRow } from "./sections.js";
+import { AlarmTable, CreateForm, formFromSnapshot, type AlarmRow, type RunRow } from "./sections.js";
 import { useProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
 
@@ -87,9 +87,9 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
 
   const openCreate = useCallback(() => {
     setEditingId(null);
-    setForm({ prompt: "", afterSeconds: 3600 });
+    setForm({ ...formFromSnapshot(snapshot), afterSeconds: 3600 });
     setShowForm(true);
-  }, []);
+  }, [snapshot]);
 
   const openEdit = useCallback((id: string) => {
     const alarm = snapshot?.alarms.find((a) => a.id === id);

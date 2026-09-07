@@ -45,7 +45,7 @@ export interface ProactiveConfig {
 
 export const DEFAULT_CONFIG: ProactiveConfig = {
   enabled: true,
-  maxDeliveriesPerDay: 3,
+  maxDeliveriesPerDay: 20,
   quietHours: { start: "23:00", end: "08:00", timeZone: "Asia/Shanghai" },
   maxWakeupsPerHour: 4,
   maxConcurrentPerSession: 1,

@@ -212,7 +212,7 @@ test("quiet hours defer non-alarm wakes; user alarms are exempt", async (tctx) =
 test("daily budget gate skips non-alarm wakes at the cap", async (tctx) => {
   const h = await harness();
   tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
-  await h.store.spendBudget("2026-09-01", 3);
+  await h.store.spendBudget("2026-09-01", 20);
   h.store.addAlarm(alarm("c1", { wakeReason: "heartbeat" }));
   h.scheduler.start();
   await h.flush(() => h.store.getAlarm("c1")?.runCount === 1);
