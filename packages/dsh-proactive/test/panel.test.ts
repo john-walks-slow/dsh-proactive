@@ -500,3 +500,20 @@ test("panel: snapshot rejects unsafe session ids (path traversal fails closed)",
   await assert.rejects(() => h.service.snapshot("../../evil"), /invalid session id/);
   await assert.rejects(() => h.service.snapshot(".."), /invalid session id/);
 });
+test("createArgsFromForm: a stale target id left over from switching to new never leaks", () => {
+  const args = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 3600, targetMode: "new", targetSessionId: "sess-stale" } satisfies PanelCreateForm);
+  assert.equal(args["target_mode"], "new");
+  assert.ok(!("target_session_id" in args), "target_session_id must be omitted when target_mode is new");
+});
+
+test("createArgsFromForm: the target session id is sent trimmed", () => {
+  const args = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 3600, targetMode: "resume", targetSessionId: "  sess-x  " } satisfies PanelCreateForm);
+  assert.equal(args["target_session_id"], "sess-x");
+  assert.ok(!("target_mode" in args), "resume is the default mode and stays implicit");
+});
+
+test("panel snapshot exposes the defaultPrompt prefill in the config view", async () => {
+  const h = await harness();
+  const snapshot = await h.service.snapshot();
+  assert.equal(snapshot.config.defaultPrompt, h.config.defaultPrompt);
+});

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CONFIG, isInQuietHours, localClockMinutes, parseClockTime, resolveConfig } from "../src/config.js";
+import { DEFAULT_WAKE_PROMPT } from "../src/domain.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -82,6 +83,23 @@ test("a leftover v1 heartbeatPrompt in config.json is ignored (dial deleted in v
     writeFileSync(join(dir, "config.json"), JSON.stringify({ heartbeatPrompt: "ping" }));
     const over = resolveConfig(dir);
     assert.ok(!("heartbeatPrompt" in over), "legacy heartbeatPrompt must not resurface");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaultPrompt: file value wins (trimmed), blank falls back to the repo default, oversized clamped", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-dp-"));
+  try {
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ defaultPrompt: "  自定义预设  " }));
+    assert.equal(resolveConfig(dir).defaultPrompt, "自定义预设");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ defaultPrompt: "   " }));
+    assert.equal(resolveConfig(dir).defaultPrompt, DEFAULT_WAKE_PROMPT);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ maxPromptLength: 100, defaultPrompt: "x".repeat(500) }));
+    assert.equal(resolveConfig(dir).defaultPrompt.length, 100);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({}));
+    assert.equal(resolveConfig(dir).defaultPrompt, DEFAULT_WAKE_PROMPT);
+    assert.equal(DEFAULT_CONFIG.defaultPrompt, DEFAULT_WAKE_PROMPT);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

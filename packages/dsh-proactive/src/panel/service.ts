@@ -70,7 +70,8 @@ export class ProactivePanelService {
       config: {
         enabled: cfg.enabled,
         maxDeliveriesPerDay: cfg.maxDeliveriesPerDay,
-        quietHours: { start: cfg.quietHours.start, end: cfg.quietHours.end, timeZone: cfg.quietHours.timeZone }
+        quietHours: { start: cfg.quietHours.start, end: cfg.quietHours.end, timeZone: cfg.quietHours.timeZone },
+        defaultPrompt: cfg.defaultPrompt
       },
       alarms: alarmRows,
       runs: rows

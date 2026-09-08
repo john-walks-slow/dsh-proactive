@@ -106,7 +106,8 @@ const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
     max_concurrent_per_session: { type: "integer", required: true },
     boot_overdue_policy: { type: "string", required: true },
     max_retries_per_fire: { type: "integer", required: true },
-    max_prompt_length: { type: "integer", required: true }
+    max_prompt_length: { type: "integer", required: true },
+    default_prompt: { type: "string", required: true }
   }
 };
 
@@ -278,7 +279,8 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             max_concurrent_per_session: { type: "integer", description: "Concurrent in-flight wake turns per session; 1..4." },
             boot_overdue_policy: { type: "string", enum: ["fire", "notify-only", "drop"], description: "How boot-time overdue alarms are treated." },
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
-            max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." }
+            max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
+            default_prompt: { type: "string", description: "Default wake-up instruction pre-filled into the GUI create form; non-empty, at most 20000 characters. Purely a prefill — stored alarms always keep their own prompt." }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -312,7 +314,8 @@ function settingsView(config: ProactiveConfig): JsonValue {
     max_concurrent_per_session: config.maxConcurrentPerSession,
     boot_overdue_policy: config.bootOverduePolicy,
     max_retries_per_fire: config.maxRetriesPerFire,
-    max_prompt_length: config.maxPromptLength
+    max_prompt_length: config.maxPromptLength,
+    default_prompt: config.defaultPrompt
   };
 }
 

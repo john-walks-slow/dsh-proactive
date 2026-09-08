@@ -10,7 +10,7 @@
 
 import { readFileSync } from "node:fs";
 import { writeFile, rename, mkdir } from "node:fs/promises";
-import { canonicalizeTimeZone, isRecord } from "./domain.js";
+import { canonicalizeTimeZone, DEFAULT_WAKE_PROMPT, isRecord } from "./domain.js";
 
 export interface QuietHours {
   /** "HH:MM" wall-clock in the configured time zone; start inclusive, end exclusive. */
@@ -37,6 +37,13 @@ export interface ProactiveConfig {
   maxRetriesPerFire: number;
   /** Upper bound for alarm prompts. */
   maxPromptLength: number;
+  /**
+   * Default wake-up instruction pre-filled into the GUI create form (both the
+   * settings page and the conversation tab). Purely a prefill convenience —
+   * every stored alarm keeps its own explicit prompt. The constant lives in
+   * domain.ts so the browser client bundle shares it.
+   */
+  defaultPrompt: string;
   /** Absolute directory for alarms.json / runs.jsonl / state.json / config.json. */
   dataDir: string;
 }
@@ -50,6 +57,7 @@ export const DEFAULT_CONFIG: ProactiveConfig = {
   bootOverduePolicy: "fire",
   maxRetriesPerFire: 3,
   maxPromptLength: 4000,
+  defaultPrompt: DEFAULT_WAKE_PROMPT,
   dataDir: "/root/.dsh/proactive"
 };
 
@@ -140,6 +148,7 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     console.warn("[dsh-proactive] invalid quietHours.end; using default:", (error as Error).message);
     end = DEFAULT_CONFIG.quietHours.end;
   }
+  const maxPromptLength = Math.max(1, positiveInt(file["maxPromptLength"], DEFAULT_CONFIG.maxPromptLength, 20000));
   const config: ProactiveConfig = {
     enabled: typeof file["enabled"] === "boolean" ? file["enabled"] : true,
     maxDeliveriesPerDay: positiveInt(file["maxDeliveriesPerDay"], DEFAULT_CONFIG.maxDeliveriesPerDay, 50),
@@ -148,7 +157,12 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     maxConcurrentPerSession: Math.max(1, positiveInt(file["maxConcurrentPerSession"], DEFAULT_CONFIG.maxConcurrentPerSession, 4)),
     bootOverduePolicy: file["bootOverduePolicy"] === "notify-only" || file["bootOverduePolicy"] === "drop" ? file["bootOverduePolicy"] : "fire",
     maxRetriesPerFire: Math.max(0, positiveInt(file["maxRetriesPerFire"], DEFAULT_CONFIG.maxRetriesPerFire, 10)),
-    maxPromptLength: Math.max(1, positiveInt(file["maxPromptLength"], DEFAULT_CONFIG.maxPromptLength, 20000)),
+    maxPromptLength,
+    // Same cap as the settings schema, so a hand-edited (or tool-written)
+    // default never overflows the alarm prompt validation the prefill feeds.
+    defaultPrompt: typeof file["defaultPrompt"] === "string" && file["defaultPrompt"].trim().length > 0
+      ? file["defaultPrompt"].trim().slice(0, maxPromptLength)
+      : DEFAULT_CONFIG.defaultPrompt,
     dataDir: dir
   };
   if (env["DSH_PROACTIVE_ENABLED"] === "0" || env["DSH_PROACTIVE_ENABLED"] === "false") config.enabled = false;

@@ -38,7 +38,12 @@ export interface AlarmRowDto {
 
 export interface PanelSnapshotDto {
   server: { now: string; dataDir: string; corrupt: boolean };
-  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string } };
+  /**
+   * `defaultPrompt` (the create-form prefill) is optional: a host still
+   * running a pre-260907 build serves the v2 shape without it, and the client
+   * falls back to the bundled repo default until the next host restart.
+   */
+  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; defaultPrompt?: string };
   alarms: AlarmRowDto[];
   runs: Array<{ id: string; alarmId: string; sessionId: string; firedAt: string; decision: string; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string }>;
 }

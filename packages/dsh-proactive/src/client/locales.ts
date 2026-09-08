@@ -3,10 +3,11 @@
  * conversation-page tab). Registered through ctx.locale.register so the tab
  * label and all copy follow the current UI language.
  *
- * v2 (260907-proactive-alarm-v2): wake_reason / mode / jitter-ratio /
- * heartbeatPrompt copy removed; the vocabulary is now the three alarm types
- * (once/every/cron), the three target modes (resume/fork/new), the
- * per-alarm respect-quiet-hours switch and the unified jitter seconds.
+ * v3 (260909 release polish): every user-visible label — including the
+ * state/type/target pills and the runs-table headers that used to be
+ * hardcoded zh — now flows through this dictionary, so the en surface is no
+ * longer mixed-language. New keys cover the default-prompt prefill editor,
+ * the target-session-id input, and the loading state.
  */
 
 export interface ProactivePanelCopy {
@@ -33,6 +34,7 @@ export interface ProactivePanelCopy {
   alarms: string;
   session: string;
   prompt: string;
+  promptPlaceholder: string;
   state: string;
   nextDue: string;
   type: string;
@@ -46,6 +48,28 @@ export interface ProactivePanelCopy {
   sortNextDue: string;
   sortCreated: string;
   sortPrompt: string;
+  /* state / type / target pill labels (localized, keyed by domain value) */
+  stateScheduled: string;
+  stateOverdue: string;
+  stateInFlight: string;
+  stateCompleted: string;
+  stateCancelled: string;
+  stateFailed: string;
+  statePaused: string;
+  typeOnce: string;
+  typeEvery: string;
+  typeCron: string;
+  targetResume: string;
+  targetFork: string;
+  targetNew: string;
+  quietLabel: string;
+  /* runs table */
+  runTime: string;
+  runDecision: string;
+  runBudget: string;
+  runSummary: string;
+  thinkingPrefix: string;
+  replyPrefix: string;
   /* create/edit form */
   delaySeconds: string;
   atDateTime: string;
@@ -57,26 +81,36 @@ export interface ProactivePanelCopy {
   jitterEveryHint: string;
   respectQuietHours: string;
   quietHint: string;
-  targetSession: string;
-  forkSourceSession: string;
-  selectSession: string;
-  selectSessionFail: string;
+  targetSessionId: string;
+  forkSourceSessionId: string;
+  targetSessionPlaceholder: string;
+  invalidSessionId: string;
   newSessionHint: string;
   /* global config */
   budget: string;
+  perDay: string;
   quietHours: string;
+  quietHoursStart: string;
+  quietHoursEnd: string;
   globalView: string;
   configSectionTitle: string;
   configSectionDesc: string;
   enabledToggle: string;
+  defaultPromptLabel: string;
+  defaultPromptHint: string;
   saveConfig: string;
   saved: string;
   loadFailure: string;
+  loading: string;
   close: string;
   openSettings: string;
   /* misc */
   error: string;
   confirmCancel: string;
+  storageCorrupt: string;
+  hostPanelLabel: string;
+  /** Intl locale tag used to render instants (zh-CN / en-US). */
+  dateTimeLocale: string;
 }
 
 export const zh: ProactivePanelCopy = {
@@ -100,6 +134,7 @@ export const zh: ProactivePanelCopy = {
   alarms: "闹钟",
   session: "所属会话",
   prompt: "唤醒指令",
+  promptPlaceholder: "例如：确认今天的待办进度",
   state: "状态",
   nextDue: "下次触发",
   type: "类型",
@@ -113,6 +148,26 @@ export const zh: ProactivePanelCopy = {
   sortNextDue: "下次触发",
   sortCreated: "创建时间",
   sortPrompt: "指令",
+  stateScheduled: "待触发",
+  stateOverdue: "已到期",
+  stateInFlight: "执行中",
+  stateCompleted: "已完成",
+  stateCancelled: "已取消",
+  stateFailed: "失败",
+  statePaused: "已暂停",
+  typeOnce: "单次",
+  typeEvery: "循环",
+  typeCron: "Cron",
+  targetResume: "会话",
+  targetFork: "分支",
+  targetNew: "新建",
+  quietLabel: "免打扰",
+  runTime: "时间",
+  runDecision: "决策",
+  runBudget: "预算",
+  runSummary: "摘要（思考 / 回复）",
+  thinkingPrefix: "思考：",
+  replyPrefix: "回复：",
   delaySeconds: "延迟秒数（从现在起）",
   atDateTime: "指定日期时间",
   everySeconds: "固定间隔秒数",
@@ -123,24 +178,33 @@ export const zh: ProactivePanelCopy = {
   jitterEveryHint: "建议 ≤ 间隔秒数",
   respectQuietHours: "遵从免打扰时段",
   quietHint: "不勾选 = 你明确要求：免打扰时段也照常触发，且不受每日预算限制",
-  targetSession: "目标会话",
-  forkSourceSession: "分支源会话",
-  selectSession: "请选择会话…",
-  selectSessionFail: "无法获取会话列表",
+  targetSessionId: "目标会话 ID",
+  forkSourceSessionId: "分支源会话 ID",
+  targetSessionPlaceholder: "如 session-…（默认当前会话）",
+  invalidSessionId: "会话 ID 格式不对：只能包含字母、数字与 . _ -",
   newSessionHint: "唤醒时新建一个空会话，不依赖任何既有会话",
   budget: "每日预算",
+  perDay: "/日",
   quietHours: "安静时段",
+  quietHoursStart: "安静时段开始",
+  quietHoursEnd: "安静时段结束",
   globalView: "全局视图",
   configSectionTitle: "全局配置",
   configSectionDesc: "",
   enabledToggle: "启用主动唤醒",
+  defaultPromptLabel: "默认唤醒指令",
+  defaultPromptHint: "新建闹钟时预填这段文字；每个闹钟仍保存自己的指令",
   saveConfig: "保存配置",
   saved: "已保存",
   loadFailure: "加载失败",
+  loading: "加载中…",
   close: "关闭",
   openSettings: "打开设置",
   error: "出错了",
-  confirmCancel: "确认取消这个闹钟？"
+  confirmCancel: "确认取消这个闹钟？",
+  storageCorrupt: "（存储损坏，只读）",
+  hostPanelLabel: "全局（设置页）",
+  dateTimeLocale: "zh-CN"
 };
 
 export const en: ProactivePanelCopy = {
@@ -161,9 +225,10 @@ export const en: ProactivePanelCopy = {
   hideHistory: "Hide",
   copyId: "Copy session ID",
   copied: "Copied",
-  alarms: "Alarms",
+  alarms: "alarms",
   session: "Owner session",
   prompt: "Wake-up instruction",
+  promptPlaceholder: "e.g. check on today's todo progress",
   state: "State",
   nextDue: "Next due",
   type: "Type",
@@ -177,6 +242,26 @@ export const en: ProactivePanelCopy = {
   sortNextDue: "Next due",
   sortCreated: "Created",
   sortPrompt: "Prompt",
+  stateScheduled: "Scheduled",
+  stateOverdue: "Overdue",
+  stateInFlight: "In-flight",
+  stateCompleted: "Completed",
+  stateCancelled: "Cancelled",
+  stateFailed: "Failed",
+  statePaused: "Paused",
+  typeOnce: "Once",
+  typeEvery: "Repeat",
+  typeCron: "Cron",
+  targetResume: "Session",
+  targetFork: "Fork",
+  targetNew: "New",
+  quietLabel: "Quiet",
+  runTime: "Time",
+  runDecision: "Decision",
+  runBudget: "Budget",
+  runSummary: "Summary (thinking / reply)",
+  thinkingPrefix: "Thinking: ",
+  replyPrefix: "Reply: ",
   delaySeconds: "Delay seconds (from now)",
   atDateTime: "Pick date & time",
   everySeconds: "Fixed interval seconds",
@@ -187,22 +272,31 @@ export const en: ProactivePanelCopy = {
   jitterEveryHint: "should be ≤ interval",
   respectQuietHours: "Respect quiet hours",
   quietHint: "Unchecked = your explicit request: fires even in quiet hours, exempt from the daily budget",
-  targetSession: "Target session",
-  forkSourceSession: "Fork source session",
-  selectSession: "Select a session…",
-  selectSessionFail: "session list unavailable",
+  targetSessionId: "Target session ID",
+  forkSourceSessionId: "Fork source session ID",
+  targetSessionPlaceholder: "e.g. session-… (defaults to the current session)",
+  invalidSessionId: "Invalid session ID: only letters, digits, and . _ - are allowed",
   newSessionHint: "The wake runs in a fresh empty session.",
   budget: "Daily budget",
+  perDay: "/day",
   quietHours: "Quiet hours",
+  quietHoursStart: "Quiet hours start",
+  quietHoursEnd: "Quiet hours end",
   globalView: "Global view",
   configSectionTitle: "Global config",
   configSectionDesc: "",
   enabledToggle: "Enable proactive wakes",
+  defaultPromptLabel: "Default wake-up instruction",
+  defaultPromptHint: "Pre-filled into the new-alarm form; each alarm still stores its own prompt",
   saveConfig: "Save config",
   saved: "Saved",
   loadFailure: "Load failed",
+  loading: "Loading…",
   close: "Close",
   openSettings: "Open settings",
   error: "Error",
-  confirmCancel: "Cancel this alarm?"
+  confirmCancel: "Cancel this alarm?",
+  storageCorrupt: "(storage corrupt, read-only)",
+  hostPanelLabel: "Global (settings page)",
+  dateTimeLocale: "en-US"
 };

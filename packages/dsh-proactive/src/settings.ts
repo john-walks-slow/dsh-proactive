@@ -9,7 +9,7 @@
 import z from "schemastery";
 import type { Context } from "@deepseek-ai/cordis";
 import { type ProactiveConfig, type BootOverduePolicy, type QuietHours } from "./config.js";
-import { canonicalizeTimeZone, isRecord, type ToolError } from "./domain.js";
+import { canonicalizeTimeZone, DEFAULT_WAKE_PROMPT, isRecord, type ToolError } from "./domain.js";
 
 /** The hot-updatable configuration subset, excluding the immutable dataDir. */
 export interface HotConfig {
@@ -21,6 +21,7 @@ export interface HotConfig {
   bootOverduePolicy: BootOverduePolicy;
   maxRetriesPerFire: number;
   maxPromptLength: number;
+  defaultPrompt: string;
 }
 
 /**
@@ -37,7 +38,8 @@ export function hotSubset(config: ProactiveConfig): HotConfig {
     maxConcurrentPerSession: config.maxConcurrentPerSession,
     bootOverduePolicy: config.bootOverduePolicy,
     maxRetriesPerFire: config.maxRetriesPerFire,
-    maxPromptLength: config.maxPromptLength
+    maxPromptLength: config.maxPromptLength,
+    defaultPrompt: config.defaultPrompt
   };
 }
 
@@ -88,7 +90,7 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
   const allowed = new Set([
     "enabled", "max_deliveries_per_day", "quiet_hours",
     "max_wakeups_per_hour", "max_concurrent_per_session", "boot_overdue_policy",
-    "max_retries_per_fire", "max_prompt_length"
+    "max_retries_per_fire", "max_prompt_length", "default_prompt"
   ]);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) {
@@ -160,6 +162,16 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
     }
     write("maxPromptLength", n);
   }
+  if ("default_prompt" in raw) {
+    const value = raw["default_prompt"];
+    if (typeof value !== "string" || value.trim().length === 0) {
+      return { code: "invalid_trigger", message: "default_prompt must be a non-empty string (the create-form prefill)." };
+    }
+    if (value.trim().length > MAX_SET_PROMPT_LENGTH) {
+      return { code: "invalid_trigger", message: "default_prompt must be at most " + MAX_SET_PROMPT_LENGTH + " characters." };
+    }
+    write("defaultPrompt", value.trim());
+  }
   return { patch };
 }
 
@@ -178,7 +190,8 @@ export const proactiveSettingsSchema = z.object({
   maxConcurrentPerSession: z.number().min(1).max(16).default(1),
   bootOverduePolicy: z.union([z.const("fire"), z.const("notify-only"), z.const("drop")]).default("fire"),
   maxRetriesPerFire: z.number().min(0).max(16).default(3),
-  maxPromptLength: z.number().min(100).max(100000).default(4000)
+  maxPromptLength: z.number().min(100).max(100000).default(4000),
+  defaultPrompt: z.string().default(DEFAULT_WAKE_PROMPT)
 });
 
 export interface SettingsWire {

@@ -56,9 +56,12 @@ function harness() {
   } satisfies ToolServices;
   // Agent carries a live sessions facade: its own session has one user rpc
   // message carrying the browser zone, so omitted time_zone resolves there.
+  const sessionsFacade = { get: (id: string) => (id === "s1" ? { events: [{ type: "user/message", source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } }] } : undefined) };
   const agent = {
     session: { id: "s1" },
-    ctx: { sessions: { get: (id: string) => (id === "s1" ? { events: [{ type: "user/message", source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } }] } : undefined) } }
+    // Cordis-shaped ctx: services resolve through get(name, false), so the
+    // mock exposes the sessions facade the same way the runtime does.
+    ctx: { get: (name: string) => (name === "sessions" ? sessionsFacade : undefined) }
   } as unknown as Agent;
   const defs = proactiveToolDefinitions(agent, services);
   const byName = Object.fromEntries(defs.map((d) => [d.name, d]));
@@ -274,7 +277,7 @@ test("proactive_set: omitted time_zone resolves the session browser zone", async
 
 test("proactive_set: no user messages falls back to the host zone", async () => {
   const h = harness();
-  const bare = { session: { id: "s2" } } as unknown as Agent; // no ctx.sessions at all
+  const bare = { session: { id: "s2" }, ctx: { get: () => undefined } } as unknown as Agent; // no sessions service at all
   const bareSet = proactiveToolDefinitions(bare, h.services).find((d) => d.name === "proactive_set");
   assert.ok(bareSet !== undefined);
   await bareSet.execute({ prompt: "x", after_seconds: 60 }, { agent: bare, concludeTurn: () => undefined } as unknown as ToolRunContext);
@@ -348,4 +351,14 @@ test("tools reject exec bound to another agent", async () => {
   const foreign = { agent: { session: { id: "s9" } }, concludeTurn: () => undefined } as unknown as ToolRunContext;
   const res = await h.byName["proactive_set"].execute({ prompt: "x", after_seconds: 5 }, foreign) as { code?: string };
   assert.equal(res.code, "internal_error");
+});
+test("proactive_update_settings: default_prompt updates, persists, and shows in the settings view", async () => {
+  const h = harness();
+  const out = await h.run("proactive_update_settings", { default_prompt: "  新的默认预设  " }) as Record<string, unknown>;
+  assert.equal(out["default_prompt"], "新的默认预设");
+  assert.equal(h.config.defaultPrompt, "新的默认预设");
+  const file = JSON.parse(readFileSync(join(h.dir, "config.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(file["defaultPrompt"], "新的默认预设");
+  // Invalid shapes stay closed.
+  assert.equal(code(await h.run("proactive_update_settings", { default_prompt: "   " })), "invalid_trigger");
 });

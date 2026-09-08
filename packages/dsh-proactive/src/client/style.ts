@@ -407,9 +407,49 @@ const STYLESHEET = String.raw`
   outline: none;
   resize: vertical;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  width: 100%;
 }
 .dshp-panel textarea.dshp-input:focus {
   border-color: var(--dshp-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--dshp-accent) 18%, transparent);
+}
+
+/* ---------- session-id input (monospace) ---------- */
+.dshp-panel input.dshp-input.dshp-input-mono {
+  font-family: var(--dshp-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+/* ---------- inline field error ---------- */
+.dshp-panel .dshp-field-error {
+  color: var(--dshp-error);
+  font-size: 11.5px;
+}
+
+/* ---------- loading state (initial snapshot pull) ---------- */
+.dshp-panel .dshp-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 34px 14px;
+  color: var(--dshp-text-dimmed);
+  font-size: 12.5px;
+}
+.dshp-panel .dshp-spinner {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--dshp-border-strong);
+  border-top-color: var(--dshp-accent);
+  animation: dshp-spin 0.75s linear infinite;
+}
+@keyframes dshp-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dshp-panel .dshp-spinner { animation-duration: 1.6s; }
 }
 `;

@@ -5,20 +5,23 @@
  * `useSession`, `useProjection`. All data is scoped to that session via the
  * `?session=` routes; mutations carry the ownership guard on the host side.
  *
- * v2: the create/edit form defaults to resume-on-this-session and pins the
- * fork source / resume target to the current session (`fixedSession`); "new"
- * wakes in a fresh empty session.
+ * v3 (260909 release polish): the create/edit form is the SAME dialect as
+ * the settings page — target mode (resume/fork/new) plus a session-id input
+ * defaulting to THIS session, so a wake can also be aimed elsewhere. The
+ * owner stays pinned to this session (the host scope rule).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConvViewProps } from "@deepseek-ai/dsh-client-ui-conversation/client";
 import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
-import { AlarmTable, CreateForm, formFromAlarm, type AlarmRow, type RunRow } from "./sections.js";
+import {
+  AlarmTable, CreateForm, LoadingBlock,
+  defaultPromptOf, formFromAlarm, newAlarmForm,
+  type AlarmRow, type RunRow
+} from "./sections.js";
 import { useProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
-
-const EMPTY_FORM: PanelCreateForm = { prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" };
 
 export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement {
   const copy = useProactiveLocale();
@@ -29,7 +32,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<PanelCreateForm>(EMPTY_FORM);
+  const [form, setForm] = useState<PanelCreateForm>(() => newAlarmForm("", sessionId));
   // Refs: a session switch must not let the earlier session's in-flight
   // response overwrite the current session's snapshot.
   const sessionRef = useRef(sessionId);
@@ -55,6 +58,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   useEffect(() => {
     setSnapshot(null);
     setError(null);
+    setForm(newAlarmForm("", sessionId));
     void reload();
     const unsubscribe = transport.subscribe(() => {
       void reload();
@@ -89,7 +93,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       setSnapshot(next);
       setShowForm(false);
       setEditingId(null);
-      setForm(EMPTY_FORM);
+      setForm(newAlarmForm(defaultPromptOf(next), sessionRef.current));
     } catch (reason) {
       if (sessionRef.current !== requested) return;
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -110,9 +114,9 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
 
   const openCreate = useCallback(() => {
     setEditingId(null);
-    setForm({ ...EMPTY_FORM });
+    setForm(newAlarmForm(defaultPromptOf(snapshot), sessionId));
     setShowForm(true);
-  }, []);
+  }, [snapshot, sessionId]);
 
   const openEdit = useCallback((id: string) => {
     const alarm = snapshot?.alarms.find((a) => a.id === id);
@@ -123,6 +127,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   }, [snapshot]);
 
   const alarms: AlarmRow[] = snapshot?.alarms ?? [];
+  const loading = snapshot === null && error === null;
   const runsByAlarm = useMemo(() => {
     const map = new Map<string, RunRow[]>();
     for (const run of snapshot?.runs ?? []) {
@@ -141,8 +146,8 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
           <div className="dshp-sub">{copy.sessionSubtitle}</div>
         </div>
         <div className="dshp-btn-row">
-          <button className="dshp-btn" onClick={() => { void reload(); }} disabled={busy}>{copy.refresh}</button>
-          <button className="dshp-btn dshp-btn-primary" onClick={openCreate}>{copy.newAlarm}</button>
+          <button className="dshp-btn" onClick={() => { void reload(); }} disabled={busy || loading}>{copy.refresh}</button>
+          <button className="dshp-btn dshp-btn-primary" onClick={openCreate} disabled={snapshot === null}>{copy.newAlarm}</button>
         </div>
       </div>
 
@@ -150,22 +155,26 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} editing={editingId !== null} fixedSession={sessionId}
+          copy={copy} editing={editingId !== null}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 
       <div className="dshp-card">
         <div className="dshp-card-head">
           <span>{copy.alarms}</span>
-          <span className="dshp-cell-dim">{snapshot?.server.corrupt === true ? "（存储损坏，只读）" : ""}</span>
+          <span className="dshp-cell-dim">{snapshot?.server.corrupt === true ? copy.storageCorrupt : ""}</span>
         </div>
         <div className="dshp-card-body" style={{ padding: 0 }}>
-          <AlarmTable alarms={alarms} runsByAlarm={runsByAlarm} busy={busy} copy={copy}
-            onToggle={(id) => { void run({ kind: "toggle", id }); }}
-            onCancel={(id) => { if (confirm(copy.confirmCancel)) void run({ kind: "cancel", id }); }}
-            onFire={(id) => { void run({ kind: "fire", id }); }}
-            onEdit={(id) => openEdit(id)}
-            onCopyId={() => undefined} />
+          {loading ? (
+            <LoadingBlock copy={copy} />
+          ) : (
+            <AlarmTable alarms={alarms} runsByAlarm={runsByAlarm} busy={busy} copy={copy}
+              onToggle={(id) => { void run({ kind: "toggle", id }); }}
+              onCancel={(id) => { if (confirm(copy.confirmCancel)) void run({ kind: "cancel", id }); }}
+              onFire={(id) => { void run({ kind: "fire", id }); }}
+              onEdit={(id) => openEdit(id)}
+              onCopyId={() => undefined} />
+          )}
         </div>
       </div>
     </div>

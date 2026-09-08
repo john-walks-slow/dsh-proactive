@@ -22,6 +22,16 @@ export const MAX_NO_REPLY_REASON_LENGTH = 200;
 /** Upper bound for the per-occurrence random delay (24h). */
 export const MAX_JITTER_SECONDS = 86400;
 
+/**
+ * The repo default wake-up instruction: pre-filled into the GUI create form
+ * (config.defaultPrompt, editable) so a new alarm starts from the user's
+ * standing preset instead of a blank box. Pure constant — domain.ts stays
+ * import-free so BOTH the host (config.ts) and the browser client bundle
+ * (panel form fallback) share this one source of truth.
+ */
+export const DEFAULT_WAKE_PROMPT =
+  "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。 如果不希望发送消息，则用 proactive_no_reply 安静结束。";
+
 /** dsh session ids are alphanumeric plus `._-`; anything else (slashes, traversals, spaces, UTF-8) is rejected. */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 

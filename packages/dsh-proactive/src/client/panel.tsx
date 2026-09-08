@@ -1,20 +1,36 @@
 /**
  * The settings.section panel — the host-wide Proactive view. Shows the
- * editable global config, the single alarm table (all sessions, filterable /
- * sortable / editable / deletable / per-alarm history), and the create form
- * with explicit owner + wake-target pickers. Session-scoped management lives
- * in the conversation-page tab (session-panel.tsx).
+ * editable global config (including the default wake-up instruction the
+ * create form pre-fills), the single alarm table (all sessions, filterable /
+ * sortable / editable / deletable / per-alarm history), and the create form.
+ * Session-scoped management lives in the conversation-page tab
+ * (session-panel.tsx); both surfaces share ONE create-form dialect.
+ *
+ * The owner of a created alarm is derived, never picked: resume/fork owns the
+ * target session, "new" falls back to the GUI's current session (or the
+ * host-panel pseudo session when none is selected).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ProactiveHostTransport, type PanelSnapshotDto, type SessionInfo } from "./host-api.js";
+import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
-import { AlarmTable, CreateForm, HOST_PANEL_SESSION, formFromSnapshot, formFromAlarm, fmtSession, type AlarmRow, type RunRow } from "./sections.js";
+import {
+  AlarmTable, CreateForm, HOST_PANEL_SESSION, LoadingBlock,
+  defaultPromptOf, fmtSession, formFromAlarm, newAlarmForm,
+  type AlarmRow, type RunRow
+} from "./sections.js";
 import { useProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
 
 export interface ProactivePanelProps {
   close: () => void;
+  /**
+   * Framework global-standard hook (every slot component receives it): reads
+   * the GUI's current session selection, used as the create form's default
+   * target and as the owner fallback for "new"-mode alarms. Optional so the
+   * component still mounts under older hosts / unit tests.
+   */
+  useSessions?: <S>(selector: (state: { current?: string }) => S, equals?: (a: S, b: S) => boolean) => S;
 }
 
 interface ConfigDraft {
@@ -22,6 +38,7 @@ interface ConfigDraft {
   maxDeliveriesPerDay: string;
   quietStart: string;
   quietEnd: string;
+  defaultPrompt: string;
 }
 
 function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
@@ -29,20 +46,20 @@ function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
     enabled: snapshot.config.enabled,
     maxDeliveriesPerDay: String(snapshot.config.maxDeliveriesPerDay),
     quietStart: snapshot.config.quietHours.start,
-    quietEnd: snapshot.config.quietHours.end
+    quietEnd: snapshot.config.quietHours.end,
+    defaultPrompt: snapshot.config.defaultPrompt ?? ""
   };
 }
 
-export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement {
+export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
   const copy = useProactiveLocale();
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<PanelCreateForm>({ prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" });
+  const [form, setForm] = useState<PanelCreateForm>(() => newAlarmForm("", ""));
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -50,11 +67,14 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     injectProactiveStyles();
   }, []);
 
+  // The GUI's current session (sidebar selection); stable hook call order —
+  // the prop itself is constant for a given mount.
+  const currentSession = props.useSessions?.((state) => state.current) ?? "";
+
   const reload = useCallback(async () => {
     try {
-      const { snapshot: next, sessions: list } = await transport.stateForHost();
-      setSnapshot(next);
-      setSessions(list);
+      const next = await transport.stateForHost();
+      setSnapshot(next.snapshot);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -62,16 +82,15 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
   }, [transport]);
 
   /**
-   * Silent data re-pull: refresh the table (and the session picker) without
-   * touching the error banner. Used after a failed action — a stale row whose
-   * alarm vanished (e.g. cancelled elsewhere, `not_found`) must leave the
-   * table instead of lingering next to the error message.
+   * Silent data re-pull: refresh the table without touching the error banner.
+   * Used after a failed action — a stale row whose alarm vanished (e.g.
+   * cancelled elsewhere, `not_found`) must leave the table instead of
+   * lingering next to the error message.
    */
   const refresh = useCallback(async () => {
     try {
-      const { snapshot: next, sessions: list } = await transport.stateForHost();
-      setSnapshot(next);
-      setSessions(list);
+      const next = await transport.stateForHost();
+      setSnapshot(next.snapshot);
     } catch {
       /* keep the current snapshot and the error banner */
     }
@@ -90,23 +109,28 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
     setBusy(true);
     setError(null);
     try {
-      const { snapshot: next, sessions: list } = await transport.actionForHost(action);
-      setSnapshot(next);
-      setSessions(list);
+      const next = await transport.actionForHost(action);
+      setSnapshot(next.snapshot);
       setShowForm(false);
       setEditingId(null);
-      setForm({ prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" });
+      setForm(newAlarmForm(defaultPromptOf(next.snapshot), currentSession));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       void refresh();
     } finally {
       setBusy(false);
     }
-  }, [busy, transport, refresh]);
+  }, [busy, transport, refresh, currentSession]);
+
+  /** Owner for a settings-page create: the wake target, or the GUI's current session for "new". */
+  const ownerForCreate = useCallback((form_: PanelCreateForm): string => {
+    if ((form_.targetMode ?? "resume") === "new") return currentSession !== "" ? currentSession : HOST_PANEL_SESSION;
+    return (form_.targetSessionId ?? "").trim();
+  }, [currentSession]);
 
   const submitCreate = useCallback(async () => {
-    await run({ kind: "create", sessionId: form.sessionId ?? "", args: createArgsFromForm(form) });
-  }, [run, form]);
+    await run({ kind: "create", sessionId: ownerForCreate(form), args: createArgsFromForm(form) });
+  }, [run, form, ownerForCreate]);
 
   const submitEdit = useCallback(async () => {
     if (editingId === null) return;
@@ -120,45 +144,28 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
       patch: {
         enabled: draft.enabled,
         max_deliveries_per_day: Number(draft.maxDeliveriesPerDay),
-        quiet_hours: { start: draft.quietStart, end: draft.quietEnd, time_zone: snapshot.config.quietHours.timeZone }
+        quiet_hours: { start: draft.quietStart, end: draft.quietEnd, time_zone: snapshot.config.quietHours.timeZone },
+        // Only offered (and sent) when the host advertises the field; an
+        // older host would reject the unknown key.
+        ...(snapshot.config.defaultPrompt !== undefined ? { default_prompt: draft.defaultPrompt } : {})
       }
     });
   }, [run, draft, snapshot]);
 
   const alarms: AlarmRow[] = snapshot?.alarms ?? [];
-
-  // Owner-session picker options: the full host session list when available;
-  // fall back to the distinct owners seen across alarms (e.g. the session
-  // list fetch failed, or legacy rows outlive their sessions).
-  const pickerOptions = useMemo(() => {
-    if (sessions.length > 0) return sessions;
-    const seen = new Map<string, string>();
-    for (const alarm of alarms) {
-      if (!seen.has(alarm.sessionId)) seen.set(alarm.sessionId, alarm.sessionTitle ?? "");
-    }
-    return [...seen.entries()].map(([id, title]) => ({ id, title }));
-  }, [sessions, alarms]);
-
-  /** First real conversation (session-*), then any session, then none. */
-  const preferredSession = useCallback((options: Array<{ id: string; title: string }>): string => {
-    if (options.length === 0) return "";
-    return options.find((s) => s.id.startsWith("session-"))?.id ?? options[0].id;
-  }, []);
-
-  const resetForm = (): PanelCreateForm => ({ prompt: "", kind: "every", everySeconds: 3600, respectQuietHours: false, targetMode: "resume" });
+  const loading = snapshot === null && error === null;
 
   const openCreate = useCallback(() => {
     setEditingId(null);
-    setForm({ ...formFromSnapshot(snapshot), sessionId: preferredSession(pickerOptions) });
+    setForm(newAlarmForm(defaultPromptOf(snapshot), currentSession));
     setShowForm(true);
-  }, [snapshot, pickerOptions, preferredSession]);
+  }, [snapshot, currentSession]);
 
   const openEdit = useCallback((id: string) => {
     const alarm = snapshot?.alarms.find((a) => a.id === id);
     if (alarm === undefined) return;
-    const next = { ...formFromAlarm(alarm), sessionId: alarm.sessionId };
     setEditingId(id);
-    setForm(next);
+    setForm(formFromAlarm(alarm));
     setShowForm(true);
   }, [snapshot]);
 
@@ -187,17 +194,21 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
       <div className="dshp-head">
         <div>
           <h2 className="dshp-title">{copy.globalTitle}</h2>
-          <div className="dshp-sub">{copy.globalView} · {alarms.length} {copy.alarms}</div>
+          <div className="dshp-sub">
+            {loading ? copy.loading : copy.globalView + " · " + alarms.length + " " + copy.alarms}
+          </div>
         </div>
         <div className="dshp-btn-row">
-          <button className="dshp-btn" onClick={() => { void reload(); }} disabled={busy}>{copy.refresh}</button>
+          <button className="dshp-btn" onClick={() => { void reload(); }} disabled={busy || loading}>{copy.refresh}</button>
           <button className="dshp-btn dshp-btn-primary" onClick={openCreate} disabled={snapshot === null}>{copy.newAlarm}</button>
         </div>
       </div>
 
       {error !== null && <div className="dshp-error">{copy.error}: {error}</div>}
 
-      {snapshot !== null ? (
+      {loading ? (
+        <div className="dshp-card"><LoadingBlock copy={copy} /></div>
+      ) : snapshot !== null ? (
         <div className="dshp-card">
           <div className="dshp-card-head">
             <span>{copy.configSectionTitle}</span>
@@ -207,7 +218,7 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
             <div className="dshp-switch-row">
               <div>
                 <div className="dshp-switch-label">{copy.enabledToggle}</div>
-                <div className="dshp-switch-desc">{copy.budget}: {snapshot.config.maxDeliveriesPerDay}/日 · {copy.quietHours}: {snapshot.config.quietHours.start}-{snapshot.config.quietHours.end}</div>
+                <div className="dshp-switch-desc">{copy.budget}: {snapshot.config.maxDeliveriesPerDay}{copy.perDay} · {copy.quietHours}: {snapshot.config.quietHours.start}-{snapshot.config.quietHours.end}</div>
               </div>
               <label className="dshp-switch">
                 <input type="checkbox" checked={(draft ?? configDraftFrom(snapshot)).enabled} disabled={busy}
@@ -223,16 +234,25 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
                   onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), maxDeliveriesPerDay: e.target.value })} />
               </div>
               <div className="dshp-field" style={{ flex: 1, minWidth: 100 }}>
-                <label className="dshp-field-label">{copy.quietHours} 开始</label>
+                <label className="dshp-field-label">{copy.quietHoursStart}</label>
                 <input className="dshp-input" type="time" value={(draft ?? configDraftFrom(snapshot)).quietStart} disabled={busy}
                   onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), quietStart: e.target.value })} />
               </div>
               <div className="dshp-field" style={{ flex: 1, minWidth: 100 }}>
-                <label className="dshp-field-label">{copy.quietHours} 结束</label>
+                <label className="dshp-field-label">{copy.quietHoursEnd}</label>
                 <input className="dshp-input" type="time" value={(draft ?? configDraftFrom(snapshot)).quietEnd} disabled={busy}
                   onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), quietEnd: e.target.value })} />
               </div>
             </div>
+            {snapshot.config.defaultPrompt !== undefined ? (
+              <div className="dshp-field">
+                <label className="dshp-field-label">{copy.defaultPromptLabel}</label>
+                <textarea className="dshp-input dshp-grow" rows={3} value={(draft ?? configDraftFrom(snapshot)).defaultPrompt} disabled={busy}
+                  placeholder={defaultPromptOf(null)}
+                  onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), defaultPrompt: e.target.value })} />
+                <div className="dshp-cell-dim">{copy.defaultPromptHint}</div>
+              </div>
+            ) : null}
             <div className="dshp-btn-row">
               <button className="dshp-btn dshp-btn-primary" disabled={busy} onClick={() => { void submitConfig(); }}>{copy.saveConfig}</button>
             </div>
@@ -242,24 +262,28 @@ export function ProactivePanel(_props: ProactivePanelProps): React.ReactElement 
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} sessions={pickerOptions} editing={editingId !== null}
+          copy={copy} editing={editingId !== null}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 
       <div className="dshp-card">
         <div className="dshp-card-head">
           <span>{copy.alarms}</span>
-          <span className="dshp-cell-dim">{snapshot?.server.corrupt === true ? "（存储损坏，只读）" : ""}</span>
+          <span className="dshp-cell-dim">{snapshot?.server.corrupt === true ? copy.storageCorrupt : ""}</span>
         </div>
         <div className="dshp-card-body" style={{ padding: 0 }}>
-          <AlarmTable alarms={alarms} runsByAlarm={runsByAlarm} showSession busy={busy} copy={copy}
-            onToggle={(id) => { void run({ kind: "toggle", id }); }}
-            onCancel={(id) => { if (confirm(copy.confirmCancel)) void run({ kind: "cancel", id }); }}
-            onFire={(id) => { void run({ kind: "fire", id }); }}
-            onEdit={(id) => openEdit(id)}
-            onCopyId={(sessionId) => { void copyId(sessionId); }} />
+          {loading ? (
+            <LoadingBlock copy={copy} />
+          ) : (
+            <AlarmTable alarms={alarms} runsByAlarm={runsByAlarm} showSession busy={busy} copy={copy}
+              onToggle={(id) => { void run({ kind: "toggle", id }); }}
+              onCancel={(id) => { if (confirm(copy.confirmCancel)) void run({ kind: "cancel", id }); }}
+              onFire={(id) => { void run({ kind: "fire", id }); }}
+              onEdit={(id) => openEdit(id)}
+              onCopyId={(sessionId) => { void copyId(sessionId); }} />
+          )}
           {copiedId !== null ? (
-            <div className="dshp-toast">{copy.copied}: {copiedId === HOST_PANEL_SESSION ? fmtSession(copiedId) : copiedId}</div>
+            <div className="dshp-toast">{copy.copied}: {copiedId === HOST_PANEL_SESSION ? fmtSession(copiedId, undefined, copy) : copiedId}</div>
           ) : null}
         </div>
       </div>

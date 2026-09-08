@@ -27,14 +27,15 @@ export interface RunView {
 }
 
 /**
- * Read-only configuration summary the panel displays in the settings header.
- * The repo-wide default heartbeat prompt was removed in v2: every alarm
- * carries its own prompt and respect_quiet_hours switch.
+ * Read-only configuration summary the panel displays in the settings header
+ * and feeds the create-form prefill (`defaultPrompt`). Every stored alarm
+ * carries its own prompt; the default is only the prefill.
  */
 export interface ConfigView {
   enabled: boolean;
   maxDeliveriesPerDay: number;
   quietHours: { start: string; end: string; timeZone: string };
+  defaultPrompt: string;
 }
 
 /** One alarm row plus the owning session's display title (empty = unknown). */
@@ -89,12 +90,16 @@ export type PanelResult = { ok: true; snapshot: PanelSnapshot } | { ok: false; e
  * every = everySeconds (+ jitterSeconds), cron = cron expression
  * (+ jitterSeconds). respectQuietHours and the target destination are
  * independent of the type.
+ *
+ * The form has NO owner field: the owner is derived by the caller — the
+ * conversation tab pins its own session (scope rule), the settings page uses
+ * the target session (resume/fork) or falls back to the host-panel pseudo
+ * session (new). One "target session id" input serves resume (wake that
+ * session) and fork (branch from that session); `new` ignores it entirely.
  */
 export interface PanelCreateForm {
   prompt: string;
   kind: "once" | "every" | "cron";
-  /** Owning session (host-wide view only; the conversation tab pins its own). */
-  sessionId?: string;
   /** once: relative delay in seconds (alternative to atDate/atTime). */
   afterSeconds?: number;
   /** once: local absolute date (alternative to afterSeconds). */
@@ -111,7 +116,7 @@ export interface PanelCreateForm {
   /** false (default) = user-requested, exempt from quiet hours + budget. */
   respectQuietHours?: boolean;
   targetMode?: "resume" | "fork" | "new";
-  /** Destination for resume/fork; omitted = owner. Ignored for new. */
+  /** Destination for resume/fork; empty/absent = derive host-side. Ignored for new. */
   targetSessionId?: string;
 }
 
@@ -139,6 +144,12 @@ export function createArgsFromForm(form: PanelCreateForm): Record<string, unknow
   if (form.timeZone !== undefined && form.timeZone !== "") args["time_zone"] = form.timeZone;
   if (form.respectQuietHours !== undefined) args["respect_quiet_hours"] = form.respectQuietHours;
   if (form.targetMode !== undefined && form.targetMode !== "resume") args["target_mode"] = form.targetMode;
-  if (form.targetSessionId !== undefined && form.targetSessionId !== "") args["target_session_id"] = form.targetSessionId;
+  // A stale id left over from switching modes must not leak into a "new"
+  // target (the shared validator rejects that combination), and resume/fork
+  // ids are sent trimmed so a padded input never fails validation.
+  if (form.targetMode !== "new") {
+    const targetSessionId = (form.targetSessionId ?? "").trim();
+    if (targetSessionId !== "") args["target_session_id"] = targetSessionId;
+  }
   return args;
 }
