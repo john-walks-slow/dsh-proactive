@@ -27,11 +27,20 @@
 - push-only 唤醒回合（调工具无文本）从 `push/计1` 归入 `failed/计0`——与"预算只计可见聊天文本"新语义精确一致
 - 旧数据兼容：旧 alarms.json 的 `deliveryHint` 字段被 store 宽容忽略；旧 runs 的 `decision="push"` 作为历史字符串由 GUI 直显
 
+## 后续扩展：no_reply 泛化
+
+在删除 push 耦合的同一轮对话中，用户进一步要求将 `proactive_no_reply` 泛化为通用 `no_reply` 工具——不再仅限于唤醒回合，agent 可在任何回合静默收尾。
+
+- 工具名 `proactive_no_reply` → `no_reply`（全链同步：observer 常量、framing 报文、config 默认文案、测试）
+- 移除 `isActiveWake` 守卫：普通回合也可静默结束（`concludeTurn`），唤醒回合审计不变
+- 工具描述通用化：唤醒回合调用时额外记入 run 记录（reason/reasoningSummary）
+- `no_active_wake` 错误码保留类型定义（不再被产生）
+
 ## 验证
 
 - `npm run check`（tsc --noEmit）exit 0
-- `npm test` 121/121 全绿（含新增回归断言：delivery 参数被拒绝）
-- reviewer 审查：**通过（无阻塞问题）**，删除彻底性零残留、无误删、observer 闭环正确
+- `npm test` 151/151 全绿（含并发会话 alarm model v2 新增测试）
+- 评审：**通过（无阻塞）**，删除彻底性零残留、无误删、observer 闭环正确
 
 ## 部署
 
@@ -39,4 +48,4 @@ web profile 的 `node_modules/dsh-proactive` 与开发目录为硬链接同一�
 
 ## 待跟进
 
-用户验收（validation.md）：重启后验证 delivery 参数被拒、framing 两条规则、no_reply/reply 决策与预算、面板表单无通道选项、旧闹钟兼容。
+用户验收（validation.md）：重启后验证 delivery 参数被拒、framing 两条规则、no_reply 在普通回合可用、唤醒回合审计保留、面板表单无通道选项、旧闹钟兼容。

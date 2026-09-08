@@ -46,7 +46,7 @@ function makeFakeAgent(rec: FakeRecording, opts: { busy?: boolean; failWhenIdle?
       rec.messages.push({ message });
       rec.activeDuringFollowup = true; // driver must still count this wake as active
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: "c1", name: "proactive_no_reply", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: "c1", name: "no_reply", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => {
@@ -409,7 +409,7 @@ function makeWakeAgent(header: EpochHeader) {
     session: { id: "s1", events, requestHeader: () => header },
     followup: () => {
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: "c1", name: "proactive_no_reply", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: "c1", name: "no_reply", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },

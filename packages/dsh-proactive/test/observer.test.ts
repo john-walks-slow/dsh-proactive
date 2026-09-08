@@ -67,7 +67,7 @@ test("reasoning summary is truncated while reply stays short", () => {
   const events: MinimalEvent[] = [
     turnStart(),
     assistantBlocks([{ type: "reasoning", text: longReasoning }, { type: "text", text: "好的" }]),
-    toolCall("proactive_no_reply"),
+    toolCall("no_reply"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -82,7 +82,7 @@ test("no-reply turns with reasoning still expose the thinking summary", () => {
   const events: MinimalEvent[] = [
     turnStart(),
     assistantBlocks([{ type: "reasoning", text: "这个提醒昨天已经处理过，静默收尾。" }]),
-    toolCall("proactive_no_reply"),
+    toolCall("no_reply"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -92,8 +92,8 @@ test("no-reply turns with reasoning still expose the thinking summary", () => {
   assert.equal(analysis.replySummary, undefined);
 });
 
-test("proactive_no_reply with no text is deep silence (free)", () => {
-  const events: MinimalEvent[] = [turnStart(), toolCall("proactive_no_reply"), turnEnd()];
+test("no_reply with no text is deep silence (free)", () => {
+  const events: MinimalEvent[] = [turnStart(), toolCall("no_reply"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.budgetDelta, 0);
@@ -101,7 +101,7 @@ test("proactive_no_reply with no text is deep silence (free)", () => {
 });
 
 test("no_reply with stray text counts as leaked reply with a leak note", () => {
-  const events: MinimalEvent[] = [turnStart(), assistantText("wait, let me tell you something"), toolCall("proactive_no_reply"), turnEnd()];
+  const events: MinimalEvent[] = [turnStart(), assistantText("wait, let me tell you something"), toolCall("no_reply"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "reply");
   assert.equal(analysis.leaked, true);
@@ -156,7 +156,7 @@ test("slice anchors on the framing notice, ignoring a pending pre-wake turn", ()
     turnEnd(),
     framing,
     turnStart(1),
-    toolCall("proactive_no_reply"),
+    toolCall("no_reply"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);

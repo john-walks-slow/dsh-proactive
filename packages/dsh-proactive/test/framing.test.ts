@@ -38,7 +38,7 @@ test("renderFraming exposes rules, budget, and alarm facts (v2)", () => {
   assert.match(text, /## PROACTIVE WAKE/);
   assert.match(text, /wake_type: once/);
   assert.match(text, /respect_quiet_hours: false/);
-  assert.match(text, /proactive_no_reply/);
+  assert.match(text, /no_reply/);
   assert.match(text, /0\/3 visible deliveries/);
   assert.match(text, /alarm_abc123/);
   assert.match(text, /提醒我喝水/);

@@ -54,10 +54,10 @@ export function renderFraming(ctx: FramingContext): string {
   lines.push("```");
   lines.push("");
   lines.push("### Reply rules");
-  lines.push("1. proactive_no_reply(reason) is available on EVERY wake: if this follow-up can be completed silently, the situation resolved itself, or silence is the better choice (e.g. in-character for a roleplay persona, or the reminder is already obsolete), call it as the ONLY action of this turn and do NOT write any chat text.");
-  lines.push("2. If the user genuinely needs to see something now and a visible reply serves them, write a short, concrete reply in the user's language. A reminder usually deserves one, but one that is obsolete, already handled, or better ignored in-character may also end with proactive_no_reply.");
+  lines.push("1. no_reply(reason) is available on EVERY wake: if this follow-up can be completed silently, the situation resolved itself, or silence is the better choice (e.g. in-character for a roleplay persona, or the reminder is already obsolete), call it as the ONLY action of this turn and do NOT write any chat text.");
+  lines.push("2. If the user genuinely needs to see something now and a visible reply serves them, write a short, concrete reply in the user's language. A reminder usually deserves one, but one that is obsolete, already handled, or better ignored in-character may also end with no_reply.");
   lines.push("");
-  lines.push("Your check-in itself should take seconds, not minutes: no tool exploration, no long summaries. If the alarm is obsolete (already handled in this session), use proactive_no_reply.");
+  lines.push("Your check-in itself should take seconds, not minutes: no tool exploration, no long summaries. If the alarm is obsolete (already handled in this session), use no_reply.");
   return lines.join("\n");
 }
 

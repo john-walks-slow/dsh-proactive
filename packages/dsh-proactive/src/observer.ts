@@ -7,7 +7,7 @@
  * follow-up, then scans the appended slice for the turn boundary, tool calls,
  * and the final assistant message. The slice is anchored to the wake framing
  * notice (user/message with source.kind=plugin) so a pending pre-wake turn is
- * never misattributed. A model that called proactive_no_reply and produced no
+ * never misattributed. A model that called no_reply and produced no
  * chat text is "no_reply" (deep silence); visible chat text is charged one
  * budget unit.
  */
@@ -33,7 +33,7 @@ export interface WakeAnalysis {
   replySummary?: string;
 }
 
-const NO_REPLY_TOOL = "proactive_no_reply";
+const NO_REPLY_TOOL = "no_reply";
 
 /** Per-field summary cap for the run history (reasoning + reply are stored truncated). */
 export const RUN_SUMMARY_MAX_LENGTH = 200;

@@ -5,7 +5,7 @@
  *   proactive_set       create one host-level alarm for this session
  *   proactive_list      view this session's active alarms
  *   proactive_cancel    cancel one of this session's alarms
- *   proactive_no_reply  conclude the current wake turn with deep silence
+ *   no_reply             conclude the current turn with deep silence
  *   proactive_update_settings  partially update host-level settings (only the given fields)
  *
  * The stores they touch are host-level (the plugin singleton), so they work
@@ -124,8 +124,8 @@ function presentCard(title: string, rawInput: string): ToolCallView {
  * host didn't expose one — callers then fall back to the host zone.
  */
 function sessionEventsOf(agent: Agent): readonly unknown[] | undefined {
-  const ctx = agent.ctx as unknown as { sessions?: { get?: (id: string) => { events?: readonly unknown[] } | undefined } } | undefined;
-  return ctx?.sessions?.get?.(agent.session.id)?.events;
+  const sessions = agent.ctx.get("sessions", false) as { get?: (id: string) => { events?: readonly unknown[] } | undefined } | undefined;
+  return sessions?.get?.(agent.session.id)?.events;
 }
 
 /** Build the five tool definitions bound to one agent + its host services. */
@@ -133,7 +133,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
   return [
         defineTool({
           name: "proactive_set",
-          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, or a five-field cron expression (minute hour day-of-month month day-of-week; occurrences at least 300 seconds apart). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required. The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent with proactive_no_reply.",
+          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, or a five-field cron expression (minute hour day-of-month month day-of-week; occurrences at least 300 seconds apart). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required. The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent with no_reply.",
           parameters: {
             prompt: {
               type: "string",
@@ -237,10 +237,10 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
         }),
 
         defineTool({
-          name: "proactive_no_reply",
-          description: "Conclude the current proactive wake turn in complete silence: call it as the ONLY action with no chat text so the wake stays invisible to the user. Any chat text already committed before this call still counts toward the daily budget.",
+          name: "no_reply",
+          description: "Conclude the current turn in complete silence: call it as the ONLY action with no chat text, so nothing is visible to the user. Available in any turn; during a dsh-proactive wake it also records a no_reply run entry with your reason. Any chat text already committed before this call still counts toward the daily budget.",
           parameters: {
-            reason: { type: "string", description: "Short internal reason for the run log, at most " + MAX_NO_REPLY_REASON_LENGTH + " characters." }
+            reason: { type: "string", description: "Short internal reason, at most " + MAX_NO_REPLY_REASON_LENGTH + " characters. Only recorded during a dsh-proactive wake." }
           },
           output: {
             schema: { oneOf: [{ type: "object", additionalProperties: false, properties: { accepted: { type: "boolean", required: true, const: true }, silent: { type: "boolean", required: true, const: true } } }, ERROR_SCHEMA] },
@@ -252,13 +252,10 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             if (reason.length > MAX_NO_REPLY_REASON_LENGTH) {
               return { code: "invalid_trigger", message: "reason must be at most " + MAX_NO_REPLY_REASON_LENGTH + " characters." } as ToolError;
             }
-            if (!services.driver.isActiveWake(agent.session.id)) {
-              return { code: "no_active_wake", message: "proactive_no_reply is only available during a dsh-proactive wake turn." } as ToolError;
-            }
             exec.concludeTurn();
             return { accepted: true, silent: true };
           },
-          presentCall: (callArgs) => presentCard("Silent wake acknowledgment", String((callArgs as { reason?: unknown })["reason"] ?? ""))
+          presentCall: (callArgs) => presentCard("Silent turn acknowledgment", String((callArgs as { reason?: unknown })["reason"] ?? ""))
         }),
 
         defineTool({

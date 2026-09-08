@@ -1,6 +1,6 @@
 # dsh-proactive
 
-让 DeepSeek Harness 的模型**主动跟进**：给自己定 host 级闹钟，即使会话已冷却也会按时被唤醒；唤醒回合可以选择 `proactive_no_reply` 静默收尾——用户完全无感知。
+让 DeepSeek Harness 的模型**主动跟进**：给自己定 host 级闹钟，即使会话已冷却也会按时被唤醒；唤醒回合可以选择 `no_reply` 静默收尾——用户完全无感知。
 
 闹钟模型（v2）：
 
@@ -71,7 +71,7 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 | `proactive_set` | 建闹钟：`prompt`（必填）+ 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(>=300) / `cron`(五字段，相邻触发 >=300s)；可选 `jitter_seconds`(0..86400，三类型通用)、`time_zone`（缺省 = 会话浏览器时区 → 宿主时区）、`respect_quiet_hours`(默认 false)、`target_mode`(resume/fork/new) + `target_session_id` |
 | `proactive_list` | 列出本会话的活跃闹钟（含类型/目标/下次触发/状态） |
 | `proactive_cancel` | 按 id 取消 |
-| `proactive_no_reply` | **唤醒回合专用**：静默收尾（`concludesTurn`），需单独调用且不产出文本；每次唤醒均可用 |
+| `no_reply` | **任意回合可用**：静默收尾（`concludesTurn`），需单独调用且不产出文本；唤醒回合内调用会记录一条 no_reply 运行记录 |
 | `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
 
 唤醒回合的 framing 报文说明唤醒类型、`respect_quiet_hours`、今日预算用量，并给出两条回复规则（需要时简短回复、无需用户感知或静默更合适就 no_reply）。

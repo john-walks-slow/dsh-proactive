@@ -17,7 +17,7 @@
  * request header wins, agentDefaultModel is the fallback.
  *
  *   busy agent    -> runMaintenance throws; caller retries after a short delay
- *   deep silence  -> the framing + proactive_no_reply contract; the observer
+ *   deep silence  -> the framing + no_reply contract; the observer
  *                    derives the decision from the committed session log
  *
  * The handle is always disposed when this driver created it (a resumed/created
@@ -128,14 +128,14 @@ export class WakeDriver {
   private readonly deps: WakeDriverDeps;
   /** Re-fire guard per alarm id. */
   private readonly inflightByAlarm = new Set<string>();
-  /** Wake-turn guard per session (guards proactive_no_reply by session id). */
+  /** Wake-turn guard per session (kept for inflight/busy semantics). */
   private readonly inflightBySession = new Set<string>();
 
   constructor(deps: WakeDriverDeps) {
     this.deps = deps;
   }
 
-  /** Whether a wake for this session is currently in flight (guards proactive_no_reply). */
+  /** Whether a wake for this session is currently in flight. */
   isActiveWake(sessionId: string): boolean {
     return this.inflightBySession.has(sessionId);
   }

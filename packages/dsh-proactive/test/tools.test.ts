@@ -242,15 +242,14 @@ test("proactive_cancel restores the alarm when persistence fails", async () => {
   assert.equal(h.store.alarms.length, 1);
 });
 
-test("proactive_no_reply requires an active wake and concludes the turn", async () => {
+test("no_reply concludes the turn silently from any context", async () => {
   const h = harness();
-  assert.equal(code(await h.run("proactive_no_reply", {})), "no_active_wake");
+  // Available outside a wake too: concludes without requiring isActiveWake.
   assert.equal(h.concluded(), false);
-  h.activeWakes.add("s1");
-  const res = await h.run("proactive_no_reply", { reason: "all handled" });
+  const res = await h.run("no_reply", { reason: "nothing to add" });
   assert.deepEqual(res, { accepted: true, silent: true });
   assert.equal(h.concluded(), true);
-  assert.equal(code(await h.run("proactive_no_reply", { reason: "r".repeat(201) })), "invalid_trigger");
+  assert.equal(code(await h.run("no_reply", { reason: "r".repeat(201) })), "invalid_trigger");
 });
 
 test("proactive_set: prompt is required on every alarm; wake dials are gone", async () => {

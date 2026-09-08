@@ -2,7 +2,7 @@
 
 ## 目标
 
-为 DeepSeek Harness（DSH）实现"模型主动跟进"：模型可给自己订 host 级闹钟，冷会话也能按时被唤醒；唤醒回合可用 `proactive_no_reply` 静默收尾（用户无感知）。同时沉淀 DSH 插件开发的最佳实践。
+为 DeepSeek Harness（DSH）实现"模型主动跟进"：模型可给自己订 host 级闹钟，冷会话也能按时被唤醒；唤醒回合可用 `no_reply` 静默收尾（用户无感知）。同时沉淀 DSH 插件开发的最佳实践。
 
 ## 地图
 
