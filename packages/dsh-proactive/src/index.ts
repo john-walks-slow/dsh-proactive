@@ -35,7 +35,7 @@ interface ModelSelectionLike {
 }
 
 function currentModelSelection(ctx: Context): { provider?: string; model?: string } | undefined {
-  const service = (ctx as unknown as Record<string, unknown>)["agentDefaultModel"];
+  const service = ctx.get("agentDefaultModel", false) as { currentSelection?: () => ModelSelectionLike } | undefined;
   if (service === undefined || typeof (service as { currentSelection?: unknown })["currentSelection"] !== "function") {
     ctx.logger.warn(
       "dsh-proactive: ctx.agentDefaultModel is not resolvable from this scope (service " + (service === undefined ? "missing" : "has no currentSelection") + "); cold wakes will rely on the session request header fallback"
@@ -68,8 +68,8 @@ function resolveSessionTitle(_ctx: unknown): (sessionId: string) => string {
 }
 
 /** Session-owned events from the live in-memory store (cordis augmentation not typed here). */
-function sessionEventsOf(ctx: unknown): (sessionId: string) => readonly unknown[] | undefined {
-  const sessions = (ctx as { sessions?: { get?: (id: string) => { events?: readonly unknown[] } | undefined } }).sessions;
+function sessionEventsOf(ctx: Context): (sessionId: string) => readonly unknown[] | undefined {
+  const sessions = ctx.get("sessions", false) as { get?: (id: string) => { events?: readonly unknown[] } | undefined } | undefined;
   return (sessionId) => sessions?.get?.(sessionId)?.events;
 }
 
@@ -94,7 +94,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     // web host uses; degraded to a logged failed wake when absent (headless).
     // Access is defensive: the cordis augmentation for sessionPersistence only
     // exists when dsh-session-persistence types are loaded into the profile.
-    sessionPersistence: (ctx as unknown as Record<string, unknown>)["sessionPersistence"] as WakeDriverDeps["sessionPersistence"] | undefined,
+    sessionPersistence: ctx.get("sessionPersistence", false) as WakeDriverDeps["sessionPersistence"] | undefined,
     modelSelection: () => currentModelSelection(ctx),
     store,
     config,

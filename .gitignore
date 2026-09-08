@@ -7,3 +7,4 @@ packages/dsh-proactive/dist/
 
 # logs
 *.log
+.mnemon/
