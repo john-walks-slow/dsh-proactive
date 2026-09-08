@@ -10,7 +10,7 @@
 
 import { readFileSync } from "node:fs";
 import { writeFile, rename, mkdir } from "node:fs/promises";
-import { canonicalizeTimeZone, DEFAULT_WAKE_PROMPT, isRecord } from "./domain.js";
+import { canonicalizeTimeZone, DEFAULT_WAKE_PROMPT, isRecord, MAX_PROMPT_LENGTH, sliceCodePoints } from "./domain.js";
 
 export interface QuietHours {
   /** "HH:MM" wall-clock in the configured time zone; start inclusive, end exclusive. */
@@ -158,10 +158,12 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     bootOverduePolicy: file["bootOverduePolicy"] === "notify-only" || file["bootOverduePolicy"] === "drop" ? file["bootOverduePolicy"] : "fire",
     maxRetriesPerFire: Math.max(0, positiveInt(file["maxRetriesPerFire"], DEFAULT_CONFIG.maxRetriesPerFire, 10)),
     maxPromptLength,
-    // Same cap as the settings schema, so a hand-edited (or tool-written)
-    // default never overflows the alarm prompt validation the prefill feeds.
+    // The prefill must always be a CREATABLE alarm prompt, so it is bounded
+    // by the hard alarm-prompt cap (MAX_PROMPT_LENGTH) — never only by
+    // maxPromptLength, which the settings surface lets exceed it. Slicing is
+    // code-point safe so an emoji preset is never cut mid-surrogate.
     defaultPrompt: typeof file["defaultPrompt"] === "string" && file["defaultPrompt"].trim().length > 0
-      ? file["defaultPrompt"].trim().slice(0, maxPromptLength)
+      ? sliceCodePoints(file["defaultPrompt"].trim(), Math.min(maxPromptLength, MAX_PROMPT_LENGTH))
       : DEFAULT_CONFIG.defaultPrompt,
     dataDir: dir
   };

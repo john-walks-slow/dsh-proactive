@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
+import { MAX_PROMPT_LENGTH } from "../domain.js";
 import {
   AlarmTable, CreateForm, HOST_PANEL_SESSION, LoadingBlock,
   defaultPromptOf, fmtSession, formFromAlarm, newAlarmForm,
@@ -55,6 +56,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
   const copy = useProactiveLocale();
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
+  const [knownSessionIds, setKnownSessionIds] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -75,6 +77,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
     try {
       const next = await transport.stateForHost();
       setSnapshot(next.snapshot);
+      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -111,6 +114,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
     try {
       const next = await transport.actionForHost(action);
       setSnapshot(next.snapshot);
+      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
       setShowForm(false);
       setEditingId(null);
       setForm(newAlarmForm(defaultPromptOf(next.snapshot), currentSession));
@@ -247,7 +251,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
             {snapshot.config.defaultPrompt !== undefined ? (
               <div className="dshp-field">
                 <label className="dshp-field-label">{copy.defaultPromptLabel}</label>
-                <textarea className="dshp-input dshp-grow" rows={3} value={(draft ?? configDraftFrom(snapshot)).defaultPrompt} disabled={busy}
+                <textarea className="dshp-input dshp-grow" rows={3} maxLength={MAX_PROMPT_LENGTH} value={(draft ?? configDraftFrom(snapshot)).defaultPrompt} disabled={busy}
                   placeholder={defaultPromptOf(null)}
                   onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), defaultPrompt: e.target.value })} />
                 <div className="dshp-cell-dim">{copy.defaultPromptHint}</div>
@@ -262,13 +266,13 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} editing={editingId !== null}
+          copy={copy} editing={editingId !== null} knownSessionIds={knownSessionIds}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 
       <div className="dshp-card">
         <div className="dshp-card-head">
-          <span>{copy.alarms}</span>
+          <span>{copy.alarmsTitle}</span>
           <span className="dshp-cell-dim">{snapshot?.server.corrupt === true ? copy.storageCorrupt : ""}</span>
         </div>
         <div className="dshp-card-body" style={{ padding: 0 }}>

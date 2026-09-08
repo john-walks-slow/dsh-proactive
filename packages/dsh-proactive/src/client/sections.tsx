@@ -14,7 +14,7 @@
 
 import { Fragment, useMemo, useState, type ReactElement } from "react";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
-import { DEFAULT_WAKE_PROMPT, isValidSessionId } from "../domain.js";
+import { DEFAULT_WAKE_PROMPT, isValidSessionId, MAX_PROMPT_LENGTH } from "../domain.js";
 import type { ProactivePanelCopy } from "./locales.js";
 
 /** Row shape the alarms table renders (a subset of the wire AlarmView). */
@@ -66,6 +66,17 @@ export function targetLabel(copy: ProactivePanelCopy, mode: string): string {
     case "fork": return copy.targetFork;
     case "new": return copy.targetNew;
     default: return mode;
+  }
+}
+
+/** Run-history decision pill copy (no_reply/reply/skipped/failed). */
+export function decisionLabel(copy: ProactivePanelCopy, decision: string): string {
+  switch (decision) {
+    case "no_reply": return copy.decisionNoReply;
+    case "reply": return copy.decisionReply;
+    case "skipped": return copy.decisionSkipped;
+    case "failed": return copy.decisionFailed;
+    default: return decision;
   }
 }
 
@@ -312,7 +323,7 @@ export function RunsTable({ runs, copy }: RunsTableProps): ReactElement {
           return (
             <tr key={run.id}>
               <td className="dshp-cell-mono">{fmtInstant(run.firedAt, copy.dateTimeLocale)}</td>
-              <td><span className="dshp-pill dshp-pill-plain">{run.decision}</span></td>
+              <td><span className="dshp-pill dshp-pill-plain" title={run.decision}>{decisionLabel(copy, run.decision)}</span></td>
               <td className="dshp-cell-mono">{run.budgetDelta}</td>
               <td>
                 <div className="dshp-cell-main" style={{ maxWidth: 420 }} title={summaryText}>{summaryText || "—"}</div>
@@ -335,6 +346,12 @@ export interface CreateFormProps {
   onSubmit: () => void;
   /** Editing an existing alarm instead of creating a new one. */
   editing?: boolean;
+  /**
+   * Known host session ids (session.list), when available: a typed target
+   * outside the list gets a soft typo hint — non-blocking, cold/foreign ids
+   * are still submittable.
+   */
+  knownSessionIds?: ReadonlySet<string>;
 }
 
 /**
@@ -343,7 +360,7 @@ export interface CreateFormProps {
  * selector (resume/fork/new) plus a session-id text input; the owner session
  * is derived by the caller, never picked here.
  */
-export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, onSubmit, editing }: CreateFormProps): ReactElement {
+export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, onSubmit, editing, knownSessionIds }: CreateFormProps): ReactElement {
   if (!showForm) return <Fragment />;
   const kind = form.kind ?? "every";
   const mode = form.targetMode ?? "resume";
@@ -356,6 +373,8 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
   };
   const targetId = (form.targetSessionId ?? "").trim();
   const targetInvalid = mode !== "new" && targetId !== "" && !isValidSessionId(targetId);
+  const targetUnknown = mode !== "new" && !targetInvalid && targetId !== "" &&
+    knownSessionIds !== undefined && knownSessionIds.size > 0 && !knownSessionIds.has(targetId);
   const canSubmit =
     (form.prompt ?? "").trim() !== "" &&
     (kind !== "every" || (form.everySeconds ?? 0) >= 300) &&
@@ -369,7 +388,7 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
       <div className="dshp-card-body">
         <div className="dshp-field">
           <label className="dshp-field-label">{copy.prompt}</label>
-          <input className="dshp-input dshp-grow" value={form.prompt ?? ""} placeholder={copy.promptPlaceholder} onChange={(e) => setForm({ ...form, prompt: e.target.value })} />
+          <input className="dshp-input dshp-grow" value={form.prompt ?? ""} maxLength={MAX_PROMPT_LENGTH} placeholder={copy.promptPlaceholder} onChange={(e) => setForm({ ...form, prompt: e.target.value })} />
         </div>
         <div className="dshp-field-row">
           <div className="dshp-field" style={{ flex: 1, minWidth: 220 }}>
@@ -457,6 +476,7 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
                 placeholder={copy.targetSessionPlaceholder} spellCheck={false} autoComplete="off"
                 onChange={(e) => setForm({ ...form, targetSessionId: e.target.value })} />
               {targetInvalid ? <div className="dshp-field-error">{copy.invalidSessionId}</div> : null}
+              {targetUnknown ? <div className="dshp-hint-warn">{copy.unknownSession}</div> : null}
             </div>
           ) : null}
         </div>

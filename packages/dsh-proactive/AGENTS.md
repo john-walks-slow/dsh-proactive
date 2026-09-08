@@ -15,6 +15,8 @@
 - `src/observer.ts` — 从会话日志切片判定 no_reply/reply/failed 与预算增量；leaked 标记
 - `src/tools.ts` — proactive_set/list/cancel/no_reply（no_reply 需 inflight 且【只调它不写文本】）
 - `src/index.ts` — 装配；agent/created 时对 roots 注册工具（resume 出的会话同样覆盖）
+- `src/panel/` — 面板 host 半边：contract（面板↔client 线协议，与工具同一 create 方言）、service（快照/闭动作）、routes（/api/dsh-proactive/* + SSE）
+- `src/client/` — 面板浏览器半边：sections（两面板共用组件与统一 create 表单）、panel（设置页）/session-panel（会话 tab）、locales（全部文案 zh/en，client/index.ts 的 LocaleNamespaceMap union 必须同步）、host-api（fetch+SSE）
 
 ## 核心设计
 
@@ -23,6 +25,7 @@
 - 预算：唤醒回合写了可见聊天文本 1 单位/UTC 日，上限 `maxDeliveriesPerDay`；no_reply 免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
 - 安静时段（IANA 时区、跨午夜）：非 alarm 唤醒每 5 分钟延迟重评估；重复闹钟错过不补跑，推进到下一个锚点
 - 唤醒回合判定依据**已提交的会话日志**（startIndex 之后的事件切片），不信任运行期假设
+- 面板表单（两面板同一方言）：目标会话=会话 ID 文本输入（默认当前会话，设置页经 GlobalStandardProps `useSessions` 读 GUI 选中会话）；owner 非表单字段——会话页钉死本会话（host scope 规则），设置页按目标派生（resume/fork=目标会话，new=当前会话→host-panel 伪会话）；prompt 预填 `config.defaultPrompt`（常量在 domain.ts，快照缺该字段的旧 host 由 client 回退同值，配置编辑项也仅在字段存在时渲染/提交）
 
 ## Pitfalls
 

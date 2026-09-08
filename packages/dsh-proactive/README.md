@@ -40,7 +40,8 @@ dsh plugin --profile web add file:/root/projects/dsh-proactive/packages/dsh-proa
   "maxConcurrentPerSession": 1,                // 每会话并发在途唤醒数
   "bootOverduePolicy": "fire",                 // fire | notify-only | drop
   "maxRetriesPerFire": 3,                      // 单次唤醒的 busy/failed 重试上限
-  "maxPromptLength": 4000
+  "maxPromptLength": 4000,
+  "defaultPrompt": "这是一个 heartbeat reminder，…" // 新建闹钟表单的预填文案（纯预填，闹钟各自保存 prompt）
 }
 ```
 
@@ -58,9 +59,9 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 
 **设置页「主动唤醒」节（全局视角）**：
 
-- **全局配置**：启用开关、每日预算、安静时段（起止与时区），均可直接编辑保存（`update_config` 动作持久化 `config.json` 并热应用，与工具同一套校验）。
+- **全局配置**：启用开关、每日预算、安静时段（起止与时区）、**默认唤醒指令**（`defaultPrompt`，新建闹钟表单的预填文案），均可直接编辑保存（`update_config` 动作持久化 `config.json` 并热应用，与工具同一套校验）。
 - **单一闹钟表格**：列出**所有会话**的闹钟，可**筛选**（状态/类型/会话）与**排序**（下次触发/创建时间/指令），可暂停/恢复、立即触发、**编辑**（改指令/类型参数/jitter/目标/免打扰开关，保留 id 与历史）、删除；每个闹钟行可展开查看自己的唤醒历史。所属会话列显示**会话标题**（能解析时），标题旁的复制图标一键复制会话 id。
-- **新建闹钟带目标会话**：新建表单选择「归属会话」以及目标模式（resume/fork 时选源会话 / new 新建空会话）；不再产生无归属孤儿闹钟。
+- **新建闹钟（两面板同一表单）**：唤醒指令预填 `defaultPrompt`；类型三选（单次延迟或指定日期时间 / 循环间隔 / cron）+ 统一随机抖动 + 免打扰开关；**目标会话为会话 ID 输入框**（默认当前会话——会话页取本会话、设置页取 GUI 当前选中会话），resume=唤醒该会话、fork=从该会话分支、new=唤醒时新建空会话。归属不单独挑选：会话页钉死本会话，设置页按目标派生（resume/fork 归属目标会话，new 归属当前会话或全局伪会话）。首次拉取快照期间显示加载 spinner。
 - **实时刷新**：两个面板都订阅 SSE 推送（`/api/dsh-proactive/events`），任一来源的变更（模型工具、面板、调度器）都会自动刷新；另提供 `/api/dsh-proactive/state`（快照，可带 `?session=`）与 `/api/dsh-proactive/action`（命令）。
 - 无 webserver 的环境（headless profile）自动跳过面板路由，模型工具不受影响。
 
@@ -72,7 +73,7 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 | `proactive_list` | 列出本会话的活跃闹钟（含类型/目标/下次触发/状态） |
 | `proactive_cancel` | 按 id 取消 |
 | `no_reply` | **任意回合可用**：静默收尾（`concludesTurn`），需单独调用且不产出文本；唤醒回合内调用会记录一条 no_reply 运行记录 |
-| `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
+| `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours`/`max_prompt_length`/`default_prompt` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
 
 唤醒回合的 framing 报文说明唤醒类型、`respect_quiet_hours`、今日预算用量，并给出两条回复规则（需要时简短回复、无需用户感知或静默更合适就 no_reply）。
 

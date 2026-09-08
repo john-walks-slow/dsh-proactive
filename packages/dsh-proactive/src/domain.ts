@@ -35,6 +35,16 @@ export const DEFAULT_WAKE_PROMPT =
 /** dsh session ids are alphanumeric plus `._-`; anything else (slashes, traversals, spaces, UTF-8) is rejected. */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
+/**
+ * Slice by Unicode code points (not UTF-16 units) so a surrogate pair is
+ * never split in half — user-facing prompt/preset text may contain emoji.
+ */
+export function sliceCodePoints(text: string, max: number): string {
+  if (max <= 0) return "";
+  const chars = Array.from(text);
+  return chars.length <= max ? text : chars.slice(0, max).join("");
+}
+
 /** Fail closed on session ids that could escape storage paths or scope lookups. */
 export function isValidSessionId(sessionId: string): boolean {
   if (sessionId === "" || sessionId.length > 200) return false;

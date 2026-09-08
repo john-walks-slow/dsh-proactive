@@ -9,7 +9,7 @@
 import z from "schemastery";
 import type { Context } from "@deepseek-ai/cordis";
 import { type ProactiveConfig, type BootOverduePolicy, type QuietHours } from "./config.js";
-import { canonicalizeTimeZone, DEFAULT_WAKE_PROMPT, isRecord, type ToolError } from "./domain.js";
+import { canonicalizeTimeZone, DEFAULT_WAKE_PROMPT, isRecord, MAX_PROMPT_LENGTH, type ToolError } from "./domain.js";
 
 /** The hot-updatable configuration subset, excluding the immutable dataDir. */
 export interface HotConfig {
@@ -81,7 +81,10 @@ const MAX_SET_PROMPT_LENGTH = 20000;
  * other live settings. Numeric ranges mirror the resolveConfig clamps exactly
  * (tighter than the settings UI schema where they differ), so a tool-written
  * config.json is never silently truncated on the next boot — hot-applied and
- * persisted values always agree.
+ * persisted values always agree. default_prompt is capped at the hard
+ * alarm-prompt limit (MAX_PROMPT_LENGTH): the prefill must always produce a
+ * creatable alarm; a maxPromptLength below that cap only trims the prefill
+ * loaded from a hand-edited file, never to an invalid state.
  */
 export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig> } | ToolError {
   if (!isRecord(raw) || Object.keys(raw).length === 0) {
@@ -167,8 +170,11 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
     if (typeof value !== "string" || value.trim().length === 0) {
       return { code: "invalid_trigger", message: "default_prompt must be a non-empty string (the create-form prefill)." };
     }
-    if (value.trim().length > MAX_SET_PROMPT_LENGTH) {
-      return { code: "invalid_trigger", message: "default_prompt must be at most " + MAX_SET_PROMPT_LENGTH + " characters." };
+    // Capped at the hard ALARM prompt limit (not MAX_SET_PROMPT_LENGTH): the
+    // prefill feeds the create form, and a longer default would pre-fill a
+    // prompt the alarm validator itself rejects.
+    if (value.trim().length > MAX_PROMPT_LENGTH) {
+      return { code: "invalid_trigger", message: "default_prompt must be at most " + MAX_PROMPT_LENGTH + " characters." };
     }
     write("defaultPrompt", value.trim());
   }
@@ -190,7 +196,9 @@ export const proactiveSettingsSchema = z.object({
   maxConcurrentPerSession: z.number().min(1).max(16).default(1),
   bootOverduePolicy: z.union([z.const("fire"), z.const("notify-only"), z.const("drop")]).default("fire"),
   maxRetriesPerFire: z.number().min(0).max(16).default(3),
-  maxPromptLength: z.number().min(100).max(100000).default(4000),
+  // Schema ceiling mirrors the resolveConfig clamp (20000) so a settings-UI
+  // value is never silently truncated on the next boot.
+  maxPromptLength: z.number().min(100).max(MAX_SET_PROMPT_LENGTH).default(4000),
   defaultPrompt: z.string().default(DEFAULT_WAKE_PROMPT)
 });
 

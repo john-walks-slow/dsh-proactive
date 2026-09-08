@@ -43,5 +43,10 @@ test("validateSettingsPatch rejects empty and oversized default_prompt with clos
   assert.equal(code(validateSettingsPatch({ default_prompt: "" })), "invalid_trigger");
   assert.equal(code(validateSettingsPatch({ default_prompt: "   " })), "invalid_trigger");
   assert.equal(code(validateSettingsPatch({ default_prompt: 42 })), "invalid_trigger");
+  // The cap is the hard ALARM prompt limit: a longer default would pre-fill a
+  // prompt the alarm validator itself rejects (create-form dead end).
+  const atCap = validateSettingsPatch({ default_prompt: "x".repeat(4000) });
+  assert.ok(!("code" in atCap));
+  assert.equal(code(validateSettingsPatch({ default_prompt: "x".repeat(4001) })), "invalid_trigger");
   assert.equal(code(validateSettingsPatch({ default_prompt: "x".repeat(20001) })), "invalid_trigger");
 });

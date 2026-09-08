@@ -421,9 +421,15 @@ const STYLESHEET = String.raw`
   letter-spacing: 0.01em;
 }
 
-/* ---------- inline field error ---------- */
+/* ---------- inline field error / soft warning ---------- */
 .dshp-panel .dshp-field-error {
   color: var(--dshp-error);
+  font-size: 11.5px;
+}
+
+/* Non-blocking hint (e.g. a typed target id outside the session list). */
+.dshp-panel .dshp-hint-warn {
+  color: var(--dshp-warn, #b8860b);
   font-size: 11.5px;
 }
 

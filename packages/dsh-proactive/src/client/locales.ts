@@ -31,6 +31,7 @@ export interface ProactivePanelCopy {
   copyId: string;
   copied: string;
   /* table */
+  alarmsTitle: string;
   alarms: string;
   session: string;
   prompt: string;
@@ -85,6 +86,11 @@ export interface ProactivePanelCopy {
   forkSourceSessionId: string;
   targetSessionPlaceholder: string;
   invalidSessionId: string;
+  unknownSession: string;
+  decisionNoReply: string;
+  decisionReply: string;
+  decisionSkipped: string;
+  decisionFailed: string;
   newSessionHint: string;
   /* global config */
   budget: string;
@@ -100,7 +106,6 @@ export interface ProactivePanelCopy {
   defaultPromptHint: string;
   saveConfig: string;
   saved: string;
-  loadFailure: string;
   loading: string;
   close: string;
   openSettings: string;
@@ -131,6 +136,7 @@ export const zh: ProactivePanelCopy = {
   hideHistory: "收起",
   copyId: "复制会话 ID",
   copied: "已复制",
+  alarmsTitle: "闹钟",
   alarms: "闹钟",
   session: "所属会话",
   prompt: "唤醒指令",
@@ -182,6 +188,11 @@ export const zh: ProactivePanelCopy = {
   forkSourceSessionId: "分支源会话 ID",
   targetSessionPlaceholder: "如 session-…（默认当前会话）",
   invalidSessionId: "会话 ID 格式不对：只能包含字母、数字与 . _ -",
+  unknownSession: "此 ID 不在当前会话列表中——若是笔误请更正；确认无误可继续",
+  decisionNoReply: "静默",
+  decisionReply: "已回复",
+  decisionSkipped: "跳过",
+  decisionFailed: "失败",
   newSessionHint: "唤醒时新建一个空会话，不依赖任何既有会话",
   budget: "每日预算",
   perDay: "/日",
@@ -196,7 +207,6 @@ export const zh: ProactivePanelCopy = {
   defaultPromptHint: "新建闹钟时预填这段文字；每个闹钟仍保存自己的指令",
   saveConfig: "保存配置",
   saved: "已保存",
-  loadFailure: "加载失败",
   loading: "加载中…",
   close: "关闭",
   openSettings: "打开设置",
@@ -225,6 +235,7 @@ export const en: ProactivePanelCopy = {
   hideHistory: "Hide",
   copyId: "Copy session ID",
   copied: "Copied",
+  alarmsTitle: "Alarms",
   alarms: "alarms",
   session: "Owner session",
   prompt: "Wake-up instruction",
@@ -276,6 +287,11 @@ export const en: ProactivePanelCopy = {
   forkSourceSessionId: "Fork source session ID",
   targetSessionPlaceholder: "e.g. session-… (defaults to the current session)",
   invalidSessionId: "Invalid session ID: only letters, digits, and . _ - are allowed",
+  unknownSession: "This id is not in the session list — fix a typo or continue if intentional",
+  decisionNoReply: "silent",
+  decisionReply: "replied",
+  decisionSkipped: "skipped",
+  decisionFailed: "failed",
   newSessionHint: "The wake runs in a fresh empty session.",
   budget: "Daily budget",
   perDay: "/day",
@@ -290,7 +306,6 @@ export const en: ProactivePanelCopy = {
   defaultPromptHint: "Pre-filled into the new-alarm form; each alarm still stores its own prompt",
   saveConfig: "Save config",
   saved: "Saved",
-  loadFailure: "Load failed",
   loading: "Loading…",
   close: "Close",
   openSettings: "Open settings",

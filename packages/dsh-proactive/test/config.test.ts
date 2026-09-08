@@ -97,6 +97,15 @@ test("defaultPrompt: file value wins (trimmed), blank falls back to the repo def
     assert.equal(resolveConfig(dir).defaultPrompt, DEFAULT_WAKE_PROMPT);
     writeFileSync(join(dir, "config.json"), JSON.stringify({ maxPromptLength: 100, defaultPrompt: "x".repeat(500) }));
     assert.equal(resolveConfig(dir).defaultPrompt.length, 100);
+    // maxPromptLength above the hard alarm cap cannot raise the prefill cap:
+    // the prefill must always be a creatable alarm prompt.
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ maxPromptLength: 20000, defaultPrompt: "x".repeat(5000) }));
+    assert.equal(resolveConfig(dir).defaultPrompt.length, 4000);
+    // Slicing is code-point safe: a 4001-emoji preset trims to 4000 whole
+    // emoji (8000 UTF-16 units), never a broken surrogate half.
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ defaultPrompt: "\u{1F600}".repeat(4001) }));
+    const emoji = resolveConfig(dir).defaultPrompt;
+    assert.equal(emoji, "\u{1F600}".repeat(4000));
     writeFileSync(join(dir, "config.json"), JSON.stringify({}));
     assert.equal(resolveConfig(dir).defaultPrompt, DEFAULT_WAKE_PROMPT);
     assert.equal(DEFAULT_CONFIG.defaultPrompt, DEFAULT_WAKE_PROMPT);

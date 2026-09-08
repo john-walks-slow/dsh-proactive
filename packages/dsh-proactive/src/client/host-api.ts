@@ -82,16 +82,11 @@ export class ProactiveHostTransport {
     return body;
   }
 
-  /** Like `state`, but fills alarm session titles from the host session list. */
-  async stateEnriched(sessionId?: string): Promise<PanelSnapshotDto> {
-    const [snapshot, titles] = await Promise.all([this.state(sessionId), fetchSessionTitles()]);
-    return withSessionTitles(snapshot, titles);
-  }
-
   /**
-   * Host-wide reload for the settings panel: the snapshot plus the complete
-   * session list for the target-session picker, in one round trip (titles are
-   * enriched from the very same list, so no duplicate session.list call).
+   * Snapshot plus the complete session list (ids + titles), in one round
+   * trip: titles enrich alarm rows, and the id set feeds the create form's
+   * unknown-target hint. Both surfaces use this (the session tab passes its
+   * own sessionId to keep the scoped snapshot).
    */
   async stateForHost(sessionId?: string): Promise<{ snapshot: PanelSnapshotDto; sessions: SessionInfo[] }> {
     const [snapshot, sessions] = await Promise.all([this.state(sessionId), fetchSessionList()]);
@@ -112,13 +107,7 @@ export class ProactiveHostTransport {
     return body;
   }
 
-  /** Like `action`, but fills alarm session titles from the host session list. */
-  async actionEnriched(action: PanelAction, sessionId?: string): Promise<PanelSnapshotDto> {
-    const [snapshot, titles] = await Promise.all([this.action(action, sessionId), fetchSessionTitles()]);
-    return withSessionTitles(snapshot, titles);
-  }
-
-  /** Like `stateForHost` for the settings panel's closed actions. */
+  /** Like `stateForHost` for closed actions: refreshed snapshot + session list. */
   async actionForHost(action: PanelAction, sessionId?: string): Promise<{ snapshot: PanelSnapshotDto; sessions: SessionInfo[] }> {
     const [snapshot, sessions] = await Promise.all([this.action(action, sessionId), fetchSessionList()]);
     return { snapshot: withSessionTitles(snapshot, toTitleMap(sessions)), sessions };
@@ -180,8 +169,8 @@ const SESSION_LIST_URL = "/api/session.list";
  * derives display titles: the durable title lives in each entry's
  * `projections.values.title` (folded by the session-title projection), not in
  * the raw summary. Returns the complete session list (empty = unknown /
- * fetch failure — the panel then degrades to alarm-derived options). The
- * settings panel's target-session picker uses this same list.
+ * fetch failure — the panel then degrades: no title enrichment, no
+ * unknown-target hint).
  */
 export async function fetchSessionList(): Promise<SessionInfo[]> {
   try {
@@ -210,9 +199,4 @@ function toTitleMap(sessions: SessionInfo[]): Map<string, string> {
     if (session.title !== "") titles.set(session.id, session.title);
   }
   return titles;
-}
-
-/** {sessionId -> title} map over the live session list (empty = unknown). */
-export async function fetchSessionTitles(): Promise<Map<string, string>> {
-  return toTitleMap(await fetchSessionList());
 }

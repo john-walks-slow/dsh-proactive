@@ -28,6 +28,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   const sessionId = String(props.sessionId);
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
+  const [knownSessionIds, setKnownSessionIds] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -45,9 +46,10 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   const reload = useCallback(async () => {
     const requested = sessionRef.current;
     try {
-      const next = await transport.stateEnriched(requested);
+      const next = await transport.stateForHost(requested);
       if (sessionRef.current !== requested) return; // stale: a newer session is now active
-      setSnapshot(next);
+      setSnapshot(next.snapshot);
+      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
       setError(null);
     } catch (reason) {
       if (sessionRef.current !== requested) return;
@@ -74,9 +76,9 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   const refresh = useCallback(async () => {
     const requested = sessionRef.current;
     try {
-      const next = await transport.stateEnriched(requested);
+      const next = await transport.stateForHost(requested);
       if (sessionRef.current !== requested) return; // stale: a newer session is now active
-      setSnapshot(next);
+      setSnapshot(next.snapshot);
     } catch {
       /* keep the current snapshot and the error banner */
     }
@@ -88,12 +90,13 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
     setBusy(true);
     setError(null);
     try {
-      const next = await transport.actionEnriched(action, requested);
+      const next = await transport.actionForHost(action, requested);
       if (sessionRef.current !== requested) return; // stale action response from a previous session
-      setSnapshot(next);
+      setSnapshot(next.snapshot);
+      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
       setShowForm(false);
       setEditingId(null);
-      setForm(newAlarmForm(defaultPromptOf(next), sessionRef.current));
+      setForm(newAlarmForm(defaultPromptOf(next.snapshot), sessionRef.current));
     } catch (reason) {
       if (sessionRef.current !== requested) return;
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -155,13 +158,13 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} editing={editingId !== null}
+          copy={copy} editing={editingId !== null} knownSessionIds={knownSessionIds}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 
       <div className="dshp-card">
         <div className="dshp-card-head">
-          <span>{copy.alarms}</span>
+          <span>{copy.alarmsTitle}</span>
           <span className="dshp-cell-dim">{snapshot?.server.corrupt === true ? copy.storageCorrupt : ""}</span>
         </div>
         <div className="dshp-card-body" style={{ padding: 0 }}>
