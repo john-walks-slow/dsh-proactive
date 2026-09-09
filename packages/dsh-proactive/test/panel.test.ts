@@ -357,6 +357,11 @@ test("createArgsFromForm maps every/cron plus jitter, target and respect switch"
   // once also carries jitter (all three types support it in v2).
   const onceJittered = createArgsFromForm({ prompt: "p", kind: "once", afterSeconds: 900, jitterSeconds: 30 } satisfies PanelCreateForm);
   assert.equal(onceJittered["jitter_seconds"], 30);
+  // compaction passes through when present; absent stays absent (default is applied host-side by validateCreateArgs).
+  const compacted = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 300, compaction: "off" } satisfies PanelCreateForm);
+  assert.equal(compacted["compaction"], "off");
+  const plain = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 300 } satisfies PanelCreateForm);
+  assert.ok(!("compaction" in plain));
 });
 
 test("applyHotConfig mutates only the hot subset and reports change", () => {

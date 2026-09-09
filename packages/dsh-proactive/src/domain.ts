@@ -19,6 +19,10 @@ export const PROACTIVE_PLUGIN = "dsh-proactive";
 export const MIN_EVERY_SECONDS = 300;
 export const MAX_PROMPT_LENGTH = 4000;
 export const MAX_NO_REPLY_REASON_LENGTH = 200;
+/** Default compaction policy for a new alarm (minimal: keep the no_reply reason in the tombstone). */
+export const DEFAULT_COMPACTION: AlarmCompaction = "minimal";
+/** All valid compaction values (validation + schema enum share this source). */
+export const COMPACTION_MODES: readonly string[] = ["off", "minimal", "aggressive"];
 /** Upper bound for the per-occurrence random delay (24h). */
 export const MAX_JITTER_SECONDS = 86400;
 
@@ -54,6 +58,8 @@ export function isValidSessionId(sessionId: string): boolean {
 }
 
 export type AlarmType = "once" | "every" | "cron";
+/** Per-alarm surface compaction policy for silent wake turns. */
+export type AlarmCompaction = "off" | "minimal" | "aggressive";
 export type TargetMode = "resume" | "fork" | "new";
 export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
 export type RunDecision = "no_reply" | "reply" | "skipped" | "failed";
@@ -105,6 +111,8 @@ export interface Alarm {
   updatedAt: string;
   runCount: number;
   lastRunAt: string | null;
+  /** Per-alarm silent-wake surface compaction policy; absent = DEFAULT_COMPACTION (legacy records). */
+  compaction?: AlarmCompaction;
 }
 
 export interface RunRecord {
@@ -120,6 +128,8 @@ export interface RunRecord {
   reasoningSummary?: string;
   /** Truncated visible-reply summary of the wake turn, for the panel history. */
   replySummary?: string;
+  /** The no_reply reason the model gave for staying silent, for the panel history. */
+  noReplyReason?: string;
 }
 
 /**
@@ -139,6 +149,8 @@ export type AlarmView = {
   nextDueAt: string;
   state: "scheduled" | "overdue" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
   deliveryMode: "host";
+  /** Per-alarm silent-wake surface compaction policy. */
+  compaction: AlarmCompaction;
   /** Unified per-occurrence random delay in seconds; present only when > 0. */
   jitterSeconds?: number;
   everySeconds?: number;
@@ -458,6 +470,7 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
     nextDueAt: alarm.nextDueAt,
     state: overdue ? "overdue" : alarm.status,
     deliveryMode: "host",
+    compaction: alarm.compaction ?? DEFAULT_COMPACTION,
     ...(alarm.type === "every" && "everySeconds" in alarm.trigger
       ? { everySeconds: alarm.trigger["everySeconds"], ...(typeof alarm.trigger["jitterSeconds"] === "number" && alarm.trigger["jitterSeconds"] > 0 ? { jitterSeconds: alarm.trigger["jitterSeconds"] } : {}) }
       : {}),

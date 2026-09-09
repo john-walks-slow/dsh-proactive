@@ -142,7 +142,9 @@ test("applyWakeCompaction collapses the surface: tombstone in, wake exchange and
     events,
     alarm,
     new Date("2026-09-01T09:00:00.000Z"),
-    (level, message) => warnings.push(level + ":" + message)
+    "aggressive",
+    undefined,
+    (level: string, message: string) => warnings.push(level + ":" + message)
   );
   assert.equal(ok, true);
   assert.deepEqual(warnings, []);
@@ -156,7 +158,7 @@ test("applyWakeCompaction collapses the surface: tombstone in, wake exchange and
   assert.equal(derived.length, 2);
   const texts = derived.map((message) => (message.role === "user" && message.content[0].type === "text" ? message.content[0].text : "<non-text>"));
   assert.ok(texts[0].startsWith(TOMBSTONE_MARKER));
-  assert.equal(texts[0], tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z")));
+  assert.equal(texts[0], tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "aggressive", undefined));
   assert.ok(texts[1].includes("supersedes earlier runtime-context snapshots"));
 
   // The raw log keeps every original event (GUI transcript is append-origin).
@@ -175,7 +177,7 @@ test("applyWakeCompaction is idempotent-safe: a second plan over the compacted l
   appendSilentWake(session);
   const events = session.events as unknown as CompactEvent[];
   const plan = planWakeCompaction(events, 0)!;
-  applyWakeCompaction(session as unknown as CompactSession, plan, events, alarm, new Date(), () => undefined);
+  applyWakeCompaction(session as unknown as CompactSession, plan, events, alarm, new Date(), "aggressive", undefined, () => undefined);
   // The next wake's slice starts after the compaction events: planning from
   // there must not see the tombstone as a framing notice.
   const next = planWakeCompaction(session.events as unknown as CompactEvent[], session.events.length);
@@ -199,7 +201,9 @@ test("applyWakeCompaction skips a run whose range a concurrent compaction alread
     events,
     alarm,
     new Date(),
-    (level, message) => warnings.push(level + ":" + message)
+    "aggressive",
+    undefined,
+    (level: string, message: string) => warnings.push(level + ":" + message)
   );
   assert.equal(ok, false); // framing run skipped, nothing collapsed
   assert.equal(warnings.length, 2); // one warn per run, both skipped
@@ -220,10 +224,66 @@ test("eraserless runs fall back to a tombstone", () => {
   const plan = planWakeCompaction(events, 0)!;
   assert.equal(plan.runs.length, 1); // no snapshot interleave: one run
   const warnings = logs();
-  const ok = applyWakeCompaction(session as unknown as CompactSession, plan, events, alarm, new Date(), (level, message) => warnings.push(level + ":" + message));
+  const ok = applyWakeCompaction(session as unknown as CompactSession, plan, events, alarm, new Date(), "aggressive", undefined, (level: string, message: string) => warnings.push(level + ":" + message));
   assert.equal(ok, true);
   assert.deepEqual(warnings, []);
   const derived = session.surface.nodes.map((seq) => deriveEventMessage(session.events[seq] as SessionEvent)).filter((message) => message !== null);
   assert.equal(derived.length, 1);
   assert.ok((derived[0].content[0] as { text: string }).text.startsWith(TOMBSTONE_MARKER));
+});
+
+test("tombstoneText: minimal compaction keeps the no_reply reason", () => {
+  const text = tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "minimal", "用户已离线，无需打扰");
+  assert.ok(text.startsWith(TOMBSTONE_MARKER));
+  assert.ok(text.includes("no_reply: 用户已离线，无需打扰"));
+  assert.ok(text.endsWith("]"));
+});
+
+test("tombstoneText: minimal without a reason degrades to id+time only", () => {
+  const text = tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "minimal", undefined);
+  assert.ok(!text.includes("no_reply:"));
+  assert.equal(text, tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "aggressive", "ignored"));
+});
+
+test("tombstoneText: aggressive ignores the reason even when one is present", () => {
+  const text = tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "aggressive", "should not appear");
+  assert.ok(!text.includes("no_reply:"));
+  assert.ok(text.endsWith("]"));
+});
+
+test("tombstoneText: off degrades to aggressive text (off is intercepted before this function)", () => {
+  // off is never passed here in production (wake.ts short-circuits it before
+  // compactWake), but the function must stay safe if it ever is — same shape
+  // as aggressive, no reason leakage.
+  const text = tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "off", "should not appear");
+  assert.ok(!text.includes("no_reply:"));
+  assert.equal(text, tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "aggressive", undefined));
+});
+
+test("applyWakeCompaction with minimal compaction keeps the reason in the tombstone", () => {
+  const session = Session.create("s1" as never);
+  appendSilentWake(session);
+  const events = session.events as unknown as CompactEvent[];
+  const plan = planWakeCompaction(events, 0)!;
+  const warnings = logs();
+  const ok = applyWakeCompaction(
+    session as unknown as CompactSession,
+    plan,
+    events,
+    alarm,
+    new Date("2026-09-01T09:00:00.000Z"),
+    "minimal",
+    "没事发生，安静等待",
+    (level: string, message: string) => warnings.push(level + ":" + message)
+  );
+  assert.equal(ok, true);
+  assert.deepEqual(warnings, []);
+  const derived = session.surface.nodes
+    .map((seq) => deriveEventMessage(session.events[seq] as SessionEvent))
+    .filter((message) => message !== null);
+  // tombstone (with reason) + snapshot; assistant/tool erased
+  assert.equal(derived.length, 2);
+  const ts = (derived[0].content[0] as { text: string }).text;
+  assert.ok(ts.startsWith(TOMBSTONE_MARKER));
+  assert.ok(ts.includes("no_reply: 没事发生，安静等待"));
 });

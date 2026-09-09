@@ -17,7 +17,7 @@
  */
 
 import { mkdir, readFile, rename, writeFile, appendFile } from "node:fs/promises";
-import { isRecord, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
+import { COMPACTION_MODES, isRecord, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
 
 export interface StoreState {
   version: number;
@@ -60,6 +60,10 @@ function alarmIsValid(value: unknown): value is Alarm {
   if (target["mode"] === "resume" || target["mode"] === "fork") {
     if (typeof target["sessionId"] !== "string") return false;
   }
+  // compaction is optional: absent = DEFAULT_COMPACTION (legacy v2 records);
+  // a present value must be a known mode so a typo never silently degrades.
+  const compaction = value["compaction"];
+  if (compaction !== undefined && (typeof compaction !== "string" || !COMPACTION_MODES.includes(compaction))) return false;
   return isTriggerForType(type, value["trigger"]);
 }
 

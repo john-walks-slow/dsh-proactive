@@ -24,6 +24,8 @@ export interface RunView {
   reasoningSummary?: string;
   /** Truncated visible-reply summary of the wake turn. */
   replySummary?: string;
+  /** The no_reply reason the model gave for staying silent. */
+  noReplyReason?: string;
 }
 
 /**
@@ -115,6 +117,8 @@ export interface PanelCreateForm {
   timeZone?: string;
   /** false (default) = user-requested, exempt from quiet hours + budget. */
   respectQuietHours?: boolean;
+  /** Per-alarm silent-wake compaction; absent = DEFAULT_COMPACTION (minimal). */
+  compaction?: "off" | "minimal" | "aggressive";
   targetMode?: "resume" | "fork" | "new";
   /** Destination for resume/fork; empty/absent = derive host-side. Ignored for new. */
   targetSessionId?: string;
@@ -143,6 +147,7 @@ export function createArgsFromForm(form: PanelCreateForm): Record<string, unknow
   if (form.jitterSeconds !== undefined && form.jitterSeconds > 0) args["jitter_seconds"] = form.jitterSeconds;
   if (form.timeZone !== undefined && form.timeZone !== "") args["time_zone"] = form.timeZone;
   if (form.respectQuietHours !== undefined) args["respect_quiet_hours"] = form.respectQuietHours;
+  if (form.compaction !== undefined) args["compaction"] = form.compaction;
   if (form.targetMode !== undefined && form.targetMode !== "resume") args["target_mode"] = form.targetMode;
   // A stale id left over from switching modes must not leak into a "new"
   // target (the shared validator rejects that combination), and resume/fork

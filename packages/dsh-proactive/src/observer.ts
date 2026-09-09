@@ -32,6 +32,8 @@ export interface WakeAnalysis {
   reasoningSummary?: string;
   /** Truncated visible-reply summary of the turn, for the run history. */
   replySummary?: string;
+  /** The no_reply reason the model gave for staying silent, for the run history. */
+  noReplyReason?: string;
 }
 
 const NO_REPLY_TOOL = "no_reply";
@@ -87,6 +89,22 @@ export function extractReasoningBlocks(data: Record<string, unknown>): string[] 
   return [];
 }
 
+/** The no_reply tool's reason argument from one tool/call event's JSON arguments field, truncated. */
+function extractNoReplyReason(data: Record<string, unknown>): string | undefined {
+  const raw = data["arguments"];
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return undefined;
+    const reason = parsed["reason"];
+    if (typeof reason !== "string") return undefined;
+    const trimmed = reason.trim();
+    return trimmed.length > 0 ? truncateSummary(trimmed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** turn/end reason kinds that mean the wake turn did not settle normally. */
 const FAILURE_KINDS = new Set(["error", "aborted", "max-tokens"]);
 
@@ -135,6 +153,7 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   const reasoningParts: string[] = [];
   const toolNames: string[] = [];
   let noReply = false;
+  let noReplyReason: string | undefined;
   for (const event of turnSegment) {
     if (event.type === "assistant/message") {
       const texts = extractTextBlocks(event.data);
@@ -148,7 +167,10 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     if (event.type === "tool/call") {
       const name = typeof event.data["name"] === "string" ? event.data["name"] : "";
       if (name.length > 0) toolNames.push(name);
-      if (name === NO_REPLY_TOOL) noReply = true;
+      if (name === NO_REPLY_TOOL) {
+        noReply = true;
+        if (noReplyReason === undefined) noReplyReason = extractNoReplyReason(event.data);
+      }
     }
   }
   const turnEnded = turnEndIndex >= 0;
@@ -177,6 +199,7 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     hasText,
     ...(reasoningParts.length > 0 ? { reasoningSummary: truncateSummary(reasoningParts.join("\n")) } : {}),
     ...(textParts.length > 0 ? { replySummary: truncateSummary(textParts.join("\n")) } : {}),
+    ...(noReplyReason !== undefined ? { noReplyReason } : {}),
     ...(note !== undefined ? { note } : {})
   };
 }

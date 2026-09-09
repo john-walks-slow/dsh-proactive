@@ -10,6 +10,7 @@ const ev = (type: string, data: Record<string, unknown> = {}): MinimalEvent => (
 const assistantText = (text: string) => ev("assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text }] } });
 const assistantBlocks = (blocks: Array<Record<string, unknown>>) => ev("assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: blocks } });
 const toolCall = (name: string) => ev("tool/call", { turn: 1, step: 1, callId: "c1", name, arguments: "{}" });
+const toolCallWithArgs = (name: string, args: Record<string, unknown>) => ev("tool/call", { turn: 1, step: 1, callId: "c1", name, arguments: JSON.stringify(args) });
 const turnStart = (n = 1) => ev("turn/start", { turn: n });
 const turnEnd = (kind = "completed", extra: Record<string, unknown> = {}) => ev("turn/end", { turn: 1, reason: { kind, ...extra } });
 const framing = ev("user/message", { role: "user", content: [{ type: "text", text: "[dsh-proactive wake alarm_x once cold] ..." }], source: { kind: "plugin", plugin: "dsh-proactive", form: "notice", summary: "wake" } });
@@ -215,4 +216,46 @@ test("raced user turn with text after a SILENT wake is NOT judged (no mischarge,
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.budgetDelta, 0);
+});
+
+test("no_reply reason is extracted from the tool/call arguments", () => {
+  const events: MinimalEvent[] = [
+    turnStart(),
+    toolCallWithArgs("no_reply", { reason: "用户已离线，无需打扰" }),
+    turnEnd()
+  ];
+  const analysis = analyzeWakeTurn(events, 0);
+  assert.equal(analysis.decision, "no_reply");
+  assert.equal(analysis.noReplyReason, "用户已离线，无需打扰");
+});
+
+test("no_reply reason is truncated to the run-history limit", () => {
+  const longReason = "理由".repeat(RUN_SUMMARY_MAX_LENGTH + 40);
+  const events: MinimalEvent[] = [
+    turnStart(),
+    toolCallWithArgs("no_reply", { reason: longReason }),
+    turnEnd()
+  ];
+  const analysis = analyzeWakeTurn(events, 0);
+  assert.equal(analysis.decision, "no_reply");
+  assert.equal(analysis.noReplyReason!.length, RUN_SUMMARY_MAX_LENGTH + 1);
+  assert.ok(analysis.noReplyReason!.endsWith("…"));
+});
+
+test("no_reply without a reason argument yields undefined noReplyReason", () => {
+  const events: MinimalEvent[] = [turnStart(), toolCall("no_reply"), turnEnd()];
+  const analysis = analyzeWakeTurn(events, 0);
+  assert.equal(analysis.decision, "no_reply");
+  assert.equal(analysis.noReplyReason, undefined);
+});
+
+test("malformed no_reply arguments JSON yields undefined noReplyReason", () => {
+  const events: MinimalEvent[] = [
+    turnStart(),
+    ev("tool/call", { turn: 1, step: 1, callId: "c1", name: "no_reply", arguments: "{not json" }),
+    turnEnd()
+  ];
+  const analysis = analyzeWakeTurn(events, 0);
+  assert.equal(analysis.decision, "no_reply");
+  assert.equal(analysis.noReplyReason, undefined);
 });

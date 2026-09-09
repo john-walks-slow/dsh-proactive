@@ -31,7 +31,7 @@
 
 import { boundContextSummary, createAssistantMessage, createUserMessage, type AssistantMessage, type UserMessage } from "@deepseek-ai/dsh-llm";
 import { isSurfaceEvent, type SurfaceIntent } from "@deepseek-ai/dsh-session";
-import { PROACTIVE_PLUGIN, type Alarm } from "./domain.js";
+import { PROACTIVE_PLUGIN, type Alarm, type AlarmCompaction } from "./domain.js";
 import { isFramingNotice } from "./observer.js";
 
 /** First token of every compaction tombstone; distinct from FRAMING_MARKER. */
@@ -72,9 +72,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** The tombstone text that replaces the framing run: alarm id + fire time, nothing else. */
-export function tombstoneText(alarm: Alarm, firedAt: Date): string {
-  return TOMBSTONE_MARKER + alarm.id + " " + firedAt.toISOString() + "]";
+/**
+ * The tombstone text that replaces the framing run. Under `minimal` compaction
+ * the no_reply reason is appended so later turns can see why the wake stayed
+ * silent; `aggressive` (and a reason-less `minimal`) keep only id + time.
+ */
+export function tombstoneText(alarm: Alarm, firedAt: Date, compaction: AlarmCompaction, reason?: string): string {
+  const base = TOMBSTONE_MARKER + alarm.id + " " + firedAt.toISOString();
+  if (compaction === "minimal" && typeof reason === "string" && reason.length > 0) {
+    return base + " no_reply: " + reason + "]";
+  }
+  return base + "]";
 }
 
 /**
@@ -137,6 +145,8 @@ export function applyWakeCompaction(
   events: readonly CompactEvent[],
   alarm: Alarm,
   firedAt: Date,
+  compaction: AlarmCompaction,
+  reason: string | undefined,
   log: (level: "info" | "warn" | "error", message: string) => void
 ): boolean {
   let framingCollapsed = false;
@@ -147,14 +157,14 @@ export function applyWakeCompaction(
     };
     try {
       if (run.framing) {
-        session.append("user/message", createTombstoneMessage(alarm, firedAt), opts);
+        session.append("user/message", createTombstoneMessage(alarm, firedAt, compaction, reason), opts);
         framingCollapsed = true;
       } else {
         const eraser = eraserMessage(eraserProvenance(events, run.seqs));
         if (eraser !== undefined) {
           session.append("assistant/message", eraser, opts);
         } else {
-          session.append("user/message", createTombstoneMessage(alarm, firedAt), opts);
+          session.append("user/message", createTombstoneMessage(alarm, firedAt, compaction, reason), opts);
         }
       }
     } catch (error) {
@@ -165,9 +175,9 @@ export function applyWakeCompaction(
 }
 
 /** Build the tombstone user message that replaces the framing run. */
-export function createTombstoneMessage(alarm: Alarm, firedAt: Date): UserMessage {
+export function createTombstoneMessage(alarm: Alarm, firedAt: Date, compaction: AlarmCompaction, reason?: string): UserMessage {
   return createUserMessage({
-    content: [{ type: "text", text: tombstoneText(alarm, firedAt) }],
+    content: [{ type: "text", text: tombstoneText(alarm, firedAt, compaction, reason) }],
     source: {
       kind: "plugin",
       plugin: PROACTIVE_PLUGIN,

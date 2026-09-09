@@ -72,7 +72,7 @@ function harness() {
 }
 
 const code = (v: unknown): string | undefined => (v as { code?: string })["code"];
-const asView = (v: unknown) => v as { id?: string; type?: string; targetMode?: string; targetSessionId?: string; respectQuietHours?: boolean; state?: string; everySeconds?: number; cron?: string; at?: string; nextDueAt?: string; jitterSeconds?: number };
+const asView = (v: unknown) => v as { id?: string; type?: string; targetMode?: string; targetSessionId?: string; respectQuietHours?: boolean; state?: string; everySeconds?: number; cron?: string; at?: string; nextDueAt?: string; jitterSeconds?: number; compaction?: string };
 
 function v2Fixture(id: string, owner: string, status: Alarm["status"] = "scheduled"): Alarm {
   return {
@@ -292,19 +292,23 @@ test("P1 regression: alarm view output schema admits v2 fields only", () => {
   const base = {
     id: "a", sessionId: "s1", type: "once", targetMode: "resume", targetSessionId: "s1",
     respectQuietHours: false, prompt: "p", nextDueAt: "2026-09-02T00:00:00.000Z",
-    state: "scheduled", deliveryMode: "host", at: "2026-09-02T00:00:00.000Z"
+    state: "scheduled", deliveryMode: "host", compaction: "minimal", at: "2026-09-02T00:00:00.000Z"
   };
   assert.deepEqual(validateJsonSchemaValue(viewSchema, base, "value"), []);
   // Legacy fields are rejected by the schema now (they are no longer in the view).
   const legacy = validateJsonSchemaValue(viewSchema, { ...base, mode: "one-shot", wakeReason: "alarm", jitter: 0.15 }, "value");
   assert.notDeepEqual(legacy, []);
+  // compaction is required: a view missing it is rejected by the schema gate.
+  const { compaction: _omit, ...noCompaction } = base;
+  void _omit;
+  assert.notDeepEqual(validateJsonSchemaValue(viewSchema, noCompaction, "value"), []);
 });
 
 test("P0 regression: every/cron alarm views pass the runtime output schema gate", () => {
   const h = harness();
   const listDef = h.byName["proactive_list"];
   const viewSchema = (listDef.output!.schema as { oneOf: Array<{ type: string; items: unknown }> }).oneOf[0].items as Parameters<typeof validateJsonSchemaValue>[0];
-  const base = { id: "a", sessionId: "s1", prompt: "p", nextDueAt: "2026-09-02T00:00:00.000Z", state: "scheduled", deliveryMode: "host" };
+  const base = { id: "a", sessionId: "s1", prompt: "p", nextDueAt: "2026-09-02T00:00:00.000Z", state: "scheduled", deliveryMode: "host", compaction: "minimal" };
   // A jittered every view must validate (optional fields, no extras).
   const jittered = validateJsonSchemaValue(viewSchema, { ...base, type: "every", targetMode: "resume", targetSessionId: "s1", respectQuietHours: true, everySeconds: 300, jitterSeconds: 120 }, "value");
   assert.deepEqual(jittered, [], "jittered every view must validate");
@@ -361,4 +365,19 @@ test("proactive_update_settings: default_prompt updates, persists, and shows in 
   assert.equal(file["defaultPrompt"], "新的默认预设");
   // Invalid shapes stay closed.
   assert.equal(code(await h.run("proactive_update_settings", { default_prompt: "   " })), "invalid_trigger");
+});
+
+test("proactive_set compaction defaults to minimal and accepts all modes", async () => {
+  const h = harness();
+  const def = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5 }));
+  assert.equal(def.compaction, "minimal");
+  const off = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, compaction: "off" }));
+  assert.equal(off.compaction, "off");
+  const agg = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, compaction: "aggressive" }));
+  assert.equal(agg.compaction, "aggressive");
+});
+
+test("validateCreateArgs rejects an invalid compaction value", () => {
+  const bad = validateCreateArgs({ prompt: "x", after_seconds: 5, compaction: "bogus" }, "s1") as { code?: string };
+  assert.equal(bad.code, "invalid_trigger");
 });

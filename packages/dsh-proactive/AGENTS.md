@@ -12,8 +12,8 @@
 - `src/scheduler.ts` — 串行 drive 循环：门控（安静/budget/hourly/boot 策略）、重试、单定时器重臂
 - `src/wake.ts` — WakeDriver：live/cold 双路径、冷 resume 装 `installModelSelection`（`createWakeSelectionRef`：会话 request header → agentDefaultModel → warn）、runMaintenance+followup、whenIdle、dispose、inflight 守卫；静默/无输出回合结束后触发 compactWake
 - `src/framing.ts` — 唤醒报文 v3（极简：身份头/now/非用户标记/alarm prompt 原文/一条 no_reply 规则，~0.4KB 开销）；notice-form 用户消息；导出 FRAMING_MARKER
-- `src/compact.ts` — 静默唤醒的 surface 压缩：planWakeCompaction（owned run 划分，region=framing 至其后第一个 turn/end）+ applyWakeCompaction（tombstone user/message + 空 content assistant/message 擦除器）；非本插件注入的 surface 节点（snapshot/mnemon/用户消息）打断 run 并保留
-- `src/observer.ts` — 从会话日志切片判定 no_reply/reply/failed 与预算增量；leaked 标记；isFramingNotice 按 plugin source + FRAMING_MARKER 双重锚定（防 tombstone 误锚）
+- `src/compact.ts` — 静默唤醒的 surface 压缩：planWakeCompaction（owned run 划分，region=framing 至其后第一个 turn/end）+ applyWakeCompaction（按 alarm.compaction 三态渲染 tombstone：minimal 含 `no_reply: <reason>`，aggressive 只 id+time；+ 空 content assistant/message 擦除器）；off 在 wake.ts 驱动层短路不进入；非本插件注入的 surface 节点（snapshot/mnemon/用户消息）打断 run 并保留
+- `src/observer.ts` — 从会话日志切片判定 no_reply/reply/failed 与预算增量；leaked 标记；extractNoReplyReason 从 tool/call arguments(JSON) 提取 reason → WakeAnalysis.noReplyReason（无条件进 run history）；isFramingNotice 按 plugin source + FRAMING_MARKER 双重锚定（防 tombstone 误锚）
 - `src/tools.ts` — proactive_set/list/cancel/no_reply（no_reply 需 inflight 且【只调它不写文本】）
 - `src/index.ts` — 装配；agent/created 时对 roots 注册工具（resume 出的会话同样覆盖）
 - `src/panel/` — 面板 host 半边：contract（面板↔client 线协议，与工具同一 create 方言）、service（快照/闭动作）、routes（/api/dsh-proactive/* + SSE）
@@ -26,7 +26,7 @@
 - 预算：唤醒回合写了可见聊天文本 1 单位/UTC 日，上限 `maxDeliveriesPerDay`；no_reply 免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
 - 安静时段（IANA 时区、跨午夜）：非 alarm 唤醒每 5 分钟延迟重评估；重复闹钟错过不补跑，推进到下一个锚点
 - 唤醒回合判定依据**已提交的会话日志**（startIndex 之后的事件切片），不信任运行期假设
-- 静默唤醒压缩：observer 判 no_reply/failed 后，用平台 surfaceOp replace 把唤醒交换从模型 surface 折叠成 ~70B tombstone（+ 空 content assistant/message 擦除器，deriveEventMessage→null）；reply 回合绝不压缩；非本插件注入的 surface 节点（runtime-context snapshot 等）打断 run 并保留——shadow snapshot 会使 RuntimeContextProjection.retained 置空、下回合强制重发全量快照；GUI 人类 transcript 用 append-origin 事件，不受替换影响
+- 静默唤醒压缩（per-alarm `compaction` 三态，默认 `minimal`）：observer 判 no_reply/failed 后，`off` 在驱动层短路不压缩；`minimal`/`aggressive` 用平台 surfaceOp replace 把唤醒交换折叠——minimal tombstone 含 `no_reply: <reason>`（~200-400B），aggressive 只 id+time（~70B），两者都用空 content assistant/message 擦除器（deriveEventMessage→null）；reply 回合绝不压缩；非本插件注入的 surface 节点（runtime-context snapshot 等）打断 run 并保留——shadow snapshot 会使 RuntimeContextProjection.retained 置空、下回合强制重发全量快照；GUI 人类 transcript 用 append-origin 事件，不受替换影响。no_reply reason 无条件提取进 run history（runs.jsonl/面板 RunView），与上下文压缩正交
 - 面板表单（两面板同一方言）：目标会话=会话 ID 文本输入（默认当前会话，设置页经 GlobalStandardProps `useSessions` 读 GUI 选中会话）；输入框下方实时显示该 ID 的会话标题（`knownSessions: ReadonlyMap<id,title>` 来自 state 快照的 session.list，精确命中即显示）；不在列表的 ID 为**软提示且 500ms settle 去抖**（负面反馈不能逐键闪现，正面标题即时）；owner 非表单字段——会话页钉死本会话（host scope 规则），设置页按目标派生（resume/fork=目标会话，new=当前会话→host-panel 伪会话）；prompt 预填 `config.defaultPrompt`（常量在 domain.ts，快照缺该字段的旧 host 由 client 回退同值，配置编辑项也仅在字段存在时渲染/提交）
 - `use-locale.ts`：面板文案 hook 的 active locale **每次 snapshot 读取时从 live 服务解析**，不在 bind 时缓存——页面可在持久化偏好（zh）到达前先以回退（en）启动，bind 时缓存会把该窗口内挂载的面板困在错误语言直到下次切换（曾导致刷新后面板 en、tab 标签 zh 的分裂）
 

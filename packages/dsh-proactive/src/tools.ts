@@ -75,6 +75,7 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     nextDueAt: { type: "string", required: true },
     state: { type: "string", required: true, enum: ["scheduled", "overdue", "in-flight", "completed", "cancelled", "failed", "paused"] },
     deliveryMode: { type: "string", required: true, const: "host" },
+    compaction: { type: "string", required: true, enum: ["off", "minimal", "aggressive"] },
     // Optional trigger specifics; present only for the matching alarm type.
     // Deliberately NOT required: dsh-tools compiles required:true per-property
     // into the top-level required array, so requiring these here would break
@@ -155,7 +156,8 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: defers inside the quiet window and is skipped when the daily budget is exhausted." },
             target_mode: { type: "string", enum: ["resume", "fork", "new"], description: "resume (default): wake the target session itself. fork: copy the target session's completed history into a new child session and wake it there. new: wake in a brand-new empty session. Fork/new children are real sessions that stay in the sidebar." },
             target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is this session. Must be omitted when target_mode is new." },
-            time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." }
+            time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." },
+            compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
           },
           output: {
             schema: { oneOf: [ALARM_VIEW_SCHEMA, ERROR_SCHEMA] },

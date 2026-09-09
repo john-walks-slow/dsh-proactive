@@ -28,7 +28,7 @@ import type { Agent, AgentOptions, AgentSetup, ModelSelection, ModelSelectionRef
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import type { EpochHeader, SessionEvent } from "@deepseek-ai/dsh-session";
 import { randomUUID } from "node:crypto";
-import type { Alarm, RunDecision } from "./domain.js";
+import { DEFAULT_COMPACTION, type Alarm, type AlarmCompaction, type RunDecision } from "./domain.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveConfig } from "./config.js";
 import { analyzeWakeTurn, type MinimalEvent } from "./observer.js";
@@ -43,6 +43,12 @@ export interface WakeAnalysisResult {
   /** True when no_reply was called after visible text was committed. */
   leaked?: boolean;
   note?: string;
+  /** The no_reply reason the model gave for staying silent. */
+  noReplyReason?: string;
+  /** Truncated reasoning (thinking) summary of the wake turn. */
+  reasoningSummary?: string;
+  /** Truncated visible-reply summary of the wake turn. */
+  replySummary?: string;
 }
 
 export type WakeFireResult =
@@ -147,7 +153,7 @@ export class WakeDriver {
    * append/surface split (test fakes) or a range a concurrent compaction
    * already shadowed just skips with a warn.
    */
-  private compactWake(agent: Agent, startIndex: number, alarm: Alarm, firedAt: Date): void {
+  private compactWake(agent: Agent, startIndex: number, alarm: Alarm, firedAt: Date, compaction: AlarmCompaction, reason: string | undefined): void {
     try {
       const session = agent.session as unknown as {
         append: CompactSession["append"];
@@ -156,7 +162,7 @@ export class WakeDriver {
       const events = agent.session.events as unknown as CompactEvent[];
       const plan = planWakeCompaction(events, startIndex);
       if (plan === undefined) return;
-      if (applyWakeCompaction(session as CompactSession, plan, events, alarm, firedAt, this.deps.log)) {
+      if (applyWakeCompaction(session as CompactSession, plan, events, alarm, firedAt, compaction, reason, this.deps.log)) {
         this.deps.log("info", "wake exchange compacted for alarm " + alarm.id + " (no visible output; model surface collapsed to a tombstone)");
       }
     } catch (error) {
@@ -249,7 +255,10 @@ export class WakeDriver {
       // exchange on the model surface so hourly reminders never pollute the
       // session context (see compact.ts).
       if (analysis.decision === "no_reply" || analysis.decision === "failed") {
-        this.compactWake(agent!, startIndex, alarm, firedAt);
+        const compaction = alarm.compaction ?? DEFAULT_COMPACTION;
+        if (compaction !== "off") {
+          this.compactWake(agent!, startIndex, alarm, firedAt, compaction, analysis.noReplyReason);
+        }
       }
       return {
         outcome: "ok",
@@ -260,7 +269,8 @@ export class WakeDriver {
           ...(analysis.leaked ? { leaked: true } : {}),
           ...(analysis.note !== undefined ? { note: analysis.note } : {}),
           ...(analysis.reasoningSummary !== undefined ? { reasoningSummary: analysis.reasoningSummary } : {}),
-          ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {})
+          ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {}),
+          ...(analysis.noReplyReason !== undefined ? { noReplyReason: analysis.noReplyReason } : {})
         }
       };
     };

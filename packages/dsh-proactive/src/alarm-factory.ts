@@ -21,8 +21,11 @@ import {
   validateJitterSeconds,
   validatePrompt,
   inputError,
+  COMPACTION_MODES,
+  DEFAULT_COMPACTION,
   MIN_EVERY_SECONDS,
   type Alarm,
+  type AlarmCompaction,
   type AlarmTarget,
   type AlarmTrigger,
   type AlarmType,
@@ -46,6 +49,7 @@ export interface CreateSpec {
   jitterSeconds?: number;
   timeZone?: string;
   respectQuietHours: boolean;
+  compaction: AlarmCompaction;
   target: AlarmTarget;
 }
 
@@ -63,9 +67,9 @@ function allocateId(prefix: string): string {
  * behaviour — the alarm wakes its creator).
  */
 export function validateCreateArgs(args: Record<string, unknown>, defaultTargetSessionId: string): CreateSpec | ToolError {
-  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "target_mode", "target_session_id"]);
+  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "target_mode", "target_session_id", "compaction"]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_session_id." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_session_id, compaction." };
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined) + Number(args["cron"] !== undefined);
   if (selectors !== 1) return { code: "invalid_trigger", message: "proactive_set requires exactly one of at, after_seconds, every_seconds, or cron." };
@@ -89,6 +93,13 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
   if (args["respect_quiet_hours"] !== undefined) {
     if (typeof args["respect_quiet_hours"] !== "boolean") return { code: "invalid_trigger", message: "respect_quiet_hours must be a boolean." };
     respectQuietHours = args["respect_quiet_hours"];
+  }
+  let compaction: AlarmCompaction = DEFAULT_COMPACTION;
+  if (args["compaction"] !== undefined) {
+    if (typeof args["compaction"] !== "string" || !COMPACTION_MODES.includes(args["compaction"])) {
+      return { code: "invalid_trigger", message: "compaction must be one of off, minimal, aggressive." };
+    }
+    compaction = args["compaction"] as AlarmCompaction;
   }
   let mode: AlarmTarget["mode"] = "resume";
   if (args["target_mode"] !== undefined) {
@@ -126,7 +137,7 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     if (value > MAX_DELAY_SECONDS) {
       return { code: "invalid_trigger", message: "after_seconds must not exceed " + MAX_DELAY_SECONDS + "." };
     }
-    return { prompt, kind: "after", afterSeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "after", afterSeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
   }
   if (args["every_seconds"] !== undefined) {
     const value = args["every_seconds"];
@@ -144,7 +155,7 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     if (jitterSeconds !== undefined && jitterSeconds > value) {
       return { code: "invalid_trigger", message: "jitter_seconds must not exceed every_seconds (" + value + ")." };
     }
-    return { prompt, kind: "every", everySeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "every", everySeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
   }
   if (args["cron"] !== undefined) {
     if (typeof args["cron"] !== "string") return { code: "invalid_trigger", message: "cron must be a five-field expression string." };
@@ -164,9 +175,9 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     } catch (error) {
       return inputError(error);
     }
-    return { prompt, kind: "cron", cron: args["cron"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "cron", cron: args["cron"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
   }
-  return { prompt, kind: "at", at: args["at"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+  return { prompt, kind: "at", at: args["at"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
 }
 
 /**
@@ -230,6 +241,7 @@ export function buildAlarm(ownerSessionId: string, spec: CreateSpec, nowStart: n
       trigger,
       prompt: spec.prompt,
       respectQuietHours: spec.respectQuietHours,
+      compaction: spec.compaction,
       timeZone,
       status: "scheduled",
       nextDueAt: new Date(delayed).toISOString(),

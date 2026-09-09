@@ -32,6 +32,7 @@ export interface AlarmRow {
   nextDueAt: string;
   createdAt: string;
   state: string;
+  compaction: "off" | "minimal" | "aggressive";
   jitterSeconds?: number;
   everySeconds?: number;
   cron?: string;
@@ -523,6 +524,7 @@ export function formFromAlarm(alarm: AlarmRow): PanelCreateForm {
     prompt: alarm.prompt,
     kind: alarm.type === "every" ? "every" : alarm.type === "cron" ? "cron" : "once",
     respectQuietHours: alarm.respectQuietHours,
+    compaction: alarm.compaction,
     targetMode: (alarm.targetMode === "fork" || alarm.targetMode === "new" ? alarm.targetMode : "resume") as PanelCreateForm["targetMode"],
     ...(alarm.targetMode !== "new" && alarm.targetSessionId !== undefined && alarm.targetSessionId !== "" ? { targetSessionId: alarm.targetSessionId } : {})
   };

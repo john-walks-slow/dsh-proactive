@@ -30,6 +30,7 @@ export interface AlarmRowDto {
   createdAt: string;
   state: string;
   deliveryMode: string;
+  compaction: "off" | "minimal" | "aggressive";
   jitterSeconds?: number;
   everySeconds?: number;
   cron?: string;
@@ -45,7 +46,7 @@ export interface PanelSnapshotDto {
    */
   config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; defaultPrompt?: string };
   alarms: AlarmRowDto[];
-  runs: Array<{ id: string; alarmId: string; sessionId: string; firedAt: string; decision: string; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string }>;
+  runs: Array<{ id: string; alarmId: string; sessionId: string; firedAt: string; decision: string; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string }>;
 }
 
 export interface PanelErrorDto {
