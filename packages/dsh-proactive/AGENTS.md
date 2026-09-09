@@ -25,7 +25,8 @@
 - 预算：唤醒回合写了可见聊天文本 1 单位/UTC 日，上限 `maxDeliveriesPerDay`；no_reply 免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
 - 安静时段（IANA 时区、跨午夜）：非 alarm 唤醒每 5 分钟延迟重评估；重复闹钟错过不补跑，推进到下一个锚点
 - 唤醒回合判定依据**已提交的会话日志**（startIndex 之后的事件切片），不信任运行期假设
-- 面板表单（两面板同一方言）：目标会话=会话 ID 文本输入（默认当前会话，设置页经 GlobalStandardProps `useSessions` 读 GUI 选中会话）；owner 非表单字段——会话页钉死本会话（host scope 规则），设置页按目标派生（resume/fork=目标会话，new=当前会话→host-panel 伪会话）；prompt 预填 `config.defaultPrompt`（常量在 domain.ts，快照缺该字段的旧 host 由 client 回退同值，配置编辑项也仅在字段存在时渲染/提交）
+- 面板表单（两面板同一方言）：目标会话=会话 ID 文本输入（默认当前会话，设置页经 GlobalStandardProps `useSessions` 读 GUI 选中会话）；输入框下方实时显示该 ID 的会话标题（`knownSessions: ReadonlyMap<id,title>` 来自 state 快照的 session.list，精确命中即显示）；不在列表的 ID 为**软提示且 500ms settle 去抖**（负面反馈不能逐键闪现，正面标题即时）；owner 非表单字段——会话页钉死本会话（host scope 规则），设置页按目标派生（resume/fork=目标会话，new=当前会话→host-panel 伪会话）；prompt 预填 `config.defaultPrompt`（常量在 domain.ts，快照缺该字段的旧 host 由 client 回退同值，配置编辑项也仅在字段存在时渲染/提交）
+- `use-locale.ts`：面板文案 hook 的 active locale **每次 snapshot 读取时从 live 服务解析**，不在 bind 时缓存——页面可在持久化偏好（zh）到达前先以回退（en）启动，bind 时缓存会把该窗口内挂载的面板困在错误语言直到下次切换（曾导致刷新后面板 en、tab 标签 zh 的分裂）
 
 ## Pitfalls
 

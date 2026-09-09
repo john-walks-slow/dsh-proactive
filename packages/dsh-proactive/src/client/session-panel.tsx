@@ -28,7 +28,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   const sessionId = String(props.sessionId);
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
-  const [knownSessionIds, setKnownSessionIds] = useState<ReadonlySet<string>>(new Set());
+  const [knownSessions, setKnownSessions] = useState<ReadonlyMap<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -49,7 +49,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       const next = await transport.stateForHost(requested);
       if (sessionRef.current !== requested) return; // stale: a newer session is now active
       setSnapshot(next.snapshot);
-      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
+      setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
       setError(null);
     } catch (reason) {
       if (sessionRef.current !== requested) return;
@@ -93,7 +93,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       const next = await transport.actionForHost(action, requested);
       if (sessionRef.current !== requested) return; // stale action response from a previous session
       setSnapshot(next.snapshot);
-      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
+      setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
       setShowForm(false);
       setEditingId(null);
       setForm(newAlarmForm(defaultPromptOf(next.snapshot), sessionRef.current));
@@ -158,7 +158,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} editing={editingId !== null} knownSessionIds={knownSessionIds}
+          copy={copy} editing={editingId !== null} knownSessions={knownSessions}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 

@@ -12,7 +12,7 @@
  * through the locale dictionary.
  */
 
-import { Fragment, useMemo, useState, type ReactElement } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactElement } from "react";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
 import { DEFAULT_WAKE_PROMPT, isValidSessionId, MAX_PROMPT_LENGTH } from "../domain.js";
 import type { ProactivePanelCopy } from "./locales.js";
@@ -347,11 +347,11 @@ export interface CreateFormProps {
   /** Editing an existing alarm instead of creating a new one. */
   editing?: boolean;
   /**
-   * Known host session ids (session.list), when available: a typed target
-   * outside the list gets a soft typo hint — non-blocking, cold/foreign ids
-   * are still submittable.
+   * Known host sessions (id → title, from session.list) when available: a
+   * typed target shows its live title, and an id outside the list gets a
+   * soft typo hint — non-blocking, cold/foreign ids are still submittable.
    */
-  knownSessionIds?: ReadonlySet<string>;
+  knownSessions?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -360,7 +360,16 @@ export interface CreateFormProps {
  * selector (resume/fork/new) plus a session-id text input; the owner session
  * is derived by the caller, never picked here.
  */
-export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, onSubmit, editing, knownSessionIds }: CreateFormProps): ReactElement {
+export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, onSubmit, editing, knownSessions }: CreateFormProps): ReactElement {
+  // Hooks FIRST — the showForm early-return below must not conditionally skip
+  // them (React requires a stable hook count across renders of one instance).
+  const targetIdRaw = (form.targetSessionId ?? "").trim();
+  const [settledTargetId, setSettledTargetId] = useState(targetIdRaw);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledTargetId(targetIdRaw), 500);
+    return () => { clearTimeout(timer); };
+  }, [targetIdRaw]);
+
   if (!showForm) return <Fragment />;
   const kind = form.kind ?? "every";
   const mode = form.targetMode ?? "resume";
@@ -371,10 +380,19 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
     // (the input would otherwise show a fallback the form state lacks).
     else setForm({ ...form, kind: nextKind, afterSeconds: form.afterSeconds ?? (form.atDate !== undefined && form.atDate !== "" ? undefined : 3600) });
   };
-  const targetId = (form.targetSessionId ?? "").trim();
+  const targetId = targetIdRaw;
   const targetInvalid = mode !== "new" && targetId !== "" && !isValidSessionId(targetId);
-  const targetUnknown = mode !== "new" && !targetInvalid && targetId !== "" &&
-    knownSessionIds !== undefined && knownSessionIds.size > 0 && !knownSessionIds.has(targetId);
+  // Live title lookup: shown the moment the typed id matches a known session
+  // (exact match — a partial id is not yet a session).
+  const targetTitle = mode !== "new" && !targetInvalid && targetId !== ""
+    ? knownSessions?.get(targetId)
+    : undefined;
+  // The unknown-id warning is NEGATIVE feedback: it only fires on the
+  // SETTLED id (500ms after typing stops), so typing a known id
+  // character-by-character does not flash "not in the list" on every
+  // keystroke — the positive title lookup above stays instant.
+  const targetUnknown = mode !== "new" && !targetInvalid && settledTargetId === targetId && targetId !== "" &&
+    knownSessions !== undefined && knownSessions.size > 0 && !knownSessions.has(targetId);
   const canSubmit =
     (form.prompt ?? "").trim() !== "" &&
     (kind !== "every" || (form.everySeconds ?? 0) >= 300) &&
@@ -477,6 +495,7 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
                 onChange={(e) => setForm({ ...form, targetSessionId: e.target.value })} />
               {targetInvalid ? <div className="dshp-field-error">{copy.invalidSessionId}</div> : null}
               {targetUnknown ? <div className="dshp-hint-warn">{copy.unknownSession}</div> : null}
+              {targetTitle !== undefined && targetTitle !== "" ? <div className="dshp-cell-dim">{targetTitle}</div> : null}
             </div>
           ) : null}
         </div>

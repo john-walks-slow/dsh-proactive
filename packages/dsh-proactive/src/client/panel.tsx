@@ -56,7 +56,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
   const copy = useProactiveLocale();
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
-  const [knownSessionIds, setKnownSessionIds] = useState<ReadonlySet<string>>(new Set());
+  const [knownSessions, setKnownSessions] = useState<ReadonlyMap<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -77,7 +77,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
     try {
       const next = await transport.stateForHost();
       setSnapshot(next.snapshot);
-      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
+      setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -114,7 +114,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
     try {
       const next = await transport.actionForHost(action);
       setSnapshot(next.snapshot);
-      setKnownSessionIds(new Set(next.sessions.map((session) => session.id)));
+      setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
       setShowForm(false);
       setEditingId(null);
       setForm(newAlarmForm(defaultPromptOf(next.snapshot), currentSession));
@@ -266,7 +266,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
-          copy={copy} editing={editingId !== null} knownSessionIds={knownSessionIds}
+          copy={copy} editing={editingId !== null} knownSessions={knownSessions}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 
