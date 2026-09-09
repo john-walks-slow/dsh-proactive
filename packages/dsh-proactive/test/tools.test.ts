@@ -223,6 +223,25 @@ test("proactive_list filters to this session's active alarms", async () => {
   assert.equal(res.length, 2);
 });
 
+test("proactive_list with all=true lists active alarms across all sessions", async () => {
+  const h = harness();
+  h.store.alarms = [
+    v2Fixture("a", "s1"),                              // s1 scheduled
+    { ...v2Fixture("b", "s1"), status: "in-flight" },   // s1 in-flight
+    { ...v2Fixture("c", "s1"), status: "completed" },  // s1 terminal
+    v2Fixture("d", "s2"),                               // s2 scheduled
+    { ...v2Fixture("e", "s2"), status: "paused" },      // s2 paused (not active for list)
+    { ...v2Fixture("f", "s2"), status: "failed" }       // s2 terminal
+  ];
+  // Default: only this session's (s1) active alarms → a + b
+  const ownRes = await h.run("proactive_list", {}) as { id?: string }[];
+  assert.equal(ownRes.length, 2);
+  // all=true: active alarms across all sessions → a + b + d (paused/terminal excluded)
+  const allRes = await h.run("proactive_list", { all: true }) as { id?: string }[];
+  assert.equal(allRes.length, 3);
+  assert.deepEqual(allRes.map((r) => r.id).sort(), ["a", "b", "d"]);
+});
+
 test("proactive_cancel cancels and maps unknown/foreign ids to not_found", async () => {
   const h = harness();
   const created = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5 }));

@@ -42,6 +42,7 @@ export interface ProactivePanelCopy {
   target: string;
   emptyAlarms: string;
   emptyRuns: string;
+  filterActive: string;
   filterAllStates: string;
   filterAllSessions: string;
   filterAllTypes: string;
@@ -147,6 +148,7 @@ export const zh: ProactivePanelCopy = {
   target: "目标",
   emptyAlarms: "暂无闹钟。创建一个，模型到点会主动跟进。",
   emptyRuns: "还没有唤醒记录。",
+  filterActive: "活跃中",
   filterAllStates: "全部状态",
   filterAllSessions: "全部会话",
   filterAllTypes: "全部类型",
@@ -246,6 +248,7 @@ export const en: ProactivePanelCopy = {
   target: "Target",
   emptyAlarms: "No alarms yet. Create one and the model will proactively follow up on schedule.",
   emptyRuns: "No wake runs yet.",
+  filterActive: "Active",
   filterAllStates: "All states",
   filterAllSessions: "All sessions",
   filterAllTypes: "All types",

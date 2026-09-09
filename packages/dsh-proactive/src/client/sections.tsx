@@ -126,8 +126,18 @@ export interface RunRow {
 
 type SortKey = "nextDue" | "created" | "prompt";
 
+/** Non-terminal alarm states: still alive and potentially firing. */
+const ACTIVE_STATES: ReadonlySet<string> = new Set(["scheduled", "overdue", "in-flight", "paused"]);
+
+/** State-filter predicate; "active" is a pseudo-filter matching non-terminal states. */
+function stateMatches(filter: string, state: string): boolean {
+  if (filter === "") return true;
+  if (filter === "active") return ACTIVE_STATES.has(state);
+  return state === filter;
+}
+
 export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onToggle, onCancel, onFire, onEdit, onCopyId }: AlarmTableProps): ReactElement {
-  const [stateFilter, setStateFilter] = useState<string>("");
+  const [stateFilter, setStateFilter] = useState<string>("active");
   const [typeFilter, setTypeFilter] = useState<string>("");
   const [sessionFilter, setSessionFilter] = useState<string>("");
   const [sortKey, setSortKey] = useState<SortKey>("nextDue");
@@ -146,7 +156,7 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
   const visible = useMemo(() => {
     const filtered = alarms.filter(
       (alarm) =>
-        (stateFilter === "" || alarm.state === stateFilter) &&
+        stateMatches(stateFilter, alarm.state) &&
         (typeFilter === "" || alarm.type === typeFilter) &&
         (sessionFilter === "" || alarm.sessionId === sessionFilter)
     );
@@ -166,6 +176,7 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
     <div className="dshp-table-wrap">
       <div className="dshp-toolbar">
         <select className="dshp-input" value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
+          <option value="active">{copy.filterActive}</option>
           <option value="">{copy.filterAllStates}</option>
           {stateOptions.map((value) => <option key={value} value={value}>{stateLabel(copy, value)}</option>)}
         </select>

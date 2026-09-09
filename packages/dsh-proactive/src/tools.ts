@@ -191,18 +191,21 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
 
         defineTool({
           name: "proactive_list",
-          description: "List this session's active host-level alarms (scheduled, overdue, in-flight) in creation order with exact ids and states.",
-          parameters: {},
+          description: "List this session's active host-level alarms (scheduled, overdue, in-flight) in creation order with exact ids and states. Pass all=true to list active alarms across ALL sessions, not just this one — useful when the user asks to enumerate every alarm or you need to manage alarms owned by other sessions.",
+          parameters: {
+            all: { type: "boolean", description: "When true, list active alarms across all sessions instead of only this session's. Default false." }
+          },
           output: {
             schema: { oneOf: [{ type: "array", items: ALARM_VIEW_SCHEMA }, ERROR_SCHEMA] },
             render: renderValue
           },
-          async execute(_args, exec) {
+          async execute(args, exec) {
             if (exec.agent !== agent) return internalError();
             const now = services.now();
+            const all = args["all"] === true;
             const alarms = services.store
               .listAlarms()
-              .filter((alarm) => alarm.ownerSessionId === agent.session.id && (alarm.status === "scheduled" || alarm.status === "in-flight"))
+              .filter((alarm) => (all || alarm.ownerSessionId === agent.session.id) && (alarm.status === "scheduled" || alarm.status === "in-flight"))
               .map((alarm) => toAlarmView(alarm, now));
             return alarms;
           },
