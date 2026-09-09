@@ -35,6 +35,7 @@ import { analyzeWakeTurn, type MinimalEvent } from "./observer.js";
 import { createFramingMessage, type FramingContext } from "./framing.js";
 import type { UserPresence } from "./framing.js";
 import { isInQuietHours } from "./config.js";
+import { applyWakeCompaction, planWakeCompaction, type CompactEvent, type CompactSession } from "./compact.js";
 
 export interface WakeAnalysisResult {
   decision: RunDecision;
@@ -141,6 +142,29 @@ export class WakeDriver {
   }
 
   /**
+   * Collapse the settled wake turn on the model surface (tombstone + invisible
+   * erasers). Best-effort by design: a session without the platform's
+   * append/surface split (test fakes) or a range a concurrent compaction
+   * already shadowed just skips with a warn.
+   */
+  private compactWake(agent: Agent, startIndex: number, alarm: Alarm, firedAt: Date): void {
+    try {
+      const session = agent.session as unknown as {
+        append: CompactSession["append"];
+      };
+      if (typeof session.append !== "function") return;
+      const events = agent.session.events as unknown as CompactEvent[];
+      const plan = planWakeCompaction(events, startIndex);
+      if (plan === undefined) return;
+      if (applyWakeCompaction(session as CompactSession, plan, events, alarm, firedAt, this.deps.log)) {
+        this.deps.log("info", "wake exchange compacted for alarm " + alarm.id + " (no visible output; model surface collapsed to a tombstone)");
+      }
+    } catch (error) {
+      this.deps.log("warn", "wake compaction failed for alarm " + alarm.id + ": " + (error instanceof Error ? error.message : String(error)));
+    }
+  }
+
+  /**
    * Model selection for a resumed/created agent: the session's own committed
    * request header wins (the same model the live session last used),
    * agentDefaultModel is the fallback for sessions without any header.
@@ -200,16 +224,13 @@ export class WakeDriver {
     let actualSessionId = "";
     const drive = async (): Promise<WakeFireResult> => {
       const now = this.deps.now?.() ?? Date.now();
+      const firedAt = new Date(now);
       const startIndex = agent!.session.events.length;
-      const budgetUsed = this.deps.store.budgetFor(new Date(now).toISOString().slice(0, 10));
       const context: FramingContext = {
         alarm,
-        budgetUsed,
-        budgetMax: this.deps.config.maxDeliveriesPerDay,
         quiet: isInQuietHours(now, this.deps.config),
-        now: new Date(now),
-        userPresence: presence,
-        configQuietHours: this.deps.config.quietHours
+        now: firedAt,
+        userPresence: presence
       };
       const message = createFramingMessage(context);
       let claimed = false;
@@ -224,6 +245,12 @@ export class WakeDriver {
       if (!claimed) return { outcome: "busy" };
       await agent!.whenIdle();
       const analysis = analyzeWakeTurn(agent!.session.events as unknown as MinimalEvent[], startIndex);
+      // Nothing user-visible came out of this wake: collapse the whole
+      // exchange on the model surface so hourly reminders never pollute the
+      // session context (see compact.ts).
+      if (analysis.decision === "no_reply" || analysis.decision === "failed") {
+        this.compactWake(agent!, startIndex, alarm, firedAt);
+      }
       return {
         outcome: "ok",
         sessionId: actualSessionId,

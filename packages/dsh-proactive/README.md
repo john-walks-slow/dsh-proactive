@@ -75,7 +75,19 @@ Web GUI 提供两个互补的管理面（插件随 bundle 安装自动注册，�
 | `no_reply` | **任意回合可用**：静默收尾（`concludesTurn`），需单独调用且不产出文本；唤醒回合内调用会记录一条 no_reply 运行记录 |
 | `proactive_update_settings` | 部分更新 host 级设置：只改传入字段（`enabled`/`max_deliveries_per_day`/`quiet_hours`/`max_prompt_length`/`default_prompt` 等），持久化到 `config.json` 并热应用到运行中的调度器，重启后仍生效 |
 
-唤醒回合的 framing 报文说明唤醒类型、`respect_quiet_hours`、今日预算用量，并给出两条回复规则（需要时简短回复、无需用户感知或静默更合适就 no_reply）。
+唤醒回合的 framing 报文刻意极简（v3，~0.4KB 开销）：闹钟身份头 + 当前时间 + 「非用户发送」标记 + 闹钟自身 prompt 原文 + 一条 no_reply 回复规则。预算机制、安静时段窗口等细节不在报文中——那些由 host 侧门控执行。
+
+### 静默唤醒的上下文压缩
+
+每小时级的 reminder 大多以 `no_reply` 静默结束，这些唤醒不应污染长会话的模型上下文。回合结束、observer 判定为 `no_reply`（或无任何可见产出的 `failed`）后，插件会用平台的 surface 替换机制把整个唤醒交换（framing + assistant 工具调用 + 工具结果）从**模型可见 surface** 上折叠：
+
+- 含 framing 的片段 → 替换为 ~70B 的墓碑（`[dsh-proactive silent wake <id> <时间>]`）；
+- assistant/工具结果片段 → 替换为空 content 的 assistant/message（平台规则：派生为 null，模型完全不可见）；
+- 回合中途插入的 runtime-context snapshot、mnemon 指令、用户消息**原样保留**（不 shadow snapshot，否则下一回合会强制重发全量快照）；
+- 写了可见回复（`reply`）的回合**完全不压缩**——那是真实对话；
+- 原始日志不动：GUI 的人类可读 transcript 按 append-origin 事件渲染，压缩后界面上仍能看到完整唤醒过程。
+
+净效果：一次静默唤醒在模型上下文中的持久残留从 ~2.6KB 降到 ~70B；报文本身的开销也只在该唤醒回合的请求中存在一次，随压缩消失。
 
 ### 随机延迟（jitter_seconds）
 

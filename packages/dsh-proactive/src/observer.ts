@@ -13,6 +13,7 @@
  */
 
 import { isRecord, type RunDecision } from "./domain.js";
+import { FRAMING_MARKER } from "./framing.js";
 
 /** The subset of a session event we inspect. */
 export interface MinimalEvent {
@@ -89,11 +90,18 @@ export function extractReasoningBlocks(data: Record<string, unknown>): string[] 
 /** turn/end reason kinds that mean the wake turn did not settle normally. */
 const FAILURE_KINDS = new Set(["error", "aborted", "max-tokens"]);
 
-/** True when one session event is our wake framing notice. */
-function isFramingNotice(event: MinimalEvent): boolean {
+/**
+ * True when one session event is our wake framing notice. Anchors on the
+ * plugin source AND the framing marker so compaction tombstones (same plugin,
+ * different marker) are never mistaken for a fresh framing.
+ */
+export function isFramingNotice(event: MinimalEvent): boolean {
   if (event.type !== "user/message") return false;
   const source = isRecord(event.data["source"]) ? event.data["source"] : undefined;
-  return source !== undefined && source["kind"] === "plugin" && source["plugin"] === "dsh-proactive";
+  if (source === undefined || source["kind"] !== "plugin" || source["plugin"] !== "dsh-proactive") return false;
+  const blocks = Array.isArray(event.data["content"]) ? event.data["content"] : [];
+  const first = blocks[0];
+  return isRecord(first) && first["type"] === "text" && typeof first["text"] === "string" && first["text"].startsWith(FRAMING_MARKER);
 }
 
 /**
@@ -102,13 +110,22 @@ function isFramingNotice(event: MinimalEvent): boolean {
  */
 export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: number): WakeAnalysis {
   const slice = events.slice(startIndex);
-  // Anchor on our framing notice when present: the wake turn is the FIRST turn
-  // that starts after it. Without a notice (tests, replayed slices) fall back
-  // to the first turn boundary in the slice.
+  // Anchor on our framing notice when present: the wake turn is the turn that
+  // CLAIMED the framing — its turn/start precedes the framing (the agent loop
+  // appends turn/start before draining the inbox), and the turn ends at the
+  // FIRST turn/end after the framing. Skipping ahead to a later turn/start
+  // here would judge a raced user turn instead of the wake turn (mischarging
+  // the budget or, worse, authorizing compaction of a wake reply the user
+  // already saw). Without a notice (tests, replayed slices) fall back to the
+  // first turn boundary in the slice.
   const framingAt = slice.findIndex(isFramingNotice);
-  const afterFraming = framingAt >= 0 ? slice.slice(framingAt) : slice;
-  const firstTurnStart = afterFraming.findIndex((event) => event.type === "turn/start");
-  const effective = firstTurnStart >= 0 ? afterFraming.slice(firstTurnStart) : afterFraming;
+  let effective = slice;
+  if (framingAt >= 0) {
+    effective = slice.slice(framingAt);
+  } else {
+    const firstTurnStart = slice.findIndex((event) => event.type === "turn/start");
+    if (firstTurnStart >= 0) effective = slice.slice(firstTurnStart);
+  }
 
   const turnEndIndex = effective.findIndex((event) => event.type === "turn/end");
   const turnSegment = turnEndIndex >= 0 ? effective.slice(0, turnEndIndex + 1) : effective;

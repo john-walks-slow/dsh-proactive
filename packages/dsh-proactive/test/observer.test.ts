@@ -12,7 +12,8 @@ const assistantBlocks = (blocks: Array<Record<string, unknown>>) => ev("assistan
 const toolCall = (name: string) => ev("tool/call", { turn: 1, step: 1, callId: "c1", name, arguments: "{}" });
 const turnStart = (n = 1) => ev("turn/start", { turn: n });
 const turnEnd = (kind = "completed", extra: Record<string, unknown> = {}) => ev("turn/end", { turn: 1, reason: { kind, ...extra } });
-const framing = ev("user/message", { role: "user", content: [{ type: "text", text: "## PROACTIVE WAKE ..." }], source: { kind: "plugin", plugin: "dsh-proactive", form: "notice", summary: "wake" } });
+const framing = ev("user/message", { role: "user", content: [{ type: "text", text: "[dsh-proactive wake alarm_x once cold] ..." }], source: { kind: "plugin", plugin: "dsh-proactive", form: "notice", summary: "wake" } });
+const tombstone = ev("user/message", { role: "user", content: [{ type: "text", text: "[dsh-proactive silent wake alarm_x 2026-09-01T09:00:00.000Z]" }], source: { kind: "plugin", plugin: "dsh-proactive", form: "notice", summary: "silent wake" } });
 
 test("extractTextBlocks handles blocks, text, and nested message shapes", () => {
   assert.deepEqual(extractTextBlocks({ blocks: [{ type: "text", text: "hi" }, { type: "text", text: "  " }, { type: "tool_use", name: "x" }] }), ["hi"]);
@@ -49,9 +50,11 @@ test("truncateSummary does not split surrogate pairs (emoji)", () => {
 
 test("analysis carries reasoning and reply summaries from the wake turn", () => {
   const reasoning = "用户昨天提到要在 9 点前完成报告，现在正好是 9 点，应该提醒他检查。";
+  // Real log order: the turn that claims the framing starts BEFORE it (the
+  // agent loop appends turn/start before draining the inbox).
   const events: MinimalEvent[] = [
-    framing,
     turnStart(),
+    framing,
     assistantBlocks([{ type: "reasoning", text: reasoning }, { type: "text", text: "到点啦：报告截止，记得提交。" }]),
     turnEnd()
   ];
@@ -150,13 +153,63 @@ test("analysis skips earlier unrelated events from the slice", () => {
 test("slice anchors on the framing notice, ignoring a pending pre-wake turn", () => {
   // A pending user turn (queued before the wake) lands in the slice; the
   // analysis must anchor on our framing notice and only judge the wake turn.
+  // Real order: the wake turn's turn/start precedes its framing.
   const events: MinimalEvent[] = [
     turnStart(0),
     assistantText("pending turn reply, not part of this wake"),
     turnEnd(),
-    framing,
     turnStart(1),
+    framing,
     toolCall("no_reply"),
+    turnEnd()
+  ];
+  const analysis = analyzeWakeTurn(events, 0);
+  assert.equal(analysis.decision, "no_reply");
+  assert.equal(analysis.budgetDelta, 0);
+});
+
+test("compaction tombstones are never mistaken for a fresh framing notice", () => {
+  const events: MinimalEvent[] = [
+    tombstone,
+    turnStart(1),
+    framing,
+    toolCall("no_reply"),
+    turnEnd()
+  ];
+  const analysis = analyzeWakeTurn(events, 0);
+  assert.equal(analysis.decision, "no_reply");
+});
+
+test("raced user turn after a visible wake reply is NOT judged (reply keeps its budget accounting)", () => {
+  // Real-order regression (P1 fix): the wake turn produced a visible reply;
+  // a user turn raced in within the same whenIdle window and ended with no
+  // text. Judging the raced turn would say "failed" and authorize compaction
+  // that erases a reply the user already saw.
+  const events: MinimalEvent[] = [
+    turnStart(1),
+    framing,
+    assistantText("到点了，该喝水了！"),
+    turnEnd(),
+    turnStart(2),
+    turnEnd("error", { error: { code: "X", message: "boom" } })
+  ];
+  const analysis = analyzeWakeTurn(events, 0);
+  assert.equal(analysis.decision, "reply");
+  assert.equal(analysis.budgetDelta, 1);
+  assert.equal(analysis.replySummary, "到点了，该喝水了！");
+});
+
+test("raced user turn with text after a SILENT wake is NOT judged (no mischarge, no lost compaction)", () => {
+  // Real-order regression (P1 fix): the wake itself was silent; the raced
+  // user turn carries text. Judging the raced turn would mischarge one budget
+  // unit and skip compaction of the silent wake exchange.
+  const events: MinimalEvent[] = [
+    turnStart(1),
+    framing,
+    toolCall("no_reply"),
+    turnEnd(),
+    turnStart(2),
+    assistantText("这是竞态用户回合的回复，不属于唤醒"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);

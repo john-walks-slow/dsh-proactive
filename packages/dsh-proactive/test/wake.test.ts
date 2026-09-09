@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
-import type { EpochHeader } from "@deepseek-ai/dsh-session";
-import { ReasoningEffortId } from "@deepseek-ai/dsh-llm";
+import { Session, deriveEventMessage, type EpochHeader } from "@deepseek-ai/dsh-session";
+import { CallId, ReasoningEffortId, createAssistantMessage, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { WakeDriver, createWakeSelectionRef, selectionFromHeader, completedTurnCut, type AgentHandleLike, type AgentsFacade, type CreateFacadeOptions, type WakeFireResult } from "../src/wake.js";
 import { ProactiveStore } from "../src/store.js";
 import { resolveConfig } from "../src/config.js";
@@ -46,7 +46,7 @@ function makeFakeAgent(rec: FakeRecording, opts: { busy?: boolean; failWhenIdle?
       rec.messages.push({ message });
       rec.activeDuringFollowup = true; // driver must still count this wake as active
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: "c1", name: "no_reply", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => {
@@ -112,9 +112,9 @@ test("cold wake resumes the session, frames the message, and can be silent", asy
     assert.equal(h.rec.activeDuringFollowup, true); // inflight guard held during the wake
     assert.equal(h.rec.messages.length, 1);
     const text = extractText(h.rec.messages[0].message);
-    assert.ok(text.includes("## PROACTIVE WAKE"));
-    assert.ok(text.includes("wake_type: once"));
-    assert.ok(text.includes("respect_quiet_hours: false"));
+    assert.ok(text.startsWith("[dsh-proactive wake cold1 once cold]"), "v3 minimal header expected, got: " + text.slice(0, 60));
+    assert.ok(text.includes("no_reply(reason) as your ONLY action"));
+    assert.ok(text.includes("进水提醒"));
     assert.equal(h.driver.isActiveWake("s1"), false); // cleared after the wake
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
@@ -409,7 +409,7 @@ function makeWakeAgent(header: EpochHeader) {
     session: { id: "s1", events, requestHeader: () => header },
     followup: () => {
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: "c1", name: "no_reply", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
@@ -443,6 +443,221 @@ test("createWakeSelectionRef falls back header -> agentDefaultModel -> warn", ()
   const viaPartial = createWakeSelectionRef(undefined, () => ({ provider: "cpa" }), log);
   assert.equal(viaPartial.current, undefined);
   assert.ok(warns.some((w) => w.includes("selection incomplete")));
+});
+
+test("silent wake collapses on the model surface after the turn settles", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const session = Session.create("s1" as never);
+  const agent = {
+    session,
+    followup: (message: unknown) => {
+      session.append("turn/start", { turn: 1 });
+      session.append("user/message", message as never, { surfaceOp: "append" });
+      session.append("assistant/message", {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage({
+          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: JSON.stringify({ reason: "没事" }) }],
+          source: { provider: "cpa", model: "gemini-3-flash" }
+        })
+      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      session.append("tool/result", {
+        turn: 1,
+        step: 1,
+        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
+      }, { surfaceOp: "append" });
+      session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+    },
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const agents: AgentsFacade = {
+    get: () => agent,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => ({ provider: "cpa", model: "x" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("silent1"));
+    assert.equal(fire.outcome, "ok");
+    if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
+    // Compaction landed: the model surface derives ONLY the tombstone from
+    // the whole wake exchange (framing + assistant + tool result erased).
+    const derived = session.surface.nodes
+      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .filter((message) => message !== null);
+    assert.equal(derived.length, 1);
+    const [only] = derived;
+    const block = only.content[0] as { type: string; text: string };
+    assert.equal(block.type, "text");
+    assert.ok(block.text.startsWith("[dsh-proactive silent wake silent1 "), "tombstone expected, got: " + block.text);
+    assert.ok(Buffer.byteLength(block.text) < 90, "tombstone must stay tiny, was " + Buffer.byteLength(block.text));
+    // The raw log keeps the full exchange for the human transcript.
+    assert.ok(session.events.some((event) => event.type === "assistant/message"));
+    assert.ok(session.events.some((event) => event.type === "tool/result"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("visible-reply wakes are never compacted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const session = Session.create("s1" as never);
+  const agent = {
+    session,
+    followup: (message: unknown) => {
+      session.append("turn/start", { turn: 1 });
+      session.append("user/message", message as never, { surfaceOp: "append" });
+      session.append("assistant/message", {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage({
+          content: [{ type: "text", text: "到点了，喝水！" }],
+          source: { provider: "cpa", model: "gemini-3-flash" }
+        })
+      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+    },
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const agents: AgentsFacade = {
+    get: () => agent,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => ({ provider: "cpa", model: "x" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("reply1"));
+    assert.equal(fire.outcome, "ok");
+    if (fire.outcome === "ok") {
+      assert.equal(fire.analysis.decision, "reply");
+      assert.equal(fire.analysis.budgetDelta, 1);
+    }
+    const derived = session.surface.nodes
+      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .filter((message) => message !== null);
+    assert.equal(derived.length, 2); // framing + visible reply, untouched
+    const reply = derived[1].content[0] as { type: string; text: string };
+    assert.equal(reply.text, "到点了，喝水！");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("raced user turn cannot make a visible wake reply compactable (P1 regression)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const session = Session.create("s1" as never);
+  const agent = {
+    session,
+    followup: (message: unknown) => {
+      // Real drain order: wake turn (visible reply), then a user turn that
+      // raced in within the same whenIdle window and ended with no text.
+      session.append("turn/start", { turn: 1 });
+      session.append("user/message", message as never, { surfaceOp: "append" });
+      session.append("assistant/message", {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage({
+          content: [{ type: "text", text: "到点了，该喝水了！" }],
+          source: { provider: "cpa", model: "gemini-3-flash" }
+        })
+      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+      session.append("turn/start", { turn: 2 });
+      session.append("user/message", createUserMessage({ content: [{ type: "text", text: "用户竞态消息" }], source: { kind: "user" } }), { surfaceOp: "append" });
+      session.append("turn/end", { turn: 2, reason: { kind: "error", error: { code: "X", message: "boom" } } });
+    },
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const agents: AgentsFacade = {
+    get: () => agent,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => ({ provider: "cpa", model: "x" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("raced1"));
+    assert.equal(fire.outcome, "ok");
+    if (fire.outcome === "ok") {
+      assert.equal(fire.analysis.decision, "reply"); // judges the WAKE turn, not the raced one
+      assert.equal(fire.analysis.budgetDelta, 1);
+    }
+    const derived = session.surface.nodes
+      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .filter((message) => message !== null);
+    const texts = derived.map((m) => (m.content[0] as { text?: string }).text ?? "");
+    assert.ok(texts.some((t) => t.includes("到点了，该喝水了！")), "visible reply must stay on the model surface");
+    assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake ")), "framing must stay (reply turns are never compacted)");
+    assert.ok(!texts.some((t) => t.startsWith("[dsh-proactive silent wake ")), "no tombstone may appear for a reply turn");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("raced user turn with text does not block compaction of a SILENT wake", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const session = Session.create("s1" as never);
+  const agent = {
+    session,
+    followup: (message: unknown) => {
+      // Silent wake turn, then a raced user turn that carried text within
+      // the same whenIdle window. The decision must judge the wake turn
+      // (no_reply) and the wake exchange must still collapse; the raced
+      // user turn's text stays on the surface untouched.
+      session.append("turn/start", { turn: 1 });
+      session.append("user/message", message as never, { surfaceOp: "append" });
+      session.append("assistant/message", {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage({
+          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: JSON.stringify({ reason: "没事" }) }],
+          source: { provider: "cpa", model: "gemini-3-flash" }
+        })
+      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      session.append("tool/result", {
+        turn: 1,
+        step: 1,
+        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
+      }, { surfaceOp: "append" });
+      session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+      session.append("turn/start", { turn: 2 });
+      session.append("user/message", createUserMessage({ content: [{ type: "text", text: "竞态用户回合的内容" }], source: { kind: "user" } }), { surfaceOp: "append" });
+      session.append("turn/end", { turn: 2, reason: { kind: "completed" } });
+    },
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const agents: AgentsFacade = {
+    get: () => agent,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => ({ provider: "cpa", model: "x" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("silentraced1"));
+    assert.equal(fire.outcome, "ok");
+    if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
+    const texts = session.surface.nodes
+      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .filter((message) => message !== null)
+      .map((m) => (m.content[0] as { text?: string }).text ?? "");
+    assert.ok(texts.some((t) => t.startsWith("[dsh-proactive silent wake silentraced1 ")), "silent wake still collapsed to a tombstone");
+    assert.ok(texts.some((t) => t.includes("竞态用户回合的内容")), "raced user turn text stays on the surface");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function extractText(message: unknown): string {
