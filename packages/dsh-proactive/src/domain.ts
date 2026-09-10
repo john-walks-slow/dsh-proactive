@@ -39,6 +39,9 @@ export const DEFAULT_WAKE_PROMPT =
 /** dsh session ids are alphanumeric plus `._-`; anything else (slashes, traversals, spaces, UTF-8) is rejected. */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
+/** dsh workspace registry ids are generated uuids; the pattern only fails closed on junk shapes. */
+export const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/;
+
 /**
  * Slice by Unicode code points (not UTF-16 units) so a surrogate pair is
  * never split in half — user-facing prompt/preset text may contain emoji.
@@ -57,18 +60,30 @@ export function isValidSessionId(sessionId: string): boolean {
   return SESSION_ID_PATTERN.test(sessionId);
 }
 
+/** Fail closed on workspace ids that are not registry-uuid shaped (defense in depth for stored alarms). */
+export function isValidWorkspaceId(workspaceId: string): boolean {
+  return WORKSPACE_ID_PATTERN.test(workspaceId);
+}
+
 export type AlarmType = "once" | "every" | "cron";
 /** Per-alarm surface compaction policy for silent wake turns. */
 export type AlarmCompaction = "off" | "minimal" | "aggressive";
-export type TargetMode = "resume" | "fork" | "new";
+export type TargetMode = "resume" | "fork" | "new" | "workspace";
 export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
 export type RunDecision = "no_reply" | "reply" | "skipped" | "failed";
 
-/** Where the wake should land. `resume`/`fork` name an existing session; `new` creates one. */
+/**
+ * Where the wake should land. `resume`/`fork` name an existing session; `new`
+ * creates one; `workspace` names a dsh workspace registry id and resolves the
+ * destination at fire time (most recently updated session in the workspace,
+ * else the workspace's blank New Session slot, else a fresh session attached
+ * to the workspace — see workspace.ts).
+ */
 export type AlarmTarget =
   | { mode: "resume"; sessionId: string }
   | { mode: "fork"; sessionId: string }
-  | { mode: "new" };
+  | { mode: "new" }
+  | { mode: "workspace"; workspaceId: string };
 
 export interface OnceTrigger {
   /** Canonical RFC 3339 UTC instant. */
@@ -144,6 +159,8 @@ export type AlarmView = {
   targetMode: TargetMode;
   /** Present for resume/fork targets. */
   targetSessionId?: string;
+  /** Present for workspace targets. */
+  targetWorkspaceId?: string;
   respectQuietHours: boolean;
   prompt: string;
   nextDueAt: string;
@@ -465,6 +482,7 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
     type: alarm.type,
     targetMode: alarm.target.mode,
     ...("sessionId" in alarm.target ? { targetSessionId: alarm.target.sessionId } : {}),
+    ...("workspaceId" in alarm.target ? { targetWorkspaceId: alarm.target.workspaceId } : {}),
     respectQuietHours: alarm.respectQuietHours,
     prompt: alarm.prompt,
     nextDueAt: alarm.nextDueAt,

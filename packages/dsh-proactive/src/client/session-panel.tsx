@@ -11,9 +11,10 @@
  * owner stays pinned to this session (the host scope rule).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ConvViewProps } from "@deepseek-ai/dsh-client-ui-conversation/client";
-import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
+import { ProactiveHostTransport, type PanelSnapshotDto, type WorkspaceInfo } from "./host-api.js";
+import { EMPTY_SOURCE, bindSource, type WorkspacesSource } from "./workspaces-source.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
 import {
   AlarmTable, CreateForm, LoadingBlock,
@@ -23,12 +24,13 @@ import {
 import { useProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
 
-export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement {
+export function ProactiveSessionPanel(props: ConvViewProps & { workspaces?: WorkspacesSource }): React.ReactElement {
   const copy = useProactiveLocale();
   const sessionId = String(props.sessionId);
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
   const [knownSessions, setKnownSessions] = useState<ReadonlyMap<string, string>>(new Map());
+  const [sessionCwds, setSessionCwds] = useState<ReadonlyMap<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -38,6 +40,16 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
   // response overwrite the current session's snapshot.
   const sessionRef = useRef(sessionId);
   sessionRef.current = sessionId;
+
+  // Workspace rows from the live client service (same store the sidebar
+  // reads; subscribe + cached snapshot, no HTTP round trip).
+  const workspacesBound = useMemo(() => bindSource(props.workspaces ?? EMPTY_SOURCE), [props.workspaces]);
+  const workspacesSnapshot = useSyncExternalStore(workspacesBound.subscribe, workspacesBound.getSnapshot);
+  const knownWorkspaces = useMemo<readonly WorkspaceInfo[]>(() => workspacesSnapshot.items.map((item) => ({
+    id: item.workspaceId,
+    title: item.title !== "" ? item.title : item.path,
+    path: item.path
+  })), [workspacesSnapshot]);
 
   useEffect(() => {
     injectProactiveStyles();
@@ -50,6 +62,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       if (sessionRef.current !== requested) return; // stale: a newer session is now active
       setSnapshot(next.snapshot);
       setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
+      setSessionCwds(new Map(next.sessions.filter((session) => session.cwd !== undefined).map((session) => [session.id, session.cwd as string])));
       setError(null);
     } catch (reason) {
       if (sessionRef.current !== requested) return;
@@ -94,6 +107,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       if (sessionRef.current !== requested) return; // stale action response from a previous session
       setSnapshot(next.snapshot);
       setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
+      setSessionCwds(new Map(next.sessions.filter((session) => session.cwd !== undefined).map((session) => [session.id, session.cwd as string])));
       setShowForm(false);
       setEditingId(null);
       setForm(newAlarmForm(defaultPromptOf(next.snapshot), sessionRef.current));
@@ -105,6 +119,14 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       setBusy(false);
     }
   }, [busy, transport, refresh]);
+
+  /** Workspace picker preselect: the workspace owning THIS session. */
+  const defaultWorkspaceId = useMemo(() => {
+    if (knownWorkspaces.length === 0) return undefined;
+    const cwd = sessionCwds.get(sessionId);
+    if (cwd === undefined) return undefined;
+    return knownWorkspaces.find((workspace) => workspace.path === cwd)?.id;
+  }, [sessionId, knownWorkspaces, sessionCwds]);
 
   const submitCreate = useCallback(async () => {
     await run({ kind: "create", sessionId, args: createArgsFromForm(form) });
@@ -129,7 +151,15 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
     setShowForm(true);
   }, [snapshot]);
 
-  const alarms: AlarmRow[] = snapshot?.alarms ?? [];
+  /** Workspace-target display titles for the table, from the live source. */
+  const workspaceTitles = useMemo(() => new Map(knownWorkspaces.map((workspace) => [workspace.id, workspace.title])), [knownWorkspaces]);
+  const alarms: AlarmRow[] = useMemo(() => {
+    const rows = snapshot?.alarms ?? [];
+    if (workspaceTitles.size === 0) return rows;
+    return rows.map((alarm) => alarm.targetWorkspaceId !== undefined && (alarm.targetWorkspaceTitle === undefined || alarm.targetWorkspaceTitle === "")
+      ? { ...alarm, targetWorkspaceTitle: workspaceTitles.get(alarm.targetWorkspaceId) ?? "" }
+      : alarm);
+  }, [snapshot, workspaceTitles]);
   const loading = snapshot === null && error === null;
   const runsByAlarm = useMemo(() => {
     const map = new Map<string, RunRow[]>();
@@ -159,6 +189,7 @@ export function ProactiveSessionPanel(props: ConvViewProps): React.ReactElement 
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
           copy={copy} editing={editingId !== null} knownSessions={knownSessions}
+          knownWorkspaces={knownWorkspaces} defaultWorkspaceId={defaultWorkspaceId}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 

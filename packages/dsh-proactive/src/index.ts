@@ -19,12 +19,13 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import { resolveConfig } from "./config.js";
 import { ProactiveStore } from "./store.js";
 import { ProactiveScheduler } from "./scheduler.js";
-import { WakeDriver, type WakeDriverDeps } from "./wake.js";
+import { WakeDriver, type AgentPresetsPort, type WakeDriverDeps } from "./wake.js";
 import { registerProactiveTools } from "./tools.js";
 import { ProactivePanelService } from "./panel/service.js";
 import { installPanelRoutes } from "./panel/routes.js";
 import { wireSettings } from "./settings.js";
 import { PROACTIVE_PLUGIN } from "./domain.js";
+import { createWorkspaceWakePort, liveEventsOf, resolveWorkspaceArg, type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type WorkspaceRegistryFacade } from "./workspace.js";
 
 export const name = PROACTIVE_PLUGIN;
 export const inject = ["agents", "tools", "sessionPersistence"];
@@ -69,8 +70,11 @@ function resolveSessionTitle(_ctx: unknown): (sessionId: string) => string {
 
 /** Session-owned events from the live in-memory store (cordis augmentation not typed here). */
 function sessionEventsOf(ctx: Context): (sessionId: string) => readonly unknown[] | undefined {
-  const sessions = ctx.get("sessions", false) as { get?: (id: string) => { events?: readonly unknown[] } | undefined } | undefined;
-  return (sessionId) => sessions?.get?.(sessionId)?.events;
+  const sessions = ctx.get("sessions", false) as { get?: (id: string) => LiveSessionLike | undefined } | undefined;
+  return (sessionId) => {
+    const session = sessions?.get?.(sessionId);
+    return session === undefined ? undefined : liveEventsOf(session);
+  };
 }
 
 export async function apply(ctx: Context): Promise<() => Promise<void>> {
@@ -88,13 +92,50 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     ctx.logger.warn("dsh-proactive: alarms.json is corrupt or unreadable; starting with an empty store. Fix or remove " + config.dataDir + "/alarms.json to restore alarms.");
   }
 
+  // Workspace world (target_mode "workspace"): the registry itself, the live
+  // session store, cold persistence headers, and the persisted projection
+  // cache are all read defensively — a host without dsh-workspace keeps every
+  // other feature and workspace-targeted alarms fail closed with a clear error.
+  const registry = ctx.get("workspaceRegistry", false) as WorkspaceRegistryFacade | undefined;
+  if (registry === undefined) {
+    ctx.logger.warn("dsh-proactive: ctx.workspaceRegistry is not available; workspace-target alarms will fail until a profile with dsh-workspace runs this host.");
+  }
+  const resolveWorkspace = registry === undefined
+    ? undefined
+    : (args: Record<string, unknown>, sessionCwd?: string) => resolveWorkspaceArg(args, { registry, sessionCwd });
+  // The persistence service plays two narrow roles (fork seed reads via
+  // inspect, cold workspace ranking via list); one cast covers both.
+  const persistenceService = ctx.get("sessionPersistence", false) as
+    (WakeDriverDeps["sessionPersistence"] & { list(): Promise<readonly SessionHeaderLike[]> }) | undefined;
+  // The preset roster joins every wake agent to its session's preset — the
+  // same defensive read as above: without dsh-agent-presets in the profile
+  // (rosterless deployment) wake agents stay on the host-plane registry.
+  const presetsService = ctx.get("agentPresets", false) as AgentPresetsPort | undefined;
+  if (presetsService === undefined) {
+    ctx.logger.warn("dsh-proactive: ctx.agentPresets is not available; cold-wake agents will compose without a preset (host-plane tools only).");
+  }
+  const workspaces = registry === undefined
+    ? undefined
+    : createWorkspaceWakePort({
+        registry,
+        liveSessions: () => {
+          const sessions = ctx.get("sessions", false) as { list?: () => readonly LiveSessionLike[] } | undefined;
+          return sessions?.list?.() ?? [];
+        },
+        coldHeaders: persistenceService === undefined ? undefined : () => persistenceService.list(),
+        projectionCache: ctx.get("sessionProjectionCache", false) as ProjectionCacheLike | undefined,
+        log: (level, message) => ctx.logger[level](message)
+      });
+
   const driver = new WakeDriver({
     agents: ctx.agents,
     // Cold-parent fork seed reads go through the same persistence service the
     // web host uses; degraded to a logged failed wake when absent (headless).
     // Access is defensive: the cordis augmentation for sessionPersistence only
     // exists when dsh-session-persistence types are loaded into the profile.
-    sessionPersistence: ctx.get("sessionPersistence", false) as WakeDriverDeps["sessionPersistence"] | undefined,
+    sessionPersistence: persistenceService,
+    workspaces,
+    agentPresets: presetsService,
     modelSelection: () => currentModelSelection(ctx),
     store,
     config,
@@ -121,7 +162,8 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       config,
       driver,
       scheduler,
-      now: () => Date.now()
+      now: () => Date.now(),
+      resolveWorkspace
     });
   };
   const stopCreated = ctx.on("agent/created", ({ agent }: { agent: Agent }) => {
@@ -139,7 +181,8 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     now: () => Date.now(),
     log: (level, message) => ctx.logger[level](message),
     sessionTitle: resolveSessionTitle(ctx),
-    sessionEvents: sessionEventsOf(ctx)
+    sessionEvents: sessionEventsOf(ctx),
+    resolveWorkspace
   });
 
   // Optional surfaces: panel HTTP routes (needs the host webserver) and the

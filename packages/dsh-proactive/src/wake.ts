@@ -10,11 +10,24 @@
  *   target new    -> drive the wake in a brand-new empty session.
  *                    Fork/new children are real persisted sessions and stay in
  *                    the sidebar once created.
+ *   target workspace -> resolve the destination at fire time through the
+ *                    WorkspaceWakePort (most recently updated session in the
+ *                    workspace; else its newest blank New Session slot; else a
+ *                    fresh session created with meta.cwd = the workspace path
+ *                    and attached to the workspace). The session arm is the
+ *                    plain resume flow; the create arm mirrors target new plus
+ *                    the workspace attach.
  *
  * Every created/resumed agent gets a model-selection installed on its scope
  * (mirroring the web host's selectionFor), so its first buildRequest resolves
  * provider/model even when AgentOptions are empty: the session's own committed
- * request header wins, agentDefaultModel is the fallback.
+ * request header wins, agentDefaultModel is the fallback. It is also composed
+ * onto the session's agent preset (mirroring the web host's composeAgent):
+ * preset-owned tools live on the agent's scope, so a resume/create that skips
+ * the join leaves the agent on the host-plane-only registry — bash, read, ...
+ * all answer "unknown tool". The preset id comes from the session's own header
+ * plus any later `agent-preset/selected` events, so a wake rebuilds the exact
+ * composition the session's history ran under.
  *
  *   busy agent    -> runMaintenance throws; caller retries after a short delay
  *   deep silence  -> the framing + no_reply contract; the observer
@@ -24,9 +37,11 @@
  * agent is a process-local runtime; the persisted session itself stays intact).
  */
 
+import type { Context } from "@deepseek-ai/cordis";
 import type { Agent, AgentOptions, AgentSetup, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
-import type { EpochHeader, SessionEvent } from "@deepseek-ai/dsh-session";
+import * as agentPresetsModule from "@deepseek-ai/dsh-agent-presets";
+import type { EpochHeader, SessionEvent, SessionHeader } from "@deepseek-ai/dsh-session";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_COMPACTION, type Alarm, type AlarmCompaction, type RunDecision } from "./domain.js";
 import type { ProactiveStore } from "./store.js";
@@ -36,6 +51,7 @@ import { createFramingMessage, type FramingContext } from "./framing.js";
 import type { UserPresence } from "./framing.js";
 import { isInQuietHours } from "./config.js";
 import { applyWakeCompaction, planWakeCompaction, type CompactEvent, type CompactSession } from "./compact.js";
+import type { WorkspaceWakePort } from "./workspace.js";
 
 export interface WakeAnalysisResult {
   decision: RunDecision;
@@ -56,6 +72,39 @@ export type WakeFireResult =
   | { outcome: "busy" }
   | { outcome: "failed"; error: string; sessionId?: string };
 
+/**
+ * The live Session log surface across host lines: 0.1.1-rc.2 exposes `.events`,
+ * 0.1.2-rc.1 replaced it with `snapshotEvents()` (`.seq` and `requestHeader()`
+ * exist in both). A profile may run either line, so read the log through
+ * whichever surface the live Session carries. A session still being created
+ * has an empty log either way.
+ */
+export function sessionLogOf(session: unknown): readonly unknown[] {
+  const probe = session as { events?: readonly unknown[]; snapshotEvents?: () => readonly unknown[] };
+  if (Array.isArray(probe.events)) return probe.events;
+  if (typeof probe.snapshotEvents === "function") return probe.snapshotEvents();
+  return [];
+}
+
+/**
+ * The session's effective preset id, latest `agent-preset/selected` first,
+ * header stamp second. Uses the upstream `resolveSessionPreset` when the
+ * installed dsh-agent-presets exports it (0.1.1-rc.2 does); 0.1.2-rc.1
+ * REMOVED the export, and a named import would then fail at ESM link time
+ * and take the whole plugin tree down — the namespace import lets us fall
+ * back to this identical local fold instead.
+ */
+const upstreamResolveSessionPreset = (agentPresetsModule as unknown as { resolveSessionPreset?: (session: { header: { agentPreset?: string }; events: readonly unknown[] }) => string | undefined }).resolveSessionPreset;
+
+export function resolveSessionPresetOf(session: { header: { agentPreset?: string }; events: readonly unknown[] }): string | undefined {
+  if (typeof upstreamResolveSessionPreset === "function") return upstreamResolveSessionPreset(session);
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index] as { type?: string; data?: { agentPreset?: string } } | null;
+    if (event?.type === "agent-preset/selected") return event.data?.agentPreset;
+  }
+  return session.header.agentPreset;
+}
+
 /** Narrow facade over the pieces of AgentRegistry / agents we actually use. */
 export interface AgentsFacade {
   get(sessionId: string): Agent | undefined;
@@ -69,7 +118,18 @@ export interface AgentsFacade {
  * keeps the driver independent of dsh-session-persistence internals.
  */
 export interface SessionInspectLike {
-  inspect(sessionId: string): Promise<{ meta?: { cwd?: string }; events: readonly SessionEvent[] }>;
+  inspect(sessionId: string): Promise<{ meta?: SessionHeader; events: readonly SessionEvent[] }>;
+}
+
+/**
+ * Narrow facade over ctx.agentPresets: join one agent's scope to the standing
+ * mount of one preset. The plugin resolves this from ctx (absent on a
+ * rosterless deployment, where cold wakes stay on the host-plane registry).
+ */
+export interface AgentPresetsPort {
+  /** The preset id mounted when a caller names none (AgentPresets.defaultId). */
+  readonly defaultId: string;
+  mount(agentCtx: Context, id?: string): Promise<unknown>;
 }
 
 /**
@@ -90,7 +150,7 @@ export interface CreateFacadeOptions {
   seed?: readonly SessionEvent[];
   agentOptions?: AgentOptions;
   setup?: AgentSetup;
-  meta?: { cwd?: string; parentSession?: string; seedLength?: number };
+  meta?: { cwd?: string; parentSession?: string; seedLength?: number; agentPreset?: string };
 }
 
 /** The handle surface we consume (dsh-agent AgentHandle). */
@@ -103,6 +163,10 @@ export interface WakeDriverDeps {
   agents: AgentsFacade;
   /** Persisted-session reader for forking from cold parents (optional: fork degrades to failed when absent). */
   sessionPersistence?: SessionInspectLike;
+  /** Workspace destination resolution for target_mode workspace alarms (absent -> those alarms fail loudly). */
+  workspaces?: WorkspaceWakePort;
+  /** Preset roster for composing wake agents onto their session's preset (absent on a rosterless deployment). */
+  agentPresets?: AgentPresetsPort;
   /** Provider/model override for resumed/created agents (from ctx.agentDefaultModel or config). */
   modelSelection: () => { provider?: string; model?: string } | undefined;
   store: ProactiveStore;
@@ -159,7 +223,7 @@ export class WakeDriver {
         append: CompactSession["append"];
       };
       if (typeof session.append !== "function") return;
-      const events = agent.session.events as unknown as CompactEvent[];
+      const events = sessionLogOf(agent.session) as unknown as CompactEvent[];
       const plan = planWakeCompaction(events, startIndex);
       if (plan === undefined) return;
       if (applyWakeCompaction(session as CompactSession, plan, events, alarm, firedAt, compaction, reason, this.deps.log)) {
@@ -202,22 +266,127 @@ export class WakeDriver {
     installModelSelection(agentCtx as Parameters<typeof installModelSelection>[0], this.createWakeSelection(agent));
   }
 
-  /** Events + workspace cwd of a parent session, live agent first, then persistence. */
-  private async parentLog(parentId: string): Promise<{ events: readonly SessionEvent[]; cwd?: string } | undefined> {
+  /**
+   * Creation meta recording the default preset, so a fresh child's header
+   * names the composition it runs under (the web host records the same on
+   * every create). `undefined` on a rosterless deployment.
+   */
+  private defaultPresetMeta(): { agentPreset?: string } | undefined {
+    const presets = this.deps.agentPresets;
+    return presets === undefined ? undefined : { agentPreset: presets.defaultId };
+  }
+
+  /**
+   * Creation/resume-time composition, the web host's exact pattern
+   * (composeAgent in the session controller): model selection first, then the
+   * session's own preset — resolved from its header plus any later
+   * `agent-preset/selected` events, so a wake rebuilds the exact composition
+   * the session's history ran under. Without the join a preset-world agent
+   * resolves only host-plane tools (bash/read/... all "unknown tool"), which
+   * is the cold-wake defect this exists to prevent.
+   *
+   * Setup-time shape notes: a session being CREATED has an empty log at setup
+   * (sessionLogOf → []; the header already carries the creation meta's preset
+   * stamp, which the empty-log resolve falls back to), and resolveSessionPreset
+   * reads `.events` directly, so it always receives the compat-adapted view —
+   * never the raw live Session.
+   */
+  private async composeAgent(agentCtx: unknown): Promise<void> {
+    this.installSelection(agentCtx);
+    const presets = this.deps.agentPresets;
+    if (presets === undefined) return;
+    const agent = (agentCtx as unknown as { agent: Agent }).agent;
+    const log = sessionLogOf(agent.session) as readonly SessionEvent[];
+    const presetId = resolveSessionPresetOf({ header: agent.session.header, events: log });
+    await presets.mount(agentCtx as Context, presetId);
+  }
+
+  /**
+   * Events + workspace cwd + preset of a parent session, live agent first,
+   * then persistence. The preset rides the fork child's meta so its header
+   * records the composition its inherited history ran under.
+   */
+  private async parentLog(parentId: string): Promise<{ events: readonly SessionEvent[]; cwd?: string; presetId?: string } | undefined> {
     const live = this.deps.agents.get(parentId);
     if (live !== undefined) {
+      const log = sessionLogOf(live.session) as unknown as SessionEvent[];
       return {
-        events: live.session.events as unknown as SessionEvent[],
-        cwd: (live.session as unknown as { meta?: { cwd?: string } }).meta?.cwd
+        events: log,
+        cwd: live.session.header.cwd,
+        presetId: resolveSessionPresetOf({ header: live.session.header, events: log })
       };
     }
     if (this.deps.sessionPersistence === undefined) return undefined;
     try {
       const inspected = await this.deps.sessionPersistence.inspect(parentId);
-      return { events: inspected.events, cwd: inspected.meta?.cwd };
+      return {
+        events: inspected.events,
+        cwd: inspected.meta?.cwd,
+        presetId: inspected.meta === undefined ? undefined : resolveSessionPresetOf({ header: inspected.meta, events: inspected.events })
+      };
     } catch {
       return undefined;
     }
+  }
+
+  /** Acquire the agent for one session id: live reuse or cold resume. */
+  private async acquireForResume(sessionId: string): Promise<{ agent: Agent; handle: AgentHandleLike | null; presence: UserPresence }> {
+    const live = this.deps.agents.get(sessionId);
+    if (live !== undefined) return { agent: live, handle: null, presence: "live" };
+    const handle = await this.deps.agents.resume({
+      resumeSessionId: sessionId,
+      agentOptions: this.agentOptions(),
+      setup: (agentCtx) => this.composeAgent(agentCtx)
+    });
+    return { agent: handle.agent, handle, presence: "cold" };
+  }
+
+  /** Deliver the framed wake to `agent` and analyze the settled turn. */
+  private async drive(alarm: Alarm, agent: Agent, actualSessionId: string, presence: UserPresence): Promise<WakeFireResult> {
+    const now = this.deps.now?.() ?? Date.now();
+    const firedAt = new Date(now);
+    const startIndex = agent.session.seq;
+    const context: FramingContext = {
+      alarm,
+      quiet: isInQuietHours(now, this.deps.config),
+      now: firedAt,
+      userPresence: presence
+    };
+    const message = createFramingMessage(context);
+    let claimed = false;
+    try {
+      claimed = await agent.runMaintenance(() => {
+        agent.followup(message);
+        return Promise.resolve(true);
+      });
+    } catch (_busy) {
+      claimed = false;
+    }
+    if (!claimed) return { outcome: "busy" };
+    await agent.whenIdle();
+    const analysis = analyzeWakeTurn(sessionLogOf(agent.session) as unknown as MinimalEvent[], startIndex);
+    // Nothing user-visible came out of this wake: collapse the whole
+    // exchange on the model surface so hourly reminders never pollute the
+    // session context (see compact.ts).
+    if (analysis.decision === "no_reply" || analysis.decision === "failed") {
+      const compaction = alarm.compaction ?? DEFAULT_COMPACTION;
+      if (compaction !== "off") {
+        this.compactWake(agent, startIndex, alarm, firedAt, compaction, analysis.noReplyReason);
+      }
+    }
+    return {
+      outcome: "ok",
+      sessionId: actualSessionId,
+      analysis: {
+        decision: analysis.decision,
+        budgetDelta: analysis.budgetDelta,
+        ...(analysis.leaked ? { leaked: true } : {}),
+        ...(analysis.note !== undefined ? { note: analysis.note } : {}),
+        ...(analysis.reasoningSummary !== undefined ? { reasoningSummary: analysis.reasoningSummary } : {}),
+        ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {}),
+        ...(analysis.noReplyReason !== undefined ? { noReplyReason: analysis.noReplyReason } : {})
+      }
+    };
   }
 
   async fire(alarm: Alarm): Promise<WakeFireResult> {
@@ -226,70 +395,72 @@ export class WakeDriver {
     let ownedHandle: AgentHandleLike | null = null;
     let agent: Agent | undefined;
     let presence: UserPresence = "live";
-    // The session the wake will actually run in (differs from the owner for fork/new).
+    // The session the wake will actually run in (differs from the owner for fork/new/workspace-create).
     let actualSessionId = "";
-    const drive = async (): Promise<WakeFireResult> => {
-      const now = this.deps.now?.() ?? Date.now();
-      const firedAt = new Date(now);
-      const startIndex = agent!.session.events.length;
-      const context: FramingContext = {
-        alarm,
-        quiet: isInQuietHours(now, this.deps.config),
-        now: firedAt,
-        userPresence: presence
-      };
-      const message = createFramingMessage(context);
-      let claimed = false;
-      try {
-        claimed = await agent!.runMaintenance(() => {
-          agent!.followup(message);
-          return Promise.resolve(true);
-        });
-      } catch (_busy) {
-        claimed = false;
-      }
-      if (!claimed) return { outcome: "busy" };
-      await agent!.whenIdle();
-      const analysis = analyzeWakeTurn(agent!.session.events as unknown as MinimalEvent[], startIndex);
-      // Nothing user-visible came out of this wake: collapse the whole
-      // exchange on the model surface so hourly reminders never pollute the
-      // session context (see compact.ts).
-      if (analysis.decision === "no_reply" || analysis.decision === "failed") {
-        const compaction = alarm.compaction ?? DEFAULT_COMPACTION;
-        if (compaction !== "off") {
-          this.compactWake(agent!, startIndex, alarm, firedAt, compaction, analysis.noReplyReason);
-        }
-      }
-      return {
-        outcome: "ok",
-        sessionId: actualSessionId,
-        analysis: {
-          decision: analysis.decision,
-          budgetDelta: analysis.budgetDelta,
-          ...(analysis.leaked ? { leaked: true } : {}),
-          ...(analysis.note !== undefined ? { note: analysis.note } : {}),
-          ...(analysis.reasoningSummary !== undefined ? { reasoningSummary: analysis.reasoningSummary } : {}),
-          ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {}),
-          ...(analysis.noReplyReason !== undefined ? { noReplyReason: analysis.noReplyReason } : {})
-        }
-      };
-    };
+    // The session currently holding the inflight guard ("" = none yet).
+    let guardSessionId = "";
     try {
+      if (alarm.target.mode === "workspace") {
+        const port = this.deps.workspaces;
+        if (port === undefined) {
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace alarms are unavailable on this host (no workspace registry)");
+          return { outcome: "failed", error: "workspace alarms are unavailable on this host (no workspace registry)" };
+        }
+        let destination;
+        try {
+          destination = await port.resolveTarget(alarm.target.workspaceId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace resolution failed: " + message);
+          return { outcome: "failed", error: "workspace resolution failed: " + message };
+        }
+        if ("error" in destination) {
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + destination.error);
+          return { outcome: "failed", error: destination.error };
+        }
+        if (destination.kind === "session") {
+          if (this.inflightBySession.has(destination.sessionId)) return { outcome: "busy" };
+          this.inflightBySession.add(destination.sessionId);
+          guardSessionId = destination.sessionId;
+          actualSessionId = destination.sessionId;
+          const acquired = await this.acquireForResume(destination.sessionId);
+          agent = acquired.agent;
+          ownedHandle = acquired.handle;
+          presence = acquired.presence;
+          return await this.drive(alarm, agent, actualSessionId, presence);
+        }
+        // No eligible session: create a fresh one inside the workspace and
+        // attach it BEFORE driving, so a failed attach never delivers a wake
+        // into an ungrouped session.
+        actualSessionId = "session-" + randomUUID();
+        ownedHandle = await this.deps.agents.create({
+          sessionId: actualSessionId,
+          agentOptions: this.agentOptions(),
+          meta: { cwd: destination.cwd, ...this.defaultPresetMeta() },
+          setup: (agentCtx) => this.composeAgent(agentCtx)
+        });
+        try {
+          await port.attach(alarm.target.workspaceId, actualSessionId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error("workspace attach failed: " + message + " (created session " + actualSessionId + " is left unattached; it will not receive wakes)");
+        }
+        this.inflightBySession.add(actualSessionId);
+        guardSessionId = actualSessionId;
+        agent = ownedHandle.agent;
+        presence = "cold";
+        return await this.drive(alarm, agent, actualSessionId, presence);
+      }
       if (alarm.target.mode === "resume") {
         if (this.inflightBySession.has(alarm.target.sessionId)) return { outcome: "busy" };
         this.inflightBySession.add(alarm.target.sessionId);
+        guardSessionId = alarm.target.sessionId;
         actualSessionId = alarm.target.sessionId;
-        agent = this.deps.agents.get(alarm.target.sessionId);
-        if (agent === undefined) {
-          ownedHandle = await this.deps.agents.resume({
-            resumeSessionId: alarm.target.sessionId,
-            agentOptions: this.agentOptions(),
-            setup: (agentCtx) => this.installSelection(agentCtx)
-          });
-          agent = ownedHandle.agent;
-          presence = "cold";
-        }
-        return await drive();
+        const acquired = await this.acquireForResume(alarm.target.sessionId);
+        agent = acquired.agent;
+        ownedHandle = acquired.handle;
+        presence = acquired.presence;
+        return await this.drive(alarm, agent, actualSessionId, presence);
       }
       // fork / new — build the child session and drive it there.
       if (alarm.target.mode === "fork") {
@@ -301,34 +472,41 @@ export class WakeDriver {
         if (cut === 0) {
           return { outcome: "failed", error: "fork unavailable: parent session has no completed turn", sessionId: alarm.target.sessionId };
         }
-        const meta = { parentSession: alarm.target.sessionId, seedLength: cut, ...(parent.cwd !== undefined ? { cwd: parent.cwd } : {}) };
+        const meta = {
+          parentSession: alarm.target.sessionId,
+          seedLength: cut,
+          ...(parent.cwd !== undefined ? { cwd: parent.cwd } : {}),
+          ...(parent.presetId !== undefined ? { agentPreset: parent.presetId } : {})
+        };
         actualSessionId = "session-" + randomUUID();
         ownedHandle = await this.deps.agents.create({
           sessionId: actualSessionId,
           seed: parent.events.slice(0, cut),
           meta,
           agentOptions: this.agentOptions(),
-          setup: (agentCtx) => this.installSelection(agentCtx)
+          setup: (agentCtx) => this.composeAgent(agentCtx)
         });
       } else {
         actualSessionId = "session-" + randomUUID();
         ownedHandle = await this.deps.agents.create({
           sessionId: actualSessionId,
           agentOptions: this.agentOptions(),
-          setup: (agentCtx) => this.installSelection(agentCtx)
+          meta: this.defaultPresetMeta(),
+          setup: (agentCtx) => this.composeAgent(agentCtx)
         });
       }
       this.inflightBySession.add(actualSessionId);
+      guardSessionId = actualSessionId;
       agent = ownedHandle.agent;
       presence = "cold";
-      return await drive();
+      return await this.drive(alarm, agent, actualSessionId, presence);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + message);
-      return { outcome: "failed", error: message, ...(actualSessionId !== undefined ? { sessionId: actualSessionId } : {}) };
+      return { outcome: "failed", error: message, ...(actualSessionId !== "" ? { sessionId: actualSessionId } : {}) };
     } finally {
       this.inflightByAlarm.delete(alarm.id);
-      if (agent !== undefined) this.inflightBySession.delete(actualSessionId);
+      if (guardSessionId !== "") this.inflightBySession.delete(guardSessionId);
       if (ownedHandle !== null) {
         await ownedHandle.dispose().catch((error) => {
           this.deps.log("warn", "dispose failed for resumed handle: " + String(error && error.message || error));

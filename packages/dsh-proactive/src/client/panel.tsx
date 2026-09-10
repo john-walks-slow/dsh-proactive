@@ -11,8 +11,9 @@
  * host-panel pseudo session when none is selected).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ProactiveHostTransport, type PanelSnapshotDto } from "./host-api.js";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { ProactiveHostTransport, type PanelSnapshotDto, type WorkspaceInfo } from "./host-api.js";
+import { EMPTY_SOURCE, bindSource, type WorkspacesSource } from "./workspaces-source.js";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
 import { MAX_PROMPT_LENGTH } from "../domain.js";
 import {
@@ -25,6 +26,13 @@ import { injectProactiveStyles } from "./style.js";
 
 export interface ProactivePanelProps {
   close: () => void;
+  /**
+   * Client-side workspace store (`ctx.get("workspaces")?.list`). Optional: a
+   * GUI without the workspace controller still mounts the panel — the
+   * workspace picker then disables with a hint. Live subscription, not a
+   * per-pull fetch: there is no workspace/list RPC.
+   */
+  workspaces?: WorkspacesSource;
   /**
    * Framework global-standard hook (every slot component receives it): reads
    * the GUI's current session selection, used as the create form's default
@@ -57,6 +65,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
   const transport = useMemo(() => new ProactiveHostTransport(), []);
   const [snapshot, setSnapshot] = useState<PanelSnapshotDto | null>(null);
   const [knownSessions, setKnownSessions] = useState<ReadonlyMap<string, string>>(new Map());
+  const [sessionCwds, setSessionCwds] = useState<ReadonlyMap<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -64,6 +73,16 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
   const [form, setForm] = useState<PanelCreateForm>(() => newAlarmForm("", ""));
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Workspace rows straight from the live client service (subscribe + cached
+  // snapshot — the same store the sidebar reads; no HTTP round trip).
+  const workspacesBound = useMemo(() => bindSource(props.workspaces ?? EMPTY_SOURCE), [props.workspaces]);
+  const workspacesSnapshot = useSyncExternalStore(workspacesBound.subscribe, workspacesBound.getSnapshot);
+  const knownWorkspaces = useMemo<readonly WorkspaceInfo[]>(() => workspacesSnapshot.items.map((item) => ({
+    id: item.workspaceId,
+    title: item.title !== "" ? item.title : item.path,
+    path: item.path
+  })), [workspacesSnapshot]);
 
   useEffect(() => {
     injectProactiveStyles();
@@ -78,6 +97,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
       const next = await transport.stateForHost();
       setSnapshot(next.snapshot);
       setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
+      setSessionCwds(new Map(next.sessions.filter((session) => session.cwd !== undefined).map((session) => [session.id, session.cwd as string])));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -115,6 +135,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
       const next = await transport.actionForHost(action);
       setSnapshot(next.snapshot);
       setKnownSessions(new Map(next.sessions.map((session) => [session.id, session.title])));
+      setSessionCwds(new Map(next.sessions.filter((session) => session.cwd !== undefined).map((session) => [session.id, session.cwd as string])));
       setShowForm(false);
       setEditingId(null);
       setForm(newAlarmForm(defaultPromptOf(next.snapshot), currentSession));
@@ -126,11 +147,24 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
     }
   }, [busy, transport, refresh, currentSession]);
 
-  /** Owner for a settings-page create: the wake target, or the GUI's current session for "new". */
+  /**
+   * Owner for a settings-page create: the wake target session for
+   * resume/fork; the GUI's current session for "new" and "workspace" (the
+   * workspace destination is dynamic, resolved at fire time).
+   */
   const ownerForCreate = useCallback((form_: PanelCreateForm): string => {
-    if ((form_.targetMode ?? "resume") === "new") return currentSession !== "" ? currentSession : HOST_PANEL_SESSION;
+    const mode = form_.targetMode ?? "resume";
+    if (mode === "new" || mode === "workspace") return currentSession !== "" ? currentSession : HOST_PANEL_SESSION;
     return (form_.targetSessionId ?? "").trim();
   }, [currentSession]);
+
+  /** Workspace picker preselect: the workspace owning the GUI's current session. */
+  const defaultWorkspaceId = useMemo(() => {
+    if (currentSession === "" || knownWorkspaces.length === 0) return undefined;
+    const cwd = sessionCwds.get(currentSession);
+    if (cwd === undefined) return undefined;
+    return knownWorkspaces.find((workspace) => workspace.path === cwd)?.id;
+  }, [currentSession, knownWorkspaces, sessionCwds]);
 
   const submitCreate = useCallback(async () => {
     await run({ kind: "create", sessionId: ownerForCreate(form), args: createArgsFromForm(form) });
@@ -156,7 +190,15 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
     });
   }, [run, draft, snapshot]);
 
-  const alarms: AlarmRow[] = snapshot?.alarms ?? [];
+  /** Workspace-target display titles for the table, from the live source. */
+  const workspaceTitles = useMemo(() => new Map(knownWorkspaces.map((workspace) => [workspace.id, workspace.title])), [knownWorkspaces]);
+  const alarms: AlarmRow[] = useMemo(() => {
+    const rows = snapshot?.alarms ?? [];
+    if (workspaceTitles.size === 0) return rows;
+    return rows.map((alarm) => alarm.targetWorkspaceId !== undefined && (alarm.targetWorkspaceTitle === undefined || alarm.targetWorkspaceTitle === "")
+      ? { ...alarm, targetWorkspaceTitle: workspaceTitles.get(alarm.targetWorkspaceId) ?? "" }
+      : alarm);
+  }, [snapshot, workspaceTitles]);
   const loading = snapshot === null && error === null;
 
   const openCreate = useCallback(() => {
@@ -267,6 +309,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
           copy={copy} editing={editingId !== null} knownSessions={knownSessions}
+          knownWorkspaces={knownWorkspaces} defaultWorkspaceId={defaultWorkspaceId}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 

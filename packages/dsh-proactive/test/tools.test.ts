@@ -40,7 +40,7 @@ class FakeStore {
   async spendBudget(): Promise<number> { return 0; }
 }
 
-function harness() {
+function harness(extra: Partial<ToolServices> = {}) {
   const store = new FakeStore();
   const activeWakes = new Set<string>();
   let requestDrives = 0;
@@ -52,13 +52,14 @@ function harness() {
     config,
     driver: { isActiveWake: (id: string) => activeWakes.has(id) } as unknown as WakeDriver,
     scheduler: { requestDrive: () => { requestDrives += 1; } } as unknown as ProactiveScheduler,
-    now: () => NOW
+    now: () => NOW,
+    ...extra
   } satisfies ToolServices;
   // Agent carries a live sessions facade: its own session has one user rpc
   // message carrying the browser zone, so omitted time_zone resolves there.
-  const sessionsFacade = { get: (id: string) => (id === "s1" ? { events: [{ type: "user/message", source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } }] } : undefined) };
+  const sessionsFacade = { get: (id: string) => (id === "s1" ? { events: [{ type: "user/message", time: 100, data: { source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } } }] } : undefined) };
   const agent = {
-    session: { id: "s1" },
+    session: { id: "s1", header: { cwd: "/work" } },
     // Cordis-shaped ctx: services resolve through get(name, false), so the
     // mock exposes the sessions facade the same way the runtime does.
     ctx: { get: (name: string) => (name === "sessions" ? sessionsFacade : undefined) }
@@ -151,6 +152,58 @@ test("proactive_set maps target_mode and target_session_id", async () => {
   // bad enum is gated by the tool schema before the closed domain validation
   await assert.rejects(h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "sidecar" }),
     (err: unknown) => (err as { code?: string })["code"] === "INVALID_ARGS");
+});
+
+test("proactive_set maps target_mode workspace through the create-side resolver", async () => {
+  // The resolver mirrors the real one (resolveWorkspaceArg over a registry):
+  // id passes through, path normalizes to the canonical id, default derives
+  // from the creator session's cwd, and its closed errors surface verbatim.
+  const seen: Record<string, unknown>[] = [];
+  const h = harness({
+    resolveWorkspace: async (args, sessionCwd) => {
+      seen.push({ ...args, __sessionCwd: sessionCwd });
+      // strip the path key exactly like the real resolver (resolveWorkspaceArg)
+      const { ["target_workspace_path"]: _strip, ...rest } = args;
+      if (rest["target_workspace_id"] === "ws-1") return { ...rest, target_workspace_id: "ws-1" };
+      if (args["target_workspace_path"] === "/repos/alpha") return { ...rest, target_workspace_id: "ws-1" };
+      if (rest["target_workspace_id"] === undefined && args["target_workspace_path"] === undefined) {
+        if (sessionCwd === "/work") return { ...rest, target_workspace_id: "ws-1" };
+        return { code: "not_found", message: "no workspace is registered for this session's directory (/other)" };
+      }
+      return { code: "not_found", message: "workspace not found" };
+    }
+  });
+  // explicit id
+  const byId = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-1" }));
+  assert.equal(byId.targetMode, "workspace");
+  assert.equal((byId as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-1");
+  assert.equal(byId.targetSessionId, undefined);
+  // path spelling normalizes before the closed validation
+  const byPath = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_path: "/repos/alpha" }));
+  assert.equal((byPath as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-1");
+  // no selector: the creator session's cwd (/work from the harness agent)
+  const byDefault = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace" }));
+  assert.equal((byDefault as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-1");
+  assert.equal(seen.length, 3);
+  assert.equal(seen[2]["__sessionCwd"], "/work");
+  // resolver error surfaces verbatim as the tool error
+  const missing = await h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-gone" });
+  assert.equal(code(missing), "not_found");
+  // resolver absent (headless host): closed not_found, nothing stored
+  const bare = harness();
+  const unavailable = await bare.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-1" });
+  assert.equal(code(unavailable), "not_found");
+  assert.ok(String((unavailable as { message?: string }).message).includes("unavailable on this host"));
+  // workspace + target_session_id is rejected by the closed validator
+  const mixed = harness({ resolveWorkspace: async (args) => args });
+  assert.equal(code(await mixed.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-1", target_session_id: "s9" })), "invalid_trigger");
+  // non-workspace modes reject target_workspace_id even when a resolver exists
+  const wrongMode = harness({ resolveWorkspace: async (args) => args });
+  assert.equal(code(await wrongMode.run("proactive_set", { prompt: "x", after_seconds: 5, target_workspace_id: "ws-1" })), "invalid_trigger");
+  bare.cleanup();
+  mixed.cleanup();
+  wrongMode.cleanup();
+  h.cleanup();
 });
 
 test("proactive_set respect_quiet_hours defaults to false and persists", async () => {

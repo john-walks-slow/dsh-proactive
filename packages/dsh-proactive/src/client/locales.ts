@@ -64,6 +64,11 @@ export interface ProactivePanelCopy {
   targetResume: string;
   targetFork: string;
   targetNew: string;
+  targetWorkspace: string;
+  targetWorkspaceLabel: string;
+  workspaceHint: string;
+  workspacePickPlaceholder: string;
+  noWorkspaces: string;
   quietLabel: string;
   /* runs table */
   runTime: string;
@@ -169,6 +174,11 @@ export const zh: ProactivePanelCopy = {
   targetResume: "会话",
   targetFork: "分支",
   targetNew: "新建",
+  targetWorkspace: "工作区",
+  targetWorkspaceLabel: "目标工作区",
+  workspaceHint: "唤醒会投递到该工作区最近更新的会话；无可用会话时在其内新建。",
+  workspacePickPlaceholder: "选择工作区…",
+  noWorkspaces: "暂无已注册工作区（先把目录注册为工作区，见侧边栏）",
   quietLabel: "免打扰",
   runTime: "时间",
   runDecision: "决策",
@@ -269,6 +279,11 @@ export const en: ProactivePanelCopy = {
   targetResume: "Session",
   targetFork: "Fork",
   targetNew: "New",
+  targetWorkspace: "Workspace",
+  targetWorkspaceLabel: "Target workspace",
+  workspaceHint: "The wake lands in the workspace's most recently updated session; a fresh one is created when it has none.",
+  workspacePickPlaceholder: "Pick a workspace…",
+  noWorkspaces: "No registered workspaces yet (register a directory as one in the sidebar first)",
   quietLabel: "Quiet",
   runTime: "Time",
   runDecision: "Decision",

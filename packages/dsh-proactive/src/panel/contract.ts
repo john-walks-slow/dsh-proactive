@@ -119,9 +119,11 @@ export interface PanelCreateForm {
   respectQuietHours?: boolean;
   /** Per-alarm silent-wake compaction; absent = DEFAULT_COMPACTION (minimal). */
   compaction?: "off" | "minimal" | "aggressive";
-  targetMode?: "resume" | "fork" | "new";
-  /** Destination for resume/fork; empty/absent = derive host-side. Ignored for new. */
+  targetMode?: "resume" | "fork" | "new" | "workspace";
+  /** Destination for resume/fork; empty/absent = derive host-side. Ignored for new/workspace. */
   targetSessionId?: string;
+  /** Destination workspace registry id, for targetMode workspace. */
+  targetWorkspaceId?: string;
 }
 
 /** Map a form to the shared argument root so one validator serves both surfaces. */
@@ -149,12 +151,15 @@ export function createArgsFromForm(form: PanelCreateForm): Record<string, unknow
   if (form.respectQuietHours !== undefined) args["respect_quiet_hours"] = form.respectQuietHours;
   if (form.compaction !== undefined) args["compaction"] = form.compaction;
   if (form.targetMode !== undefined && form.targetMode !== "resume") args["target_mode"] = form.targetMode;
-  // A stale id left over from switching modes must not leak into a "new"
-  // target (the shared validator rejects that combination), and resume/fork
-  // ids are sent trimmed so a padded input never fails validation.
-  if (form.targetMode !== "new") {
+  // A stale id left over from switching modes must not leak into a "new" or
+  // "workspace" target (the shared validator rejects those combinations);
+  // resume/fork ids are sent trimmed so a padded input never fails validation.
+  if (form.targetMode !== "new" && form.targetMode !== "workspace") {
     const targetSessionId = (form.targetSessionId ?? "").trim();
     if (targetSessionId !== "") args["target_session_id"] = targetSessionId;
+  }
+  if (form.targetMode === "workspace" && (form.targetWorkspaceId ?? "").trim() !== "") {
+    args["target_workspace_id"] = (form.targetWorkspaceId ?? "").trim();
   }
   return args;
 }

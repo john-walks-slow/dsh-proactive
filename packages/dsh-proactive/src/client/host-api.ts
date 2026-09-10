@@ -12,18 +12,24 @@ import type { PanelAction } from "../panel/contract.js";
 /**
  * One alarm row on the wire (v2): `sessionId` keeps its historical meaning of
  * OWNER; the wake destination is surface separately via targetMode /
- * targetSessionId (owner ⇔ create-side, target ⇔ wake-side).
+ * targetSessionId (owner ⇔ create-side, target ⇔ wake-side). A workspace
+ * target names the workspace by id; the destination session is resolved at
+ * fire time and never appears here.
  */
 export interface AlarmRowDto {
   id: string;
   sessionId: string;
   sessionTitle: string;
   type: "once" | "every" | "cron";
-  targetMode: "resume" | "fork" | "new";
+  targetMode: "resume" | "fork" | "new" | "workspace";
   /** Present for resume/fork targets. */
   targetSessionId?: string;
   /** Display title of the target session (client-enriched; empty = unknown). */
   targetSessionTitle?: string;
+  /** Present for workspace targets: the workspace registry id. */
+  targetWorkspaceId?: string;
+  /** Display title of the target workspace (client-enriched; empty = unknown). */
+  targetWorkspaceTitle?: string;
   respectQuietHours: boolean;
   prompt: string;
   nextDueAt: string;
@@ -58,6 +64,21 @@ export interface PanelErrorDto {
 export interface SessionInfo {
   id: string;
   title: string;
+  /** Session working directory (header passthrough); used to match a session to its workspace. */
+  cwd?: string;
+}
+
+/** One workspace row for pickers and titles (from the live client `workspaces` service). */
+export interface WorkspaceInfo {
+  id: string;
+  title: string;
+  path: string;
+}
+
+/** One full panel data pull: scoped snapshot plus the shared session list. */
+export interface HostBundle {
+  snapshot: PanelSnapshotDto;
+  sessions: SessionInfo[];
 }
 
 function isPanelError(body: PanelSnapshotDto | PanelErrorDto): body is PanelErrorDto {
@@ -84,14 +105,18 @@ export class ProactiveHostTransport {
   }
 
   /**
-   * Snapshot plus the complete session list (ids + titles), in one round
-   * trip: titles enrich alarm rows, and the id set feeds the create form's
-   * unknown-target hint. Both surfaces use this (the session tab passes its
-   * own sessionId to keep the scoped snapshot).
+   * Snapshot plus the complete session list, in one round trip: titles enrich
+   * alarm rows and the id set feeds the create form's unknown-target hint.
+   * Workspace rows are NOT here — they come from the client-side
+   * `workspaces` service (see workspaces-source.ts). Both surfaces use this
+   * (the session tab passes its own sessionId to keep the scoped snapshot).
    */
-  async stateForHost(sessionId?: string): Promise<{ snapshot: PanelSnapshotDto; sessions: SessionInfo[] }> {
+  async stateForHost(sessionId?: string): Promise<HostBundle> {
     const [snapshot, sessions] = await Promise.all([this.state(sessionId), fetchSessionList()]);
-    return { snapshot: withSessionTitles(snapshot, toTitleMap(sessions)), sessions };
+    return {
+      snapshot: withTitles(snapshot, toTitleMap(sessions)),
+      sessions
+    };
   }
 
   /** Run one closed action; the returned snapshot follows the same scope. */
@@ -109,9 +134,12 @@ export class ProactiveHostTransport {
   }
 
   /** Like `stateForHost` for closed actions: refreshed snapshot + session list. */
-  async actionForHost(action: PanelAction, sessionId?: string): Promise<{ snapshot: PanelSnapshotDto; sessions: SessionInfo[] }> {
+  async actionForHost(action: PanelAction, sessionId?: string): Promise<HostBundle> {
     const [snapshot, sessions] = await Promise.all([this.action(action, sessionId), fetchSessionList()]);
-    return { snapshot: withSessionTitles(snapshot, toTitleMap(sessions)), sessions };
+    return {
+      snapshot: withTitles(snapshot, toTitleMap(sessions)),
+      sessions
+    };
   }
 
   /**
@@ -132,12 +160,13 @@ export class ProactiveHostTransport {
 }
 
 /**
- * Overlay the session-title map onto alarm rows (server title wins, then map,
- * then raw id). Both the owner (`sessionId`) and the wake target
+ * Overlay the session title map onto alarm rows (server title wins, then map,
+ * then raw id). The owner (`sessionId`) and the wake target
  * (`targetSessionId`) get display titles, so the table can show either as a
- * readable name without fetching session.list again.
+ * readable name without fetching session.list again. Workspace target titles
+ * are overlaid separately by the panels from the live workspaces source.
  */
-function withSessionTitles(snapshot: PanelSnapshotDto, titles: Map<string, string>): PanelSnapshotDto {
+function withTitles(snapshot: PanelSnapshotDto, titles: Map<string, string>): PanelSnapshotDto {
   if (titles.size === 0) return snapshot;
   return {
     ...snapshot,
@@ -156,36 +185,50 @@ function withSessionTitles(snapshot: PanelSnapshotDto, titles: Map<string, strin
 
 interface SessionListEntry {
   sessionId: string;
+  cwd?: string;
   projections?: { values?: { title?: string | null } } | null;
 }
 
 interface SessionListResponse {
-  result: { value: { items?: SessionListEntry[] } };
+  type: "server-response";
+  result: { ok: true; value: { items?: SessionListEntry[] } } | { ok: false; error: { code: string; message: string } };
 }
 
-const SESSION_LIST_URL = "/api/session.list";
+/** The two-segment gateway endpoint for the session-list RPC (namespaced, not dotted). */
+const SESSION_LIST_URL = "/api/session/list";
 
 /**
- * One extra call to the host's session.list RPC, mirroring how the sidebar
- * derives display titles: the durable title lives in each entry's
- * `projections.values.title` (folded by the session-title projection), not in
- * the raw summary. Returns the complete session list (empty = unknown /
- * fetch failure — the panel then degrades: no title enrichment, no
- * unknown-target hint).
+ * One extra call to the host's `session/list` RPC — the same call the sidebar
+ * makes — in the typert-gateway client-request envelope (`payload.args`
+ * carries the method's single `_request` parameter). Display titles live in
+ * each entry's `projections.values.title` (folded by the session-title
+ * projection), `cwd` matches sessions to workspaces. Returns the complete
+ * session list (empty = unknown / fetch failure — the panel then degrades:
+ * no title enrichment, no unknown-target hint).
  */
 export async function fetchSessionList(): Promise<SessionInfo[]> {
   try {
     const response = await fetch(SESSION_LIST_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "client-request", rpcId: "dsh-proactive:session-list", method: "session.list", params: {}, payload: {} })
+      body: JSON.stringify({
+        type: "client-request",
+        rpcId: "dsh-proactive:session-list",
+        method: "session/list",
+        payload: { args: { _request: {} } }
+      })
     });
     if (!response.ok) return [];
     const body = (await response.json()) as SessionListResponse;
+    if (body?.result?.ok !== true) return [];
     const sessions: SessionInfo[] = [];
-    for (const entry of body?.result?.value?.items ?? []) {
+    for (const entry of body.result.value.items ?? []) {
       const title = entry.projections?.values?.title;
-      sessions.push({ id: entry.sessionId, title: typeof title === "string" && title !== "" ? title : "" });
+      sessions.push({
+        id: entry.sessionId,
+        title: typeof title === "string" && title !== "" ? title : "",
+        ...(typeof entry.cwd === "string" && entry.cwd !== "" ? { cwd: entry.cwd } : {})
+      });
     }
     return sessions;
   } catch {

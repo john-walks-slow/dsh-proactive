@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { effectiveTimeZone, wireTimeZones, SYSTEM_DEFAULT_TIME_ZONE } from "../src/zone.js";
 
-const userMsg = (zone: string) => ({ type: "user/message", source: { kind: "user", rpcId: "r1", clientTimeZone: zone } });
+const userMsg = (zone: string) => ({ type: "user/message", time: 100, data: { source: { kind: "user", rpcId: "r1", clientTimeZone: zone } } });
 
 test("explicit non-empty zone wins over everything", () => {
   assert.equal(effectiveTimeZone("Asia/Shanghai", [userMsg("America/New_York")]), "Asia/Shanghai");
@@ -19,7 +19,7 @@ test("omitted zone resolves from the newest user rpc message (newest first)", ()
     { type: "assistant/message", data: {} },
     userMsg("America/New_York"),
     userMsg("Asia/Tokyo"),
-    { type: "user/message", source: { kind: "user", rpcId: "r2" } } // no zone on this one
+    { type: "user/message", time: 100, data: { source: { kind: "user", rpcId: "r2" } } } // no zone on this one
   ];
   assert.equal(effectiveTimeZone(undefined, events), "Asia/Tokyo");
   // Empty string counts as omitted (the tool schema allows "", the domain treats it as absent).
@@ -28,8 +28,8 @@ test("omitted zone resolves from the newest user rpc message (newest first)", ()
 
 test("invalid zones, non-user events, and empty logs all fall back to the host zone", () => {
   assert.equal(effectiveTimeZone(undefined, [userMsg("Not/AZone")]), SYSTEM_DEFAULT_TIME_ZONE);
-  assert.equal(effectiveTimeZone(undefined, [{ type: "tool/call", source: {} }]), SYSTEM_DEFAULT_TIME_ZONE);
-  assert.equal(effectiveTimeZone(undefined, [{ type: "user/message", source: { kind: "user", rpcId: "r" } }]), SYSTEM_DEFAULT_TIME_ZONE);
+  assert.equal(effectiveTimeZone(undefined, [{ type: "tool/call", time: 1, data: {} }]), SYSTEM_DEFAULT_TIME_ZONE);
+  assert.equal(effectiveTimeZone(undefined, [{ type: "user/message", time: 1, data: { source: { kind: "user", rpcId: "r" } } }]), SYSTEM_DEFAULT_TIME_ZONE);
   assert.equal(effectiveTimeZone(undefined, []), SYSTEM_DEFAULT_TIME_ZONE);
   assert.equal(effectiveTimeZone(undefined, undefined), SYSTEM_DEFAULT_TIME_ZONE);
 });

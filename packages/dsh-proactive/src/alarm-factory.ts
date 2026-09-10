@@ -14,6 +14,7 @@ import {
   canonicalizeTimeZone,
   isRecord,
   isValidSessionId,
+  isValidWorkspaceId,
   jitterDelay,
   nextEveryOccurrence,
   requireFuture,
@@ -67,9 +68,9 @@ function allocateId(prefix: string): string {
  * behaviour — the alarm wakes its creator).
  */
 export function validateCreateArgs(args: Record<string, unknown>, defaultTargetSessionId: string): CreateSpec | ToolError {
-  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "target_mode", "target_session_id", "compaction"]);
+  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "target_mode", "target_session_id", "target_workspace_id", "compaction"]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_session_id, compaction." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_session_id, target_workspace_id, compaction." };
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined) + Number(args["cron"] !== undefined);
   if (selectors !== 1) return { code: "invalid_trigger", message: "proactive_set requires exactly one of at, after_seconds, every_seconds, or cron." };
@@ -103,8 +104,8 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
   }
   let mode: AlarmTarget["mode"] = "resume";
   if (args["target_mode"] !== undefined) {
-    if (typeof args["target_mode"] !== "string" || !["resume", "fork", "new"].includes(args["target_mode"])) {
-      return { code: "invalid_trigger", message: "target_mode must be one of resume, fork, new." };
+    if (typeof args["target_mode"] !== "string" || !["resume", "fork", "new", "workspace"].includes(args["target_mode"])) {
+      return { code: "invalid_trigger", message: "target_mode must be one of resume, fork, new, workspace." };
     }
     mode = args["target_mode"] as AlarmTarget["mode"];
   }
@@ -113,8 +114,22 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     if (args["target_session_id"] !== undefined) {
       return { code: "invalid_trigger", message: "target_session_id must be omitted when target_mode is new." };
     }
+    if (args["target_workspace_id"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_workspace_id must be omitted when target_mode is new." };
+    }
     target = { mode: "new" };
+  } else if (mode === "workspace") {
+    if (args["target_session_id"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_session_id must be omitted when target_mode is workspace." };
+    }
+    if (typeof args["target_workspace_id"] !== "string" || !isValidWorkspaceId(args["target_workspace_id"])) {
+      return { code: "invalid_trigger", message: "target_mode workspace requires a valid target_workspace_id." };
+    }
+    target = { mode, workspaceId: args["target_workspace_id"] };
   } else {
+    if (args["target_workspace_id"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_workspace_id is only valid when target_mode is workspace." };
+    }
     const sessionId = typeof args["target_session_id"] === "string" && args["target_session_id"].length > 0 ? args["target_session_id"] : defaultTargetSessionId;
     if (!isValidSessionId(sessionId)) return { code: "invalid_trigger", message: "target_session_id must be a valid dsh session id." };
     target = { mode, sessionId };

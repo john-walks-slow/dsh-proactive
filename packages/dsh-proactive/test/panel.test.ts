@@ -13,7 +13,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProactiveStore } from "../src/store.js";
-import { ProactivePanelService } from "../src/panel/service.js";
+import { ProactivePanelService, type PanelServiceDeps } from "../src/panel/service.js";
 import { applyHotConfig, hotSubset } from "../src/settings.js";
 import { DEFAULT_CONFIG, type ProactiveConfig } from "../src/config.js";
 import { createArgsFromForm, type PanelCreateForm } from "../src/panel/contract.js";
@@ -29,7 +29,7 @@ interface Harness {
   advance: (ms: number) => void;
 }
 
-async function harness(titleOverrides?: Record<string, string>): Promise<Harness> {
+async function harness(titleOverrides?: Record<string, string>, resolveWorkspace?: NonNullable<PanelServiceDeps["resolveWorkspace"]>): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "dsh-proactive-panel-"));
   const store = new ProactiveStore(dir);
   const config: ProactiveConfig = { ...DEFAULT_CONFIG, quietHours: { ...DEFAULT_CONFIG.quietHours } };
@@ -43,7 +43,8 @@ async function harness(titleOverrides?: Record<string, string>): Promise<Harness
     now: () => clock,
     log: () => undefined,
     sessionTitle: (sessionId) => titleOverrides?.[sessionId] ?? "",
-    sessionEvents: (sessionId) => (sessionId.startsWith("sess-") ? [{ type: "user/message", source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } }] : undefined)
+    sessionEvents: (sessionId) => (sessionId.startsWith("sess-") ? [{ type: "user/message", time: 100, data: { source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } } }] : undefined),
+    ...(resolveWorkspace !== undefined ? { resolveWorkspace } : {})
   });
   return { store, service, drives: () => drives.count, config, advance: (ms) => { clock += ms; } };
 }
@@ -364,6 +365,21 @@ test("createArgsFromForm maps every/cron plus jitter, target and respect switch"
   assert.ok(!("compaction" in plain));
 });
 
+test("createArgsFromForm maps the workspace target (explicit id, no session field)", () => {
+  const ws = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 300, targetMode: "workspace", targetWorkspaceId: "ws-1" } satisfies PanelCreateForm);
+  assert.equal(ws["target_mode"], "workspace");
+  assert.equal(ws["target_workspace_id"], "ws-1");
+  assert.ok(!("target_session_id" in ws));
+  // no id picked yet: the key stays absent so the host validator rejects it
+  const empty = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 300, targetMode: "workspace" } satisfies PanelCreateForm);
+  assert.ok(!("target_workspace_id" in empty));
+  // other modes never carry the workspace key; resume stays the implicit
+  // default (no target_mode sent at all)
+  const resume = createArgsFromForm({ prompt: "p", kind: "every", everySeconds: 300, targetMode: "resume", targetSessionId: "s1", targetWorkspaceId: "ws-1" } satisfies PanelCreateForm);
+  assert.ok(!("target_mode" in resume));
+  assert.ok(!("target_workspace_id" in resume));
+});
+
 test("applyHotConfig mutates only the hot subset and reports change", () => {
   const config: ProactiveConfig = { ...DEFAULT_CONFIG, quietHours: { ...DEFAULT_CONFIG.quietHours } };
   const next = hotSubset(config);
@@ -521,4 +537,39 @@ test("panel snapshot exposes the defaultPrompt prefill in the config view", asyn
   const h = await harness();
   const snapshot = await h.service.snapshot();
   assert.equal(snapshot.config.defaultPrompt, h.config.defaultPrompt);
+});
+
+test("panel: workspace target creates through the shared resolver", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const h = await harness(undefined, async (args) => {
+    seen.push(args);
+    const { ["target_workspace_path"]: _strip, ...rest } = args;
+    return { ...rest, target_workspace_id: "ws-1" };
+  });
+  const created = await h.service.action(createAction("sess-a", { target_mode: "workspace", target_workspace_id: "ws-1" }));
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const alarm = created.snapshot.alarms[0] as unknown as Record<string, unknown>;
+  assert.equal(alarm["targetMode"], "workspace");
+  assert.equal(alarm["targetWorkspaceId"], "ws-1");
+  assert.equal(alarm["targetSessionId"], undefined);
+  assert.equal(seen.length, 1); // panel sends the explicit id; no cwd fallback needed
+});
+
+test("panel: workspace target without a resolver fails closed", async () => {
+  const h = await harness();
+  const created = await h.service.action(createAction("sess-a", { target_mode: "workspace", target_workspace_id: "ws-1" }));
+  assert.equal(created.ok, false);
+  if (created.ok) return;
+  assert.equal(created.error.code, "not_found");
+  assert.ok(created.error.message.includes("unavailable"));
+});
+
+test("panel: workspace resolver error surfaces as the action error", async () => {
+  const h = await harness(undefined, async () => ({ code: "not_found", message: "workspace ws-x does not exist (it may have been deleted in the GUI)." }));
+  const created = await h.service.action(createAction("sess-a", { target_mode: "workspace", target_workspace_id: "ws-x" }));
+  assert.equal(created.ok, false);
+  if (created.ok) return;
+  assert.equal(created.error.code, "not_found");
+  assert.ok(created.error.message.includes("does not exist"));
 });

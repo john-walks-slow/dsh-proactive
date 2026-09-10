@@ -35,6 +35,7 @@ import {
 } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
 import { writeConfigFile } from "./config.js";
+import { liveEventsOf, type LiveSessionLike } from "./workspace.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveScheduler } from "./scheduler.js";
 import type { WakeDriver } from "./wake.js";
@@ -48,6 +49,12 @@ export interface ToolServices {
   driver: WakeDriver;
   scheduler: ProactiveScheduler;
   now: () => number;
+  /**
+   * Create-side workspace argument wiring (target_workspace_path / default ->
+   * canonical target_workspace_id). Absent on hosts without a workspace
+   * registry; workspace-targeted creates then fail closed.
+   */
+  resolveWorkspace?: (args: Record<string, unknown>, sessionCwd: string | undefined) => Promise<Record<string, unknown> | ToolError>;
 }
 
 
@@ -67,9 +74,11 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     id: { type: "string", required: true },
     sessionId: { type: "string", required: true },
     type: { type: "string", required: true, enum: ["once", "every", "cron"] },
-    targetMode: { type: "string", required: true, enum: ["resume", "fork", "new"] },
+    targetMode: { type: "string", required: true, enum: ["resume", "fork", "new", "workspace"] },
     // Present only for resume/fork targets; "new" never carries one.
     targetSessionId: { type: "string" },
+    // Present only for workspace targets.
+    targetWorkspaceId: { type: "string" },
     respectQuietHours: { type: "boolean", required: true },
     prompt: { type: "string", required: true },
     nextDueAt: { type: "string", required: true },
@@ -123,11 +132,20 @@ function presentCard(title: string, rawInput: string): ToolCallView {
 
 /**
  * The executor's session events (live in-memory store), or undefined when the
- * host didn't expose one — callers then fall back to the host zone.
+ * host didn't expose one — callers then fall back to the host zone. Reads the
+ * log through the cross-version compat (`.events` ≤0.1.1, `snapshotEvents()`
+ * ≥0.1.2) so timezone derivation survives host upgrades.
  */
 function sessionEventsOf(agent: Agent): readonly unknown[] | undefined {
-  const sessions = agent.ctx.get("sessions", false) as { get?: (id: string) => { events?: readonly unknown[] } | undefined } | undefined;
-  return sessions?.get?.(agent.session.id)?.events;
+  const sessions = agent.ctx.get("sessions", false) as { get?: (id: string) => LiveSessionLike | undefined } | undefined;
+  const session = sessions?.get?.(agent.session.id);
+  return session === undefined ? undefined : liveEventsOf(session);
+}
+
+/** The executor session's working directory (header first, legacy meta cast second). */
+function sessionCwdOf(agent: Agent): string | undefined {
+  const session = agent.session as unknown as { header?: { cwd?: string }; meta?: { cwd?: string } };
+  return session.header?.cwd ?? session.meta?.cwd;
 }
 
 /** Build the five tool definitions bound to one agent + its host services. */
@@ -154,8 +172,10 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             cron: { type: "string", description: "Five-field numeric cron expression, e.g. '0 9 * * 1-5' (minute hour day-of-month month day-of-week; 0 and 7 = Sunday; dom/dow OR rule; no names, '?' or seconds)." },
             jitter_seconds: { type: "integer", description: "Unified per-occurrence random delay in seconds, 0.." + MAX_JITTER_SECONDS + " (0 = exact timing). Each fire is delayed by a uniform random amount drawn from (0, jitter_seconds]; absent/0 = no jitter." },
             respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: defers inside the quiet window and is skipped when the daily budget is exhausted." },
-            target_mode: { type: "string", enum: ["resume", "fork", "new"], description: "resume (default): wake the target session itself. fork: copy the target session's completed history into a new child session and wake it there. new: wake in a brand-new empty session. Fork/new children are real sessions that stay in the sidebar." },
-            target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is this session. Must be omitted when target_mode is new." },
+            target_mode: { type: "string", enum: ["resume", "fork", "new", "workspace"], description: "resume (default): wake the target session itself. fork: copy the target session's completed history into a new child session and wake it there. new: wake in a brand-new empty session. workspace: wake the workspace's most recently updated session at fire time (its blank New-Session slot when only blanks exist, else a fresh session created in the workspace) — the destination follows the user's latest activity in that workspace. Fork/new/workspace-created children are real sessions that stay in the sidebar." },
+            target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is this session. Must be omitted when target_mode is new or workspace." },
+            target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_mode workspace. Resolved and existence-checked host-side; alternatively pass target_workspace_path or omit both to use this session's own workspace." },
+            target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_mode workspace (resolved to its registry id host-side). The directory must already be registered as a workspace in the GUI; no workspace is auto-created." },
             time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." },
             compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
           },
@@ -169,7 +189,18 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             // including a zone-bearing at object — else the session's browser
             // zone, else the host zone) before the closed validation sees an
             // empty slot.
-            const wired = wireTimeZones(args as Record<string, unknown>, sessionEventsOf(agent));
+            let wired = wireTimeZones(args as Record<string, unknown>, sessionEventsOf(agent));
+            // Workspace arguments are the async half of the same pre-validation
+            // wiring: path / default-cwd spellings normalize to a canonical,
+            // existence-checked target_workspace_id.
+            if (wired["target_mode"] === "workspace" || wired["target_workspace_id"] !== undefined || wired["target_workspace_path"] !== undefined) {
+              if (services.resolveWorkspace === undefined) {
+                return { code: "not_found", message: "workspace targets are unavailable on this host (no workspace registry)." } as ToolError;
+              }
+              const resolved = await services.resolveWorkspace(wired, sessionCwdOf(agent));
+              if (isToolError(resolved)) return resolved;
+              wired = resolved;
+            }
             const shape = validateCreateArgs(wired, agent.session.id);
             if (isToolError(shape)) return shape;
             if (services.store.corrupt) return { code: "corrupt_store", message: "The alarm store is corrupt; fix or remove alarms.json." } as ToolError;

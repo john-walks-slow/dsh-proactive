@@ -27,9 +27,13 @@ export const SYSTEM_DEFAULT_TIME_ZONE: string = (() => {
 function clientTimeZoneOf(events: readonly unknown[] | undefined): string | undefined {
   if (events === undefined) return undefined;
   for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i] as { type?: unknown; source?: unknown } | undefined;
+    const event = events[i] as { type?: unknown; data?: unknown } | undefined;
     if (event === undefined || typeof event !== "object" || event["type"] !== "user/message") continue;
-    const source = event["source"] as { kind?: unknown; rpcId?: unknown; clientTimeZone?: unknown } | undefined;
+    // A real SessionEvent carries the message source under data.source
+    // (data = {content, id, role, source}); the top level only has
+    // {type, seq, time, data} — reading event.source never matched.
+    const data = event["data"] as { source?: unknown } | undefined;
+    const source = (data === undefined || typeof data !== "object" ? undefined : data["source"]) as { kind?: unknown; rpcId?: unknown; clientTimeZone?: unknown } | undefined;
     if (source === undefined || typeof source !== "object" || source["kind"] !== "user" || typeof source["rpcId"] !== "string" || typeof source["clientTimeZone"] !== "string") continue;
     try {
       return canonicalizeTimeZone(source["clientTimeZone"]);

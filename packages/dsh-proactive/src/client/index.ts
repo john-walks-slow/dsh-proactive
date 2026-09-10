@@ -19,12 +19,13 @@ import { ProactivePanel } from "./panel.js";
 import { ProactiveSessionPanel } from "./session-panel.js";
 import { bindProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
+import type { WorkspacesSource } from "./workspaces-source.js";
 import { zh, en } from "./locales.js";
 
 declare module "@deepseek-ai/dsh-client-ui-slots" {
   interface LocaleNamespaceMap {
-    /** Panel + tab surface copy (v3 vocabulary: once/every/cron + resume/fork/new + defaultPrompt prefill). */
-    "dsh-proactive": "tabLabel" | "globalTitle" | "sessionTitle" | "sessionSubtitle" | "refresh" | "newAlarm" | "create" | "save" | "cancel" | "pause" | "resume" | "fire" | "edit" | "history" | "hideHistory" | "copyId" | "copied" | "alarmsTitle" | "alarms" | "session" | "prompt" | "promptPlaceholder" | "state" | "nextDue" | "type" | "target" | "emptyAlarms" | "emptyRuns" | "filterActive" | "filterAllStates" | "filterAllSessions" | "filterAllTypes" | "sortBy" | "sortNextDue" | "sortCreated" | "sortPrompt" | "stateScheduled" | "stateOverdue" | "stateInFlight" | "stateCompleted" | "stateCancelled" | "stateFailed" | "statePaused" | "typeOnce" | "typeEvery" | "typeCron" | "targetResume" | "targetFork" | "targetNew" | "quietLabel" | "runTime" | "runDecision" | "runBudget" | "runSummary" | "thinkingPrefix" | "replyPrefix" | "delaySeconds" | "atDateTime" | "everySeconds" | "cronExpression" | "cronPlaceholder" | "jitterSeconds" | "jitterPlaceholder" | "jitterEveryHint" | "respectQuietHours" | "quietHint" | "targetSessionId" | "forkSourceSessionId" | "targetSessionPlaceholder" | "invalidSessionId" | "unknownSession" | "decisionNoReply" | "decisionReply" | "decisionSkipped" | "decisionFailed" | "newSessionHint" | "budget" | "perDay" | "quietHours" | "quietHoursStart" | "quietHoursEnd" | "globalView" | "configSectionTitle" | "configSectionDesc" | "enabledToggle" | "defaultPromptLabel" | "defaultPromptHint" | "saveConfig" | "saved" | "loading" | "close" | "openSettings" | "error" | "confirmCancel" | "storageCorrupt" | "hostPanelLabel" | "dateTimeLocale";
+    /** Panel + tab surface copy (v3 vocabulary: once/every/cron + resume/fork/new/workspace + defaultPrompt prefill). */
+    "dsh-proactive": "tabLabel" | "globalTitle" | "sessionTitle" | "sessionSubtitle" | "refresh" | "newAlarm" | "create" | "save" | "cancel" | "pause" | "resume" | "fire" | "edit" | "history" | "hideHistory" | "copyId" | "copied" | "alarmsTitle" | "alarms" | "session" | "prompt" | "promptPlaceholder" | "state" | "nextDue" | "type" | "target" | "emptyAlarms" | "emptyRuns" | "filterActive" | "filterAllStates" | "filterAllSessions" | "filterAllTypes" | "sortBy" | "sortNextDue" | "sortCreated" | "sortPrompt" | "stateScheduled" | "stateOverdue" | "stateInFlight" | "stateCompleted" | "stateCancelled" | "stateFailed" | "statePaused" | "typeOnce" | "typeEvery" | "typeCron" | "targetResume" | "targetFork" | "targetNew" | "targetWorkspace" | "targetWorkspaceLabel" | "workspaceHint" | "workspacePickPlaceholder" | "noWorkspaces" | "quietLabel" | "runTime" | "runDecision" | "runBudget" | "runSummary" | "thinkingPrefix" | "replyPrefix" | "delaySeconds" | "atDateTime" | "everySeconds" | "cronExpression" | "cronPlaceholder" | "jitterSeconds" | "jitterPlaceholder" | "jitterEveryHint" | "respectQuietHours" | "quietHint" | "targetSessionId" | "forkSourceSessionId" | "targetSessionPlaceholder" | "invalidSessionId" | "unknownSession" | "decisionNoReply" | "decisionReply" | "decisionSkipped" | "decisionFailed" | "newSessionHint" | "budget" | "perDay" | "quietHours" | "quietHoursStart" | "quietHoursEnd" | "globalView" | "configSectionTitle" | "configSectionDesc" | "enabledToggle" | "defaultPromptLabel" | "defaultPromptHint" | "saveConfig" | "saved" | "loading" | "close" | "openSettings" | "error" | "confirmCancel" | "storageCorrupt" | "hostPanelLabel" | "dateTimeLocale";
   }
 }
 
@@ -50,18 +51,39 @@ export function apply(ctx: ClientContext): void {
   }
   const t = ctx.locale.bind(NS);
 
+  /**
+   * The live workspace store, read defensively at panel-mount time: there is
+   * no workspace/list HTTP RPC — the client `workspaces` service (subscribe +
+   * cached snapshot, the same store the sidebar reads) is the only source. A
+   * GUI without the workspace controller still mounts the panels; the
+   * workspace picker then disables with its hint.
+   */
+  const injectWorkspaces = (): { workspaces?: WorkspacesSource } => {
+    try {
+      const service = ctx.get("workspaces", false) as { list?: WorkspacesSource } | undefined;
+      return service?.list === undefined ? {} : { workspaces: service.list };
+    } catch {
+      return {};
+    }
+  };
+
   let anyApplied = false;
   try {
-    ctx.slots.register(
-      {
-        name: "settings.section",
-        id: "dsh-proactive",
-        order: 120,
-        locale: NS,
-        label: () => t("tabLabel"),
-        inject: () => ({}),
-      },
-      ProactivePanel
+    // slots.inject waits for the parent's children-table declaration (the
+    // settings page declares "settings.section" late on dsh 0.1.2-rc.1+); a
+    // direct register raced it and the section silently never mounted.
+    ctx.slots.inject("settings.section", () =>
+      ctx.slots.register(
+        {
+          name: "settings.section",
+          id: "dsh-proactive",
+          order: 120,
+          locale: NS,
+          label: () => t("tabLabel"),
+          inject: injectWorkspaces,
+        },
+        ProactivePanel
+      )
     );
     anyApplied = true;
   } catch (error) {
@@ -76,7 +98,7 @@ export function apply(ctx: ClientContext): void {
         order: 20,
         locale: NS,
         label: () => t("tabLabel"),
-        inject: () => ({}),
+        inject: injectWorkspaces,
       }, ProactiveSessionPanel)
     );
     anyApplied = true;

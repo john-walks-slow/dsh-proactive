@@ -5,17 +5,19 @@
  *
  * v3 (260909 release polish): the create/edit form is ONE dialect on both
  * surfaces — three alarm kinds (once/every/cron) with the unified jitter, the
- * respect-quiet-hours switch, and a target row (resume/fork/new plus a
- * session-id text input defaulting to the current session). The owner is not
- * a form field: the conversation tab pins its own session, the settings page
- * derives it from the target. All labels — pills, run headers, dates — flow
- * through the locale dictionary.
+ * respect-quiet-hours switch, and a target row (resume/fork/new/workspace
+ * plus a session-id text input or a workspace picker, defaulting to the
+ * current session / its workspace). The owner is not a form field: the
+ * conversation tab pins its own session, the settings page derives it from
+ * the target. All labels — pills, run headers, dates — flow through the
+ * locale dictionary.
  */
 
 import { Fragment, useEffect, useMemo, useState, type ReactElement } from "react";
 import { createArgsFromForm, type PanelCreateForm } from "../panel/contract.js";
 import { DEFAULT_WAKE_PROMPT, isValidSessionId, MAX_PROMPT_LENGTH } from "../domain.js";
 import type { ProactivePanelCopy } from "./locales.js";
+import type { WorkspaceInfo } from "./host-api.js";
 
 /** Row shape the alarms table renders (a subset of the wire AlarmView). */
 export interface AlarmRow {
@@ -27,6 +29,10 @@ export interface AlarmRow {
   targetMode: string;
   targetSessionId?: string;
   targetSessionTitle?: string;
+  /** Workspace target id (targetMode === "workspace"). */
+  targetWorkspaceId?: string;
+  /** Workspace display title (client-enriched). */
+  targetWorkspaceTitle?: string;
   respectQuietHours: boolean;
   prompt: string;
   nextDueAt: string;
@@ -66,6 +72,7 @@ export function targetLabel(copy: ProactivePanelCopy, mode: string): string {
     case "resume": return copy.targetResume;
     case "fork": return copy.targetFork;
     case "new": return copy.targetNew;
+    case "workspace": return copy.targetWorkspace;
     default: return mode;
   }
 }
@@ -217,7 +224,6 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
           {visible.map((alarm) => {
             const runs = runsByAlarm.get(alarm.id) ?? [];
             const expanded = expandedAlarm === alarm.id;
-            const targetTitle = alarm.targetSessionTitle ?? alarm.targetSessionId;
             return (
               <Fragment key={alarm.id}>
                 <tr>
@@ -237,8 +243,12 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
                   </td>
                   <td>
                     <span className="dshp-pill dshp-pill-plain">{targetLabel(copy, alarm.targetMode)}</span>
-                    {alarm.targetMode !== "new" && targetTitle !== undefined && targetTitle !== "" ? (
-                      <div className="dshp-cell-dim" style={{ marginTop: 2 }}>{fmtSession(alarm.targetSessionId ?? "", alarm.targetSessionTitle, copy)}</div>
+                    {alarm.targetMode === "workspace" ? (
+                      <div className="dshp-cell-dim" style={{ marginTop: 2 }} title={alarm.targetWorkspaceId}>
+                        {alarm.targetWorkspaceTitle ?? alarm.targetWorkspaceId}
+                      </div>
+                    ) : alarm.targetMode !== "new" && alarm.targetSessionId !== undefined && alarm.targetSessionId !== "" ? (
+                      <div className="dshp-cell-dim" style={{ marginTop: 2 }}>{fmtSession(alarm.targetSessionId, alarm.targetSessionTitle, copy)}</div>
                     ) : null}
                   </td>
                   <td className="dshp-cell-mono">{fmtInstant(alarm.nextDueAt, copy.dateTimeLocale)}</td>
@@ -364,15 +374,26 @@ export interface CreateFormProps {
    * soft typo hint — non-blocking, cold/foreign ids are still submittable.
    */
   knownSessions?: ReadonlyMap<string, string>;
+  /** Registered workspaces (from workspace.list) for the workspace-target picker. */
+  knownWorkspaces?: readonly WorkspaceInfo[];
+  /** Preselect for the workspace picker: the workspace of the current session. */
+  defaultWorkspaceId?: string;
+}
+
+/** Option label for one workspace: title with the path as the disambiguator. */
+function workspaceOptionLabel(workspace: WorkspaceInfo): string {
+  const title = workspace.title !== "" ? workspace.title : workspace.path;
+  return title === workspace.path ? title : title + " · " + workspace.path;
 }
 
 /**
  * The one create/edit form used by BOTH surfaces (settings page and the
  * conversation tab — identical options by design). The target row is a mode
- * selector (resume/fork/new) plus a session-id text input; the owner session
- * is derived by the caller, never picked here.
+ * selector (resume/fork/new/workspace) plus a session-id text input or a
+ * workspace picker; the owner session is derived by the caller, never picked
+ * here.
  */
-export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, onSubmit, editing, knownSessions }: CreateFormProps): ReactElement {
+export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, onSubmit, editing, knownSessions, knownWorkspaces, defaultWorkspaceId }: CreateFormProps): ReactElement {
   // Hooks FIRST — the showForm early-return below must not conditionally skip
   // them (React requires a stable hook count across renders of one instance).
   const targetIdRaw = (form.targetSessionId ?? "").trim();
@@ -393,24 +414,29 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
     else setForm({ ...form, kind: nextKind, afterSeconds: form.afterSeconds ?? (form.atDate !== undefined && form.atDate !== "" ? undefined : 3600) });
   };
   const targetId = targetIdRaw;
-  const targetInvalid = mode !== "new" && targetId !== "" && !isValidSessionId(targetId);
+  const sessionTargeted = mode === "resume" || mode === "fork";
+  const targetInvalid = sessionTargeted && targetId !== "" && !isValidSessionId(targetId);
   // Live title lookup: shown the moment the typed id matches a known session
   // (exact match — a partial id is not yet a session).
-  const targetTitle = mode !== "new" && !targetInvalid && targetId !== ""
+  const targetTitle = sessionTargeted && !targetInvalid && targetId !== ""
     ? knownSessions?.get(targetId)
     : undefined;
   // The unknown-id warning is NEGATIVE feedback: it only fires on the
   // SETTLED id (500ms after typing stops), so typing a known id
   // character-by-character does not flash "not in the list" on every
   // keystroke — the positive title lookup above stays instant.
-  const targetUnknown = mode !== "new" && !targetInvalid && settledTargetId === targetId && targetId !== "" &&
+  const targetUnknown = sessionTargeted && !targetInvalid && settledTargetId === targetId && targetId !== "" &&
     knownSessions !== undefined && knownSessions.size > 0 && !knownSessions.has(targetId);
+  const workspaces = knownWorkspaces ?? [];
+  const workspaceSelected = (form.targetWorkspaceId ?? "").trim();
+  const workspaceMissing = mode === "workspace" && workspaces.length === 0;
   const canSubmit =
     (form.prompt ?? "").trim() !== "" &&
     (kind !== "every" || (form.everySeconds ?? 0) >= 300) &&
     (kind !== "cron" || (form.cron ?? "").trim() !== "") &&
     (kind !== "once" || (form.afterSeconds !== undefined && (form.afterSeconds ?? 0) > 0) || ((form.atDate ?? "") !== "" && (form.atTime ?? "") !== "")) &&
-    (mode === "new" || (targetId !== "" && !targetInvalid));
+    (sessionTargeted ? targetId !== "" && !targetInvalid : true) &&
+    (mode !== "workspace" || workspaceSelected !== "");
 
   return (
     <div className="dshp-card">
@@ -492,14 +518,37 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
           <div className="dshp-field" style={{ flex: 1, minWidth: 150 }}>
             <label className="dshp-field-label">{copy.target}</label>
             <select className="dshp-input dshp-grow" value={mode}
-              onChange={(e) => setForm({ ...form, targetMode: e.target.value as PanelCreateForm["targetMode"] })}>
+              onChange={(e) => {
+                const nextMode = e.target.value as PanelCreateForm["targetMode"];
+                // Switching to workspace with nothing chosen preselects the
+                // current session's own workspace (when it belongs to one).
+                setForm({
+                  ...form,
+                  targetMode: nextMode,
+                  ...(nextMode === "workspace" && (form.targetWorkspaceId ?? "").trim() === "" && defaultWorkspaceId !== undefined ? { targetWorkspaceId: defaultWorkspaceId } : {})
+                });
+              }}>
               <option value="resume">{targetLabel(copy, "resume")}</option>
               <option value="fork">{targetLabel(copy, "fork")}</option>
               <option value="new">{targetLabel(copy, "new")}</option>
+              <option value="workspace">{targetLabel(copy, "workspace")}</option>
             </select>
             {mode === "new" ? <div className="dshp-cell-dim">{copy.newSessionHint}</div> : null}
+            {mode === "workspace" ? <div className="dshp-cell-dim">{copy.workspaceHint}</div> : null}
           </div>
-          {mode !== "new" ? (
+          {mode === "workspace" ? (
+            <div className="dshp-field" style={{ flex: 2, minWidth: 260 }}>
+              <label className="dshp-field-label">{copy.targetWorkspaceLabel}</label>
+              <select className="dshp-input dshp-grow" value={workspaceSelected} disabled={workspaces.length === 0}
+                onChange={(e) => setForm({ ...form, targetWorkspaceId: e.target.value })}>
+                {workspaceSelected === "" ? <option value="">{copy.workspacePickPlaceholder}</option> : null}
+                {workspaces.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>{workspaceOptionLabel(workspace)}</option>
+                ))}
+              </select>
+              {workspaceMissing ? <div className="dshp-field-error">{copy.noWorkspaces}</div> : null}
+            </div>
+          ) : sessionTargeted ? (
             <div className="dshp-field" style={{ flex: 2, minWidth: 260 }}>
               <label className="dshp-field-label">{mode === "fork" ? copy.forkSourceSessionId : copy.targetSessionId}</label>
               <input className="dshp-input dshp-grow dshp-input-mono" value={form.targetSessionId ?? ""}
@@ -536,8 +585,9 @@ export function formFromAlarm(alarm: AlarmRow): PanelCreateForm {
     kind: alarm.type === "every" ? "every" : alarm.type === "cron" ? "cron" : "once",
     respectQuietHours: alarm.respectQuietHours,
     compaction: alarm.compaction,
-    targetMode: (alarm.targetMode === "fork" || alarm.targetMode === "new" ? alarm.targetMode : "resume") as PanelCreateForm["targetMode"],
-    ...(alarm.targetMode !== "new" && alarm.targetSessionId !== undefined && alarm.targetSessionId !== "" ? { targetSessionId: alarm.targetSessionId } : {})
+    targetMode: (alarm.targetMode === "fork" || alarm.targetMode === "new" || alarm.targetMode === "workspace" ? alarm.targetMode : "resume") as PanelCreateForm["targetMode"],
+    ...(alarm.targetMode !== "new" && alarm.targetMode !== "workspace" && alarm.targetSessionId !== undefined && alarm.targetSessionId !== "" ? { targetSessionId: alarm.targetSessionId } : {}),
+    ...(alarm.targetMode === "workspace" && alarm.targetWorkspaceId !== undefined && alarm.targetWorkspaceId !== "" ? { targetWorkspaceId: alarm.targetWorkspaceId } : {})
   };
   if (alarm.type === "every") {
     next.everySeconds = alarm.everySeconds ?? 3600;

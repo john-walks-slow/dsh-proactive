@@ -17,7 +17,7 @@
  */
 
 import { mkdir, readFile, rename, writeFile, appendFile } from "node:fs/promises";
-import { COMPACTION_MODES, isRecord, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
+import { COMPACTION_MODES, isRecord, isValidWorkspaceId, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
 
 export interface StoreState {
   version: number;
@@ -36,7 +36,7 @@ const STATE_FILE = "state.json";
 
 const LEGACY_REASONS = { alarm: false, heartbeat: true } as const;
 
-const TARGET_MODES: readonly string[] = ["resume", "fork", "new"];
+const TARGET_MODES: readonly string[] = ["resume", "fork", "new", "workspace"];
 const ALARM_TYPES: readonly string[] = ["once", "every", "cron"];
 const ALARM_STATUSES: readonly string[] = ["scheduled", "in-flight", "completed", "cancelled", "failed", "paused"];
 
@@ -59,6 +59,9 @@ function alarmIsValid(value: unknown): value is Alarm {
   if (!isRecord(target) || typeof target["mode"] !== "string" || !TARGET_MODES.includes(target["mode"])) return false;
   if (target["mode"] === "resume" || target["mode"] === "fork") {
     if (typeof target["sessionId"] !== "string") return false;
+  }
+  if (target["mode"] === "workspace") {
+    if (typeof target["workspaceId"] !== "string" || !isValidWorkspaceId(target["workspaceId"])) return false;
   }
   // compaction is optional: absent = DEFAULT_COMPACTION (legacy v2 records);
   // a present value must be a known mode so a typo never silently degrades.

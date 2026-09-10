@@ -7,7 +7,8 @@ import { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import { Session, deriveEventMessage, type EpochHeader } from "@deepseek-ai/dsh-session";
 import { CallId, ReasoningEffortId, createAssistantMessage, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
-import { WakeDriver, createWakeSelectionRef, selectionFromHeader, completedTurnCut, type AgentHandleLike, type AgentsFacade, type CreateFacadeOptions, type WakeFireResult } from "../src/wake.js";
+import { WakeDriver, createWakeSelectionRef, selectionFromHeader, completedTurnCut, sessionLogOf, type AgentHandleLike, type AgentPresetsPort, type AgentsFacade, type CreateFacadeOptions, type WakeFireResult } from "../src/wake.js";
+import type { WorkspaceWakePort } from "../src/workspace.js";
 import { ProactiveStore } from "../src/store.js";
 import { resolveConfig } from "../src/config.js";
 import type { Alarm } from "../src/domain.js";
@@ -96,6 +97,15 @@ async function harness(opts: { live?: boolean; busy?: boolean; failWhenIdle?: bo
   });
   return { driver, store, rec, cfg, dir };
 }
+
+test("sessionLogOf reads the log through both Session lines", () => {
+  const old = { seq: 2, events: [{ seq: 0 }, { seq: 1 }] };
+  const modern = { seq: 1, snapshotEvents: () => [{ seq: 0 }] };
+  const bare = { seq: 0 };
+  assert.deepEqual(sessionLogOf(old), [{ seq: 0 }, { seq: 1 }]);
+  assert.deepEqual(sessionLogOf(modern), [{ seq: 0 }]);
+  assert.deepEqual(sessionLogOf(bare), []); // session still being created
+});
 
 test("cold wake resumes the session, frames the message, and can be silent", async () => {
   const h = await harness();
@@ -221,7 +231,7 @@ test("fork target creates a child session seeded with the parent's completed his
     { type: "turn/end", seq: 3, data: { reason: { kind: "completed" } } }
   ];
   const parentAgent = {
-    session: { id: "parent", events: parentEvents, meta: { cwd: "/work" } }
+    session: { id: "parent", events: parentEvents, header: { version: 0, id: "parent", createdAt: 0, cwd: "/work", agentPreset: "general" } }
   } as unknown as Agent;
   let captured: CreateFacadeOptions | undefined;
   const agents: AgentsFacade = {
@@ -242,6 +252,7 @@ test("fork target creates a child session seeded with the parent's completed his
     assert.equal(captured.meta?.parentSession, "parent");
     assert.equal(captured.meta?.seedLength, 4);
     assert.equal(captured.meta?.cwd, "/work");
+    assert.equal(captured.meta?.agentPreset, "general"); // child inherits the parent's composition
     assert.ok(captured.sessionId.startsWith("session-"));
     if (fire.outcome === "ok") {
       assert.equal(fire.sessionId, captured.sessionId);
@@ -256,7 +267,7 @@ test("fork target fails when the parent has no completed turn", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
   const store = new ProactiveStore(dir);
-  const emptyParent = { session: { id: "parent", events: [{ type: "user/message", seq: 0 }], meta: {} } } as unknown as Agent;
+  const emptyParent = { session: { id: "parent", events: [{ type: "user/message", seq: 0 }], header: { version: 0, id: "parent", createdAt: 0 } } } as unknown as Agent;
   const agents: AgentsFacade = {
     get: (id: string) => (id === "parent" ? emptyParent : undefined) as never,
     resume: async () => { throw new Error("unused"); },
@@ -295,7 +306,7 @@ test("fork from a cold parent reads the persisted log for the seed", async () =>
   const driver = new WakeDriver({
     agents,
     sessionPersistence: {
-      inspect: async () => ({ events: persistedEvents as never, meta: { cwd: "/persisted" } })
+      inspect: async () => ({ events: persistedEvents as never, meta: { version: 0, id: "parent" as never, createdAt: 0, cwd: "/persisted", agentPreset: "general" } })
     },
     modelSelection: () => undefined,
     store,
@@ -309,6 +320,7 @@ test("fork from a cold parent reads the persisted log for the seed", async () =>
     assert.equal(captured.seed?.length, 3);
     assert.equal(captured.meta?.seedLength, 3);
     assert.equal(captured.meta?.cwd, "/persisted");
+    assert.equal(captured.meta?.agentPreset, "general"); // cold parent's preset survives into the child
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -398,6 +410,121 @@ test("cold resume installs a model-selection setup that drives the request water
     assert.equal(request.provider, "cpa");
     assert.equal(request.model, "gemini-3-flash");
     assert.equal(request.maxTokens, 100, "unrelated request fields must pass through untouched");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cold resume mounts the session's preset, newest selection winning", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  let capturedOptions: { setup?: unknown } = {};
+  const header: EpochHeader = { config: { provider: "cpa", model: "gemini-3-flash" } };
+  // header names "general"; a later agent-preset/selected event switched to "dev"
+  const wakeAgent = {
+    session: {
+      id: "s1",
+      events: [
+        { type: "agent-preset/selected", seq: 0, data: { agentPreset: "general" } },
+        { type: "agent-preset/selected", seq: 1, data: { agentPreset: "dev" } }
+      ],
+      header: { version: 0, id: "s1", createdAt: 0, agentPreset: "general" },
+      requestHeader: () => header
+    },
+    followup: () => undefined,
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const mounted: Array<{ ctx: unknown; id: string | undefined }> = [];
+  const agentPresets: AgentPresetsPort = {
+    defaultId: "standard",
+    mount: async (ctx, id) => { mounted.push({ ctx, id }); }
+  };
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async (options) => {
+      capturedOptions = options;
+      return { agent: wakeAgent, dispose: async () => undefined };
+    },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, agentPresets, modelSelection: () => ({ provider: "cpa", model: "medium" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("coldp"));
+    assert.equal(fire.outcome, "ok");
+    assert.equal(typeof capturedOptions.setup, "function", "cold resume must carry a setup hook");
+
+    // execute the real setup: the roster mount must receive the agent's scope
+    // context and the LAST recorded selection, not the creation header
+    const agentCtx = new Context();
+    Object.defineProperty(agentCtx, "agent", { value: wakeAgent, configurable: true });
+    const applied = (capturedOptions.setup as (ctx: Context) => unknown)(agentCtx);
+    if (applied && typeof (applied as { then?: unknown }).then === "function") await applied;
+
+    assert.equal(mounted.length, 1);
+    assert.equal(mounted[0].ctx, agentCtx, "mount must receive the agent's scoped context");
+    assert.equal(mounted[0].id, "dev", "the newest agent-preset/selected event must win over the header");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cold resume without a roster composes no preset (rosterless deployments)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  let capturedOptions: { setup?: unknown } = {};
+  const wakeAgent = makeWakeAgent({ config: { provider: "cpa", model: "gemini-3-flash" } });
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async (options) => {
+      capturedOptions = options;
+      return { agent: wakeAgent, dispose: async () => undefined };
+    },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("coldnp"));
+    assert.equal(fire.outcome, "ok");
+    const agentCtx = new Context();
+    Object.defineProperty(agentCtx, "agent", { value: wakeAgent, configurable: true });
+    // No roster -> the setup must settle WITHOUT touching any preset service.
+    // makeWakeAgent's session deliberately has no `header`, so a regression
+    // that drops the rosterless guard rejects right here (reading
+    // `header.agentPreset` off the fake session).
+    await (capturedOptions.setup as (ctx: Context) => Promise<void>)(agentCtx);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("new target records the default preset in the child's creation meta", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
+  const childAgent = makeFakeAgent(rec);
+  let captured: CreateFacadeOptions | undefined;
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async () => { throw new Error("unused"); },
+    create: async (options) => {
+      captured = options;
+      return { agent: childAgent, dispose: async () => undefined };
+    }
+  };
+  const agentPresets: AgentPresetsPort = {
+    defaultId: "standard",
+    mount: async () => undefined
+  };
+  const driver = new WakeDriver({ agents, agentPresets, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("newp", { mode: "new" }));
+    assert.equal(fire.outcome, "ok");
+    assert.ok(captured !== undefined);
+    assert.equal(captured.meta?.agentPreset, "standard");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -664,3 +791,129 @@ function extractText(message: unknown): string {
   const msg = message as { content?: { type?: string; text?: string }[] };
   return (msg.content ?? []).map((b) => b.text ?? "").join("");
 }
+
+/* --------------------------------------------- workspace target wakes ---- */
+
+test("workspace alarm without a port fails loudly (headless host)", async () => {
+  const h = await harness();
+  try {
+    const fire = await h.driver.fire(alarm("ws1", { mode: "workspace", workspaceId: "ws-a" }));
+    assert.equal(fire.outcome, "failed");
+    if (fire.outcome === "failed") assert.ok(fire.error.includes("unavailable on this host"));
+    assert.equal(h.rec.messages.length, 0); // nothing delivered
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("workspace alarm with a failing port surfaces the closed error", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const port: WorkspaceWakePort = {
+    resolveTarget: async () => ({ error: "workspace ws-a no longer exists (deleted in the GUI?); cancel or edit this alarm" }),
+    attach: async () => { throw new Error("must not be called"); }
+  };
+  const agents: AgentsFacade = { get: () => undefined, resume: async () => { throw new Error("unused"); }, create: async () => { throw new Error("unused"); } };
+  const driver = new WakeDriver({ agents, workspaces: port, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("ws2", { mode: "workspace", workspaceId: "ws-a" }));
+    assert.equal(fire.outcome, "failed");
+    if (fire.outcome === "failed") assert.ok(fire.error.includes("no longer exists"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("workspace alarm lands in the resolved session via the resume path", async () => {
+  const h = await harness();
+  const attached: string[] = [];
+  const port: WorkspaceWakePort = {
+    resolveTarget: async () => ({ kind: "session", sessionId: "s1" }),
+    attach: async (_workspaceId, sessionId) => { attached.push(sessionId); }
+  };
+  const driver = new WakeDriver({
+    agents: {
+      get: () => undefined as never,
+      resume: async () => {
+        h.rec.resumed = true;
+        return { agent: makeFakeAgent(h.rec), dispose: async () => { h.rec.disposed = true; } };
+      },
+      create: async () => { throw new Error("unused"); }
+    },
+    workspaces: port,
+    modelSelection: () => ({ provider: "test", model: "x" }),
+    store: h.store,
+    config: h.cfg,
+    log: () => undefined
+  });
+  try {
+    const fire = await driver.fire(alarm("ws3", { mode: "workspace", workspaceId: "ws-a" }));
+    assert.equal(fire.outcome, "ok");
+    assert.equal(h.rec.resumed, true);
+    assert.equal(h.rec.messages.length, 1);
+    if (fire.outcome === "ok") assert.equal(fire.sessionId, "s1");
+    assert.deepEqual(attached, []); // session arm never attaches
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("workspace alarm creates a session in the workspace and attaches BEFORE delivering", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const trace: string[] = [];
+  const port: WorkspaceWakePort = {
+    resolveTarget: async () => ({ kind: "create", cwd: "/repos/alpha" }),
+    attach: async (_workspaceId, sessionId) => { trace.push("attach:" + sessionId); }
+  };
+  let captured: CreateFacadeOptions | undefined;
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async () => { throw new Error("unused"); },
+    create: async (options) => {
+      captured = options;
+      return { agent: makeFakeAgent({ messages: [], disposed: false, resumed: false, activeDuringFollowup: null }), dispose: async () => undefined };
+    }
+  };
+  const driver = new WakeDriver({ agents, workspaces: port, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("ws4", { mode: "workspace", workspaceId: "ws-a" }));
+    assert.equal(fire.outcome, "ok");
+    assert.ok(captured !== undefined);
+    assert.equal(captured.meta?.cwd, "/repos/alpha"); // session lands inside the workspace dir
+    assert.ok(captured.sessionId.startsWith("session-"));
+    // ordering: the created session is grouped into the workspace BEFORE the
+    // wake is delivered — a failed attach must never deliver an orphan.
+    assert.deepEqual(trace, ["attach:" + captured.sessionId]);
+    if (fire.outcome === "ok") assert.equal(fire.sessionId, captured.sessionId);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("workspace create arm failing the attach never delivers the wake", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
+  const port: WorkspaceWakePort = {
+    resolveTarget: async () => ({ kind: "create", cwd: "/repos/alpha" }),
+    attach: async () => { throw new Error("attach failed: registry rejected"); }
+  };
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => ({ agent: makeFakeAgent(rec), dispose: async () => undefined })
+  };
+  const driver = new WakeDriver({ agents, workspaces: port, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("ws5", { mode: "workspace", workspaceId: "ws-a" }));
+    assert.equal(fire.outcome, "failed");
+    if (fire.outcome === "failed") assert.ok(fire.error.includes("attach failed"));
+    assert.equal(rec.messages.length, 0); // no wake delivered into the ungrouped session
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

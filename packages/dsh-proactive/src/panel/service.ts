@@ -10,7 +10,7 @@
  * to is owned BY the session.
  */
 
-import { isRecord, isValidSessionId, toAlarmView, instantEpoch, nextEveryOccurrence, nextJitteredOccurrence, jitterDelay, type Alarm, type RunRecord } from "../domain.js";
+import { isRecord, isToolError, isValidSessionId, toAlarmView, instantEpoch, nextEveryOccurrence, nextJitteredOccurrence, jitterDelay, type Alarm, type RunRecord, type ToolError } from "../domain.js";
 import { nextCronOccurrence } from "../cron.js";
 import { buildAlarm, validateCreateArgs, type CreateSpec } from "../alarm-factory.js";
 import { wireTimeZones } from "../zone.js";
@@ -34,6 +34,8 @@ export interface PanelServiceDeps {
   sessionTitle: (sessionId: string) => string;
   /** Session-owned live event log (host in-memory store) for client-zone resolution. */
   sessionEvents: (sessionId: string) => readonly unknown[] | undefined;
+  /** Create-side workspace argument normalization (the panel sends explicit ids); absent -> workspace creates fail closed. */
+  resolveWorkspace?: (args: Record<string, unknown>, sessionCwd?: string) => Promise<Record<string, unknown> | ToolError>;
 }
 
 export class ProactivePanelService {
@@ -108,6 +110,24 @@ export class ProactivePanelService {
   }
 
   /**
+   * Shared pre-validation wiring for create/edit args: the client-zone default
+   * chain for time_zone, then workspace-id normalization (explicit ids only —
+   * the panel form always sends one for workspace targets).
+   */
+  private async wireWorkspace(args: Record<string, unknown>, sessionEvents: readonly unknown[] | undefined): Promise<{ args: Record<string, unknown> } | { error: PanelError }> {
+    let wired = wireTimeZones(args, sessionEvents);
+    if (wired["target_mode"] === "workspace" || wired["target_workspace_id"] !== undefined) {
+      if (this.deps.resolveWorkspace === undefined) {
+        return { error: { code: "not_found", message: "workspace targets are unavailable on this host (no workspace registry)." } };
+      }
+      const resolved = await this.deps.resolveWorkspace(wired);
+      if (isToolError(resolved)) return { error: resolved };
+      wired = resolved;
+    }
+    return { args: wired };
+  }
+
+  /**
    * Roll a failed mutation back in memory and surface the durable failure as
    * persistence_uncertain — the same contract the model tools follow, so the
    * panel never reports a save that a crash could silently drop.
@@ -133,7 +153,10 @@ export class ProactivePanelService {
       if (!isRecord(action.args)) return { ok: false, error: { code: "bad_action", message: "create.args must be an object." } };
       // time_zone is optional: wire through the one default chain (a zone-bearing
       // at object is the explicit intent; otherwise client zone -> host zone).
-      const spec = validateCreateArgs(wireTimeZones(action.args, this.deps.sessionEvents(action.sessionId)), action.sessionId);
+      // Workspace ids normalize through the shared resolver (existence check).
+      const wiredCreate = await this.wireWorkspace(action.args, this.deps.sessionEvents(action.sessionId));
+      if ("error" in wiredCreate) return { ok: false, error: wiredCreate.error };
+      const spec = validateCreateArgs(wiredCreate.args, action.sessionId);
       if ("code" in spec) return { ok: false, error: spec };
       const built = buildAlarm(action.sessionId, spec as CreateSpec, now);
       if ("code" in built) return { ok: false, error: built };
@@ -155,7 +178,9 @@ export class ProactivePanelService {
         return { ok: false, error: { code: "invalid_action", message: "alarm " + action.id + " cannot be edited in its current state." } };
       }
       if (!isRecord(action.args)) return { ok: false, error: { code: "bad_action", message: "edit.args must be an object." } };
-      const spec = validateCreateArgs(wireTimeZones(action.args, this.deps.sessionEvents(current.ownerSessionId)), current.ownerSessionId);
+      const wiredEdit = await this.wireWorkspace(action.args, this.deps.sessionEvents(current.ownerSessionId));
+      if ("error" in wiredEdit) return { ok: false, error: wiredEdit.error };
+      const spec = validateCreateArgs(wiredEdit.args, current.ownerSessionId);
       if ("code" in spec) return { ok: false, error: spec };
       const built = buildAlarm(current.ownerSessionId, spec as CreateSpec, now);
       if ("code" in built) return { ok: false, error: built };
