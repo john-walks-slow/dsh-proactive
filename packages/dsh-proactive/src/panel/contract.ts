@@ -77,7 +77,7 @@ export type PanelAction =
   /** Persist + hot-apply a partial global configuration patch. */
   | { kind: "update_config"; patch: Record<string, unknown> };
 
-export type PanelErrorCode = ProactiveErrorCode | "invalid_action" | "bad_action" | "forbidden" | "invalid_prefs" | "scope_mismatch";
+export type PanelErrorCode = ProactiveErrorCode | "bad_action" | "forbidden" | "invalid_prefs" | "scope_mismatch";
 
 export interface PanelError {
   code: PanelErrorCode;

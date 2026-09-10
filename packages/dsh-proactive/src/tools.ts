@@ -3,8 +3,9 @@
  * context (re-registration happens for resumed agents via agent/created).
  *
  *   proactive_set       create one host-level alarm for this session
- *   proactive_list      view this session's active alarms
- *   proactive_cancel    cancel one of this session's alarms
+ *   proactive_list      view this session's active alarms (all=true: every session's)
+ *   proactive_cancel    cancel one active alarm by exact id — any owner
+ *   proactive_update    replace one active alarm's spec by exact id — any owner
  *   no_reply             conclude the current turn with deep silence
  *   proactive_update_settings  partially update host-level settings (only the given fields)
  *
@@ -19,7 +20,7 @@
  */
 
 import type { Context } from "@deepseek-ai/cordis";
-import { defineTool, type ToolCallView, type ToolDefinition, type ValueSchemaSpec } from "@deepseek-ai/dsh-tools";
+import { defineTool, type ParameterSchemaSpec, type ToolCallView, type ToolDefinition, type ValueSchemaSpec } from "@deepseek-ai/dsh-tools";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
 import type { JsonValue } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
@@ -55,6 +56,12 @@ export interface ToolServices {
    * registry; workspace-targeted creates then fail closed.
    */
   resolveWorkspace?: (args: Record<string, unknown>, sessionCwd: string | undefined) => Promise<Record<string, unknown> | ToolError>;
+  /**
+   * The live event log of any session by id (client-zone default chain for
+   * updates of alarms owned by other sessions). Absent on hosts without the
+   * sessions service; timezone wiring then falls back to the host zone.
+   */
+  sessionEvents?: (sessionId: string) => readonly unknown[] | undefined;
 }
 
 
@@ -92,7 +99,10 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     everySeconds: { type: "integer" },
     cron: { type: "string" },
     at: { type: "string" },
-    jitterSeconds: { type: "integer" }
+    jitterSeconds: { type: "integer" },
+    // The alarm's canonical zone, so a list -> update round-trip can re-supply
+    // the full dialect without losing at/cron alignment.
+    timeZone: { type: "string" }
   }
 };
 
@@ -148,37 +158,46 @@ function sessionCwdOf(agent: Agent): string | undefined {
   return session.header?.cwd ?? session.meta?.cwd;
 }
 
-/** Build the five tool definitions bound to one agent + its host services. */
+/**
+ * The open alarm-spec dialect shared verbatim by proactive_set (create) and
+ * proactive_update (replace): exactly one selector, always a prompt. The
+ * model tools and the panel create/edit actions accept exactly one dialect —
+ * the only sanctioned difference is each tool's description of the DEFAULT
+ * target (creator session on set, owning session on update).
+ */
+const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
+  prompt: {
+    type: "string",
+    required: true,
+    description: "What the wake turn should do, in the user's language and context. Plain, concrete instruction; always required."
+  },
+  at: {
+    oneOf: [
+      { type: "string", description: "Strict RFC 3339 date-time with explicit zone, e.g. 2026-09-01T09:30:00+08:00." },
+      { type: "object", additionalProperties: false, properties: { date: { type: "string", required: true, description: "YYYY-MM-DD" }, time: { type: "string", required: true, description: "HH:mm:ss" }, time_zone: { type: "string", required: true, description: "IANA Area/Location" } } }
+    ],
+    description: "Absolute target with an explicit or implied time zone."
+  },
+  after_seconds: { type: "integer", description: "Positive delay in seconds from now." },
+  every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; occurrences align to creation time and missed ones are skipped." },
+  cron: { type: "string", description: "Five-field numeric cron expression, e.g. '0 9 * * 1-5' (minute hour day-of-month month day-of-week; 0 and 7 = Sunday; dom/dow OR rule; no names, '?' or seconds)." },
+  jitter_seconds: { type: "integer", description: "Unified per-occurrence random delay in seconds, 0.." + MAX_JITTER_SECONDS + " (0 = exact timing). Each fire is delayed by a uniform random amount drawn from (0, jitter_seconds]; absent/0 = no jitter." },
+  respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: defers inside the quiet window and is skipped when the daily budget is exhausted." },
+  target_mode: { type: "string", enum: ["resume", "fork", "new", "workspace"], description: "resume (default): wake the target session itself. fork: copy the target session's completed history into a new child session and wake it there. new: wake in a brand-new empty session. workspace: wake the workspace's most recently updated session at fire time (its blank New-Session slot when only blanks exist, else a fresh session created in the workspace) — the destination follows the user's latest activity in that workspace. Fork/new/workspace-created children are real sessions that stay in the sidebar." },
+  target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is this session. Must be omitted when target_mode is new or workspace." },
+  target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_mode workspace. Resolved and existence-checked host-side; alternatively pass target_workspace_path or omit both to use this session's own workspace." },
+  target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_mode workspace (resolved to its registry id host-side). The directory must already be registered as a workspace in the GUI; no workspace is auto-created." },
+  time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." },
+  compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
+};
+
+/** Build the six tool definitions bound to one agent + its host services. */
 export function proactiveToolDefinitions(agent: Agent, services: ToolServices): ToolDefinition[] {
   return [
         defineTool({
           name: "proactive_set",
           description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, or a five-field cron expression (minute hour day-of-month month day-of-week; occurrences at least 300 seconds apart). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required. The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent with no_reply.",
-          parameters: {
-            prompt: {
-              type: "string",
-              required: true,
-              description: "What the wake turn should do, in the user's language and context. Plain, concrete instruction; always required."
-            },
-            at: {
-              oneOf: [
-                { type: "string", description: "Strict RFC 3339 date-time with explicit zone, e.g. 2026-09-01T09:30:00+08:00." },
-                { type: "object", additionalProperties: false, properties: { date: { type: "string", required: true, description: "YYYY-MM-DD" }, time: { type: "string", required: true, description: "HH:mm:ss" }, time_zone: { type: "string", required: true, description: "IANA Area/Location" } } }
-              ],
-              description: "Absolute target with an explicit or implied time zone."
-            },
-            after_seconds: { type: "integer", description: "Positive delay in seconds from now." },
-            every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; occurrences align to creation time and missed ones are skipped." },
-            cron: { type: "string", description: "Five-field numeric cron expression, e.g. '0 9 * * 1-5' (minute hour day-of-month month day-of-week; 0 and 7 = Sunday; dom/dow OR rule; no names, '?' or seconds)." },
-            jitter_seconds: { type: "integer", description: "Unified per-occurrence random delay in seconds, 0.." + MAX_JITTER_SECONDS + " (0 = exact timing). Each fire is delayed by a uniform random amount drawn from (0, jitter_seconds]; absent/0 = no jitter." },
-            respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: defers inside the quiet window and is skipped when the daily budget is exhausted." },
-            target_mode: { type: "string", enum: ["resume", "fork", "new", "workspace"], description: "resume (default): wake the target session itself. fork: copy the target session's completed history into a new child session and wake it there. new: wake in a brand-new empty session. workspace: wake the workspace's most recently updated session at fire time (its blank New-Session slot when only blanks exist, else a fresh session created in the workspace) — the destination follows the user's latest activity in that workspace. Fork/new/workspace-created children are real sessions that stay in the sidebar." },
-            target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is this session. Must be omitted when target_mode is new or workspace." },
-            target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_mode workspace. Resolved and existence-checked host-side; alternatively pass target_workspace_path or omit both to use this session's own workspace." },
-            target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_mode workspace (resolved to its registry id host-side). The directory must already be registered as a workspace in the GUI; no workspace is auto-created." },
-            time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." },
-            compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
-          },
+          parameters: ALARM_SPEC_PARAMETERS,
           output: {
             schema: { oneOf: [ALARM_VIEW_SCHEMA, ERROR_SCHEMA] },
             render: renderValue
@@ -245,7 +264,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
 
         defineTool({
           name: "proactive_cancel",
-          description: "Cancel one active host-level alarm in this session by its exact id from proactive_set or proactive_list. Unknown or already-finished ids return a not_found error.",
+          description: "Cancel one active host-level alarm by its exact id from proactive_set or proactive_list — including alarms owned by other sessions (find their ids with proactive_list all=true, e.g. when the user asks you to clean up reminders made elsewhere). Unknown or already-finished ids return a not_found error.",
           parameters: {
             id: { type: "string", required: true, description: "Exact alarm id." }
           },
@@ -257,8 +276,8 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             if (exec.agent !== agent) return internalError();
             const id = typeof args["id"] === "string" ? args["id"] : "";
             const alarm = services.store.getAlarm(id);
-            if (alarm === undefined || alarm.ownerSessionId !== agent.session.id || alarm.status === "completed" || alarm.status === "cancelled") {
-              return { code: "not_found", message: "No active alarm with id " + id + " in this session." } as ToolError;
+            if (alarm === undefined || alarm.status === "completed" || alarm.status === "cancelled") {
+              return { code: "not_found", message: "No active alarm with id " + id + "." } as ToolError;
             }
             services.store.removeAlarm(id);
             try {
@@ -271,6 +290,79 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             return { id, cancelled: true };
           },
           presentCall: (callArgs) => presentCard("Cancel proactive alarm", String((callArgs as { id?: unknown })["id"] ?? ""))
+        }),
+
+        defineTool({
+          name: "proactive_update",
+          description: "Replace one active host-level alarm's full spec by its exact id — any owner, including alarms created by other sessions (ids via proactive_list all=true). Same dialect as proactive_set: the prompt and exactly one selector are always required, and every given field replaces the old value (a field you omit falls back to its dialect default, NOT to the old value — read the current spec from proactive_list first). The id, owning session, creation time, and run history are preserved; a paused alarm is resumed. Cannot edit in-flight, completed, cancelled, or failed alarms.",
+          parameters: {
+            id: { type: "string", required: true, description: "Exact alarm id to update." },
+            ...ALARM_SPEC_PARAMETERS,
+            target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is the alarm's OWNING session (not necessarily this one). Must be omitted when target_mode is new or workspace." },
+            target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_mode workspace. Resolved and existence-checked host-side; alternatively pass target_workspace_path, or omit both to keep the alarm's current workspace (for a non-workspace alarm being switched, omitting both uses this session's own workspace)." },
+            target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_mode workspace (resolved to its registry id host-side; the directory must already be registered). When this and target_workspace_id are both omitted: a workspace alarm keeps its current workspace, a non-workspace alarm being switched uses this session's own workspace." }
+          },
+          output: {
+            schema: { oneOf: [ALARM_VIEW_SCHEMA, ERROR_SCHEMA] },
+            render: renderValue
+          },
+          async execute(args, exec) {
+            if (exec.agent !== agent) return internalError();
+            const id = typeof args["id"] === "string" ? args["id"] : "";
+            const current = services.store.getAlarm(id);
+            if (current === undefined) {
+              return { code: "not_found", message: "No alarm with id " + id + "." } as ToolError;
+            }
+            if (current.status === "in-flight" || current.status === "completed" || current.status === "cancelled" || current.status === "failed") {
+              return { code: "invalid_action", message: "Alarm " + id + " cannot be edited in its current state." } as ToolError;
+            }
+            if (services.store.corrupt) return { code: "corrupt_store", message: "The alarm store is corrupt; fix or remove alarms.json." } as ToolError;
+            // Strip the id: the create dialect validates an exact key set.
+            const { id: _drop, ...spec } = args as Record<string, unknown>;
+            // Zone default chain follows the OWNING session's client (the
+            // alarm belongs to its owner, not to whoever happens to edit it).
+            let wired = wireTimeZones(spec, services.sessionEvents?.(current.ownerSessionId));
+            if (wired["target_mode"] === "workspace" || wired["target_workspace_id"] !== undefined || wired["target_workspace_path"] !== undefined) {
+              if (wired["target_workspace_id"] === undefined && wired["target_workspace_path"] === undefined && current.target.mode === "workspace") {
+                // No explicit workspace given: keep the alarm's already-resolved
+                // one (no re-check — a vanished workspace still lets the user
+                // retarget the alarm instead of blocking the edit).
+                wired = { ...wired, target_workspace_id: current.target.workspaceId };
+              } else {
+                if (services.resolveWorkspace === undefined) {
+                  return { code: "not_found", message: "workspace targets are unavailable on this host (no workspace registry)." } as ToolError;
+                }
+                const resolved = await services.resolveWorkspace(wired, sessionCwdOf(agent));
+                if (isToolError(resolved)) return resolved;
+                wired = resolved;
+              }
+            }
+            const shape = validateCreateArgs(wired, current.ownerSessionId);
+            if (isToolError(shape)) return shape;
+            const built = buildAlarm(current.ownerSessionId, shape, services.now());
+            if (isToolError(built)) return built;
+            // Keep identity + run history; replace the trigger-facing fields.
+            const updated: Alarm = {
+              ...built.alarm,
+              id: current.id,
+              ownerSessionId: current.ownerSessionId,
+              createdAt: current.createdAt,
+              runCount: current.runCount,
+              lastRunAt: current.lastRunAt,
+              status: "scheduled",
+              updatedAt: new Date(services.now()).toISOString()
+            };
+            services.store.replaceAlarm(updated);
+            try {
+              await services.store.persist();
+            } catch {
+              services.store.replaceAlarm(current);
+              return { code: "persistence_uncertain", message: "The alarm change was not durably stored; please retry." } as ToolError;
+            }
+            services.scheduler.requestDrive();
+            return toAlarmView(updated, services.now());
+          },
+          presentCall: (callArgs) => presentCard("Update proactive alarm", String((callArgs as { id?: unknown })["id"] ?? ""))
         }),
 
         defineTool({
@@ -356,7 +448,7 @@ function settingsView(config: ProactiveConfig): JsonValue {
 }
 
 /**
- * Register the five tools on an agent's scoped context; returns disposable
+ * Register the six tools on an agent's scoped context; returns disposable
  * tools. The definitions themselves live in {@link proactiveToolDefinitions}
  * so they can be unit-tested without a cordis context.
  */

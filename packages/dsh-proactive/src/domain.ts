@@ -173,11 +173,14 @@ export type AlarmView = {
   everySeconds?: number;
   cron?: string;
   at?: string;
+  /** The alarm's canonical zone (drives at/cron alignment and wake framing). */
+  timeZone?: string;
 }
 
 export type ProactiveErrorCode =
   | "invalid_prompt"
   | "invalid_trigger"
+  | "invalid_action"
   | "invalid_time_zone"
   | "not_future"
   | "frequency_too_high"
@@ -495,7 +498,8 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
     ...(alarm.type === "cron" && "expr" in alarm.trigger
       ? { cron: alarm.trigger["expr"], ...(typeof alarm.trigger["jitterSeconds"] === "number" && alarm.trigger["jitterSeconds"] > 0 ? { jitterSeconds: alarm.trigger["jitterSeconds"] } : {}) }
       : {}),
-    ...(alarm.type === "once" && "at" in alarm.trigger ? { at: alarm.trigger["at"] } : {})
+    ...(alarm.type === "once" && "at" in alarm.trigger ? { at: alarm.trigger["at"] } : {}),
+    ...(alarm.timeZone !== undefined ? { timeZone: alarm.timeZone } : {})
   };
 }
 

@@ -70,10 +70,10 @@ function allocateId(prefix: string): string {
 export function validateCreateArgs(args: Record<string, unknown>, defaultTargetSessionId: string): CreateSpec | ToolError {
   const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "target_mode", "target_session_id", "target_workspace_id", "compaction"]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "proactive_set accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_session_id, target_workspace_id, compaction." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "the alarm spec accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_session_id, target_workspace_id, compaction." };
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined) + Number(args["cron"] !== undefined);
-  if (selectors !== 1) return { code: "invalid_trigger", message: "proactive_set requires exactly one of at, after_seconds, every_seconds, or cron." };
+  if (selectors !== 1) return { code: "invalid_trigger", message: "the alarm spec requires exactly one of at, after_seconds, every_seconds, or cron." };
   let jitterSeconds: number | undefined;
   if (args["jitter_seconds"] !== undefined) {
     try {

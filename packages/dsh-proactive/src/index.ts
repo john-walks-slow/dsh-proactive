@@ -163,7 +163,8 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       driver,
       scheduler,
       now: () => Date.now(),
-      resolveWorkspace
+      resolveWorkspace,
+      sessionEvents: sessionEventsOf(ctx)
     });
   };
   const stopCreated = ctx.on("agent/created", ({ agent }: { agent: Agent }) => {

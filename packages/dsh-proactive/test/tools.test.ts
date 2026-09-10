@@ -73,7 +73,7 @@ function harness(extra: Partial<ToolServices> = {}) {
 }
 
 const code = (v: unknown): string | undefined => (v as { code?: string })["code"];
-const asView = (v: unknown) => v as { id?: string; type?: string; targetMode?: string; targetSessionId?: string; respectQuietHours?: boolean; state?: string; everySeconds?: number; cron?: string; at?: string; nextDueAt?: string; jitterSeconds?: number; compaction?: string };
+const asView = (v: unknown) => v as { id?: string; type?: string; targetMode?: string; targetSessionId?: string; respectQuietHours?: boolean; state?: string; everySeconds?: number; cron?: string; at?: string; nextDueAt?: string; jitterSeconds?: number; compaction?: string; prompt?: string; timeZone?: string; targetWorkspaceId?: string };
 
 function v2Fixture(id: string, owner: string, status: Alarm["status"] = "scheduled"): Alarm {
   return {
@@ -295,17 +295,95 @@ test("proactive_list with all=true lists active alarms across all sessions", asy
   assert.deepEqual(allRes.map((r) => r.id).sort(), ["a", "b", "d"]);
 });
 
-test("proactive_cancel cancels and maps unknown/foreign ids to not_found", async () => {
+test("proactive_cancel cancels any owner by exact id; unknown/finished map to not_found", async () => {
   const h = harness();
   const created = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5 }));
   const id = created.id as string;
   const ok = await h.run("proactive_cancel", { id });
   assert.deepEqual(ok, { id, cancelled: true });
   assert.equal(h.store.alarms.length, 0);
-  assert.deepEqual(code(await h.run("proactive_cancel", { id: "nope" })), "not_found");
-  // other-session ids are not_found too, never { cancelled: false }
+  assert.equal(code(await h.run("proactive_cancel", { id: "nope" })), "not_found");
+  // cross-session: a foreign-owned alarm is cancellable too (ids via all=true)
   h.store.addAlarm(v2Fixture("foreign", "s2"));
-  assert.equal(code(await h.run("proactive_cancel", { id: "foreign" })), "not_found");
+  assert.deepEqual(await h.run("proactive_cancel", { id: "foreign" }), { id: "foreign", cancelled: true });
+  // terminal states stay not_found, never { cancelled: false }
+  h.store.addAlarm(v2Fixture("done", "s1", "completed"));
+  assert.equal(code(await h.run("proactive_cancel", { id: "done" })), "not_found");
+});
+
+test("proactive_update replaces a foreign-owned alarm's spec, keeping identity and history", async () => {
+  // The whole point of the tool: any session can retarget/refire-schedule any
+  // alarm once it knows the id (proactive_list all=true).
+  const original = v2Fixture("alarm-x", "s2");
+  original.runCount = 3;
+  original.lastRunAt = "2026-09-01T08:00:00.000Z";
+  original.prompt = "old prompt";
+  const h = harness({ sessionEvents: (sessionId) => (sessionId === "s2" ? [{ type: "user/message", time: 100, data: { source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } } }] : undefined) });
+  h.store.addAlarm(original);
+  const view = asView(await h.run("proactive_update", { id: "alarm-x", prompt: "new prompt", every_seconds: 600 }));
+  // full dialect honored: prompt + trigger replaced
+  assert.equal(view.prompt, "new prompt");
+  assert.equal(view.type, "every");
+  assert.equal(view.everySeconds, 600);
+  // zone default chain follows the OWNING session's client zone, not the editor's
+  assert.equal((view as { timeZone?: string }).timeZone, "Asia/Tokyo");
+  const stored = h.store.getAlarm("alarm-x") as Alarm;
+  // identity + history preserved; owner unchanged (this session is s1, owner stays s2)
+  assert.equal(stored.ownerSessionId, "s2");
+  assert.equal(stored.createdAt, original.createdAt);
+  assert.equal(stored.runCount, 3);
+  assert.equal(stored.lastRunAt, original.lastRunAt);
+  assert.equal(stored.status, "scheduled");
+  assert.ok(stored.updatedAt > original.updatedAt);
+  assert.equal(h.requestDrives, 1);
+});
+
+test("proactive_update: full-dialect validation and state guards", async () => {
+  const h = harness();
+  h.store.addAlarm(v2Fixture("gone", "s2"));
+  assert.equal(code(await h.run("proactive_update", { id: "missing", prompt: "x", after_seconds: 5 })), "not_found");
+  // the dialect is full-replace: exactly one selector always required
+  // (prompt itself is schema-required, so its absence is caught by the tool
+  // runtime before the closed dialect sees it)
+  assert.equal(code(await h.run("proactive_update", { id: "gone", prompt: "x" })), "invalid_trigger");
+  assert.equal(code(await h.run("proactive_update", { id: "gone", prompt: "x", every_seconds: 299 })), "frequency_too_high");
+  // unknown keys stay closed (id itself is stripped by the tool)
+  assert.equal(code(await h.run("proactive_update", { id: "gone", prompt: "x", after_seconds: 5, wake_reason: "y" })), "invalid_trigger");
+  // non-editable states are invalid_action, not not_found (the alarm exists)
+  for (const status of ["in-flight", "completed", "cancelled", "failed"] as const) {
+    h.store.addAlarm(v2Fixture("st-" + status, "s1", status));
+    assert.equal(code(await h.run("proactive_update", { id: "st-" + status, prompt: "x", after_seconds: 5 })), "invalid_action");
+  }
+  // paused is editable and comes back scheduled
+  h.store.addAlarm(v2Fixture("paused-one", "s1", "paused"));
+  const view = asView(await h.run("proactive_update", { id: "paused-one", prompt: "x", after_seconds: 5 }));
+  assert.equal(view.state, "scheduled");
+});
+
+test("proactive_update: workspace target keeps the alarm's workspace unless given a new one", async () => {
+  // No resolver wired: an explicit path/new-id arm would fail closed, but the
+  // carryover of the already-resolved id must not need one.
+  const h = harness();
+  const wsAlarm: Alarm = { ...v2Fixture("ws-alarm", "s2"), target: { mode: "workspace", workspaceId: "ws-9" } };
+  h.store.addAlarm(wsAlarm);
+  const view = asView(await h.run("proactive_update", { id: "ws-alarm", prompt: "x", after_seconds: 5, target_mode: "workspace" }));
+  assert.equal(view.targetMode, "workspace");
+  assert.equal((view as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-9");
+  // a new explicit id routes through the resolver (unavailable here → closed error)
+  assert.equal(code(await h.run("proactive_update", { id: "ws-alarm", prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-other" })), "not_found");
+  // switching a non-workspace alarm to workspace with no args uses the editor's cwd default → resolver → closed error
+  h.store.addAlarm(v2Fixture("plain", "s2"));
+  assert.equal(code(await h.run("proactive_update", { id: "plain", prompt: "x", after_seconds: 5, target_mode: "workspace" })), "not_found");
+});
+
+test("proactive_update restores the old alarm when persistence fails", async () => {
+  const h = harness();
+  h.store.addAlarm(v2Fixture("keep", "s2"));
+  h.store.failPersist = true;
+  assert.equal(code(await h.run("proactive_update", { id: "keep", prompt: "x", after_seconds: 5 })), "persistence_uncertain");
+  const stored = h.store.getAlarm("keep") as Alarm;
+  assert.equal(stored.prompt, "p"); // rolled back, not the half-updated spec
+  assert.equal(stored.type, "once");
 });
 
 test("proactive_cancel restores the alarm when persistence fails", async () => {
