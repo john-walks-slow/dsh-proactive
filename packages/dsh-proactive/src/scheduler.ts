@@ -226,8 +226,13 @@ export class ProactiveScheduler {
       const attempt = this.retries.get(alarm.id)!;
       await this.recordRun(alarm, "failed", 0, "wake failed (attempt " + attempt + ")", result.sessionId);
       if (attempt >= this.config.maxRetriesPerFire) {
-        this.terminate(alarm, "failed", "persistent wake failure");
         this.retries.delete(alarm.id);
+        if (alarm.type === "once") {
+          this.terminate(alarm, "failed", "persistent wake failure");
+        } else {
+          this.deps.log("warn", "alarm " + alarm.id + " hit max retries; advancing to next occurrence");
+          this.advancePast(alarm, now, "failed");
+        }
         return "failed";
       }
       return "retry";

@@ -202,6 +202,40 @@ test("busy defers and advances after maxRetriesPerFire", async (tctx) => {
   assert.equal(h.store.getAlarm("b1")?.status, "completed"); // max retries reached -> skip+advance
 });
 
+test("failed once alarm terminates after maxRetriesPerFire", async (tctx) => {
+  const h = await harness({ maxRetriesPerFire: 2 });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.outcomes.push({ outcome: "failed" }, { outcome: "failed" });
+  h.store.addAlarm(alarm("f1"));
+  h.scheduler.start();
+  await h.flush(() => h.fired.length >= 1 && h.store.getAlarm("f1")?.status === "scheduled" && Date.parse(h.store.getAlarm("f1")!.nextDueAt) > BASE_NOW);
+  assert.equal(h.fired.length, 1);
+  assert.equal(h.store.getAlarm("f1")?.status, "scheduled");
+  h.clock.t += 31_000;
+  h.scheduler.requestDrive();
+  await h.flush(() => h.store.getAlarm("f1")?.status === "failed");
+  assert.equal(h.fired.length, 2);
+  assert.equal(h.store.getAlarm("f1")?.status, "failed");
+});
+
+test("failed repeating alarm advances to next occurrence after maxRetriesPerFire", async (tctx) => {
+  const h = await harness({ maxRetriesPerFire: 2 });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.outcomes.push({ outcome: "failed" }, { outcome: "failed" });
+  const anchor = BASE_NOW - 7200_000;
+  h.store.addAlarm(everyAlarm("fr1", 3600, new Date(anchor).toISOString(), undefined, { nextDueAt: new Date(BASE_NOW - 1).toISOString() }));
+  h.scheduler.start();
+  await h.flush(() => h.fired.length >= 1 && h.store.getAlarm("fr1")?.status === "scheduled" && Date.parse(h.store.getAlarm("fr1")!.nextDueAt) > BASE_NOW);
+  assert.equal(h.fired.length, 1);
+  assert.equal(h.store.getAlarm("fr1")?.status, "scheduled");
+  h.clock.t += 31_000;
+  h.scheduler.requestDrive();
+  await h.flush(() => h.fired.length === 2 && h.store.getAlarm("fr1")?.status === "scheduled" && Date.parse(h.store.getAlarm("fr1")!.nextDueAt) === BASE_NOW + 3600_000);
+  assert.equal(h.fired.length, 2);
+  assert.equal(h.store.getAlarm("fr1")?.status, "scheduled");
+  assert.equal(Date.parse(h.store.getAlarm("fr1")!.nextDueAt), BASE_NOW + 3600_000);
+});
+
 test("visible reply outcome spends budget", async (tctx) => {
   const h = await harness();
   tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
