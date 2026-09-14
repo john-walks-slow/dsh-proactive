@@ -10,11 +10,11 @@
 import type { PanelAction } from "../panel/contract.js";
 
 /**
- * One alarm row on the wire (v2): `sessionId` keeps its historical meaning of
- * OWNER; the wake destination is surface separately via targetMode /
- * targetSessionId (owner ⇔ create-side, target ⇔ wake-side). A workspace
- * target names the workspace by id; the destination session is resolved at
- * fire time and never appears here.
+ * One alarm row on the wire (v3): `sessionId` keeps its historical meaning of
+ * OWNER; the wake destination is surfaced separately via targetMode /
+ * targetSource + the per-source id. A workspace- or preset-sourced target
+ * names its source by id; the destination session is resolved at fire time
+ * and never appears here.
  */
 export interface AlarmRowDto {
   id: string;
@@ -22,14 +22,21 @@ export interface AlarmRowDto {
   sessionTitle: string;
   type: "once" | "every" | "cron";
   targetMode: "resume" | "fork" | "new" | "workspace";
-  /** Present for resume/fork targets. */
+  /** Source arm for resume/fork targets (session/workspace/preset). */
+  targetSource?: "session" | "workspace" | "preset";
+  /** Present for resume/fork + session-source targets. */
   targetSessionId?: string;
   /** Display title of the target session (client-enriched; empty = unknown). */
   targetSessionTitle?: string;
-  /** Present for workspace targets: the workspace registry id. */
+  /** Present for workspace-sourced / new-with-workspace targets: the workspace registry id. */
   targetWorkspaceId?: string;
   /** Display title of the target workspace (client-enriched; empty = unknown). */
   targetWorkspaceTitle?: string;
+  /** Present for preset-sourced / new-with-preset targets: the agent preset id. */
+  targetPresetId?: string;
+  /** Present for new-mode alarms with a model override. */
+  targetProvider?: string;
+  targetModel?: string;
   respectQuietHours: boolean;
   prompt: string;
   nextDueAt: string;
@@ -51,6 +58,8 @@ export interface PanelSnapshotDto {
    * falls back to the bundled repo default until the next host restart.
    */
   config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; defaultPrompt?: string };
+  /** Preset roster rows for the create form (v3; absent on older hosts). */
+  presets?: readonly PresetInfo[];
   alarms: AlarmRowDto[];
   runs: Array<{ id: string; alarmId: string; sessionId: string; firedAt: string; decision: string; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string }>;
 }
@@ -73,6 +82,21 @@ export interface WorkspaceInfo {
   id: string;
   title: string;
   path: string;
+}
+
+/** One agent preset row for pickers (from the panel snapshot roster). */
+export interface PresetInfo {
+  id: string;
+  name?: string;
+  description?: string;
+  isDefault?: boolean;
+  broken?: string;
+}
+
+/** Option label for one preset: name when authored, else the id. */
+export function presetLabel(preset: PresetInfo): string {
+  const base = preset.name !== undefined && preset.name !== "" ? preset.name : preset.id;
+  return preset.isDefault === true ? base + " · default" : base;
 }
 
 /** One full panel data pull: scoped snapshot plus the shared session list. */

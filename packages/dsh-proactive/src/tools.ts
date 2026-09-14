@@ -30,6 +30,7 @@ import {
   inputError,
   internalError,
   isToolError,
+  targetSourceOf,
   toAlarmView,
   type Alarm,
   type ToolError
@@ -82,10 +83,17 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     sessionId: { type: "string", required: true },
     type: { type: "string", required: true, enum: ["once", "every", "cron"] },
     targetMode: { type: "string", required: true, enum: ["resume", "fork", "new", "workspace"] },
-    // Present only for resume/fork targets; "new" never carries one.
+    // Present only for resume/fork targets ("workspace" is a stored v2 spelling).
+    targetSource: { type: "string", enum: ["session", "workspace", "preset"] },
+    // The named source session; "new" never carries one.
     targetSessionId: { type: "string" },
-    // Present only for workspace targets.
+    // Present only for workspace-sourced or workspace-configured targets.
     targetWorkspaceId: { type: "string" },
+    // Present only for preset-sourced or preset-configured targets.
+    targetPresetId: { type: "string" },
+    // Present only for target_mode new with a model override.
+    targetProvider: { type: "string" },
+    targetModel: { type: "string" },
     respectQuietHours: { type: "boolean", required: true },
     prompt: { type: "string", required: true },
     nextDueAt: { type: "string", required: true },
@@ -183,10 +191,14 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   cron: { type: "string", description: "Five-field numeric cron expression, e.g. '0 9 * * 1-5' (minute hour day-of-month month day-of-week; 0 and 7 = Sunday; dom/dow OR rule; no names, '?' or seconds)." },
   jitter_seconds: { type: "integer", description: "Unified per-occurrence random delay in seconds, 0.." + MAX_JITTER_SECONDS + " (0 = exact timing). Each fire is delayed by a uniform random amount drawn from (0, jitter_seconds]; absent/0 = no jitter." },
   respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: defers inside the quiet window and is skipped when the daily budget is exhausted." },
-  target_mode: { type: "string", enum: ["resume", "fork", "new", "workspace"], description: "resume (default): wake the target session itself. fork: copy the target session's completed history into a new child session and wake it there. new: wake in a brand-new empty session. workspace: wake the workspace's most recently updated session at fire time (its blank New-Session slot when only blanks exist, else a fresh session created in the workspace) — the destination follows the user's latest activity in that workspace. Fork/new/workspace-created children are real sessions that stay in the sidebar." },
-  target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is this session. Must be omitted when target_mode is new or workspace." },
-  target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_mode workspace. Resolved and existence-checked host-side; alternatively pass target_workspace_path or omit both to use this session's own workspace." },
-  target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_mode workspace (resolved to its registry id host-side). The directory must already be registered as a workspace in the GUI; no workspace is auto-created." },
+  target_mode: { type: "string", enum: ["resume", "fork", "new", "workspace"], description: "Where the wake lands. resume (default): wake the target session itself. fork: copy the source session's completed history into a new child session and wake it there (fails when the source has no completed turn). new: wake in a brand-new empty session every fire. workspace: legacy spelling of resume with target_source workspace (still accepted). For resume/fork the source conversation is picked by target_source." },
+  target_source: { type: "string", enum: ["session", "workspace", "preset"], description: "How resume/fork name their source conversation. session (default): the exact target_session_id. workspace: the workspace's most recently active session at fire time (its blank New-Session slot when only blanks exist; resume then falls back to creating a session in the workspace, fork fails). preset: the most recently active session running the preset (resume falls back to a fresh session on the preset, fork fails). Inferred when omitted: target_workspace_id alone implies workspace, target_preset_id alone implies preset, otherwise session. Must be omitted when target_mode is new or workspace." },
+  target_session_id: { type: "string", description: "The source session id, for target_source session. For resume this is the wake destination; for fork the parent to branch from. Default is this session. Must be omitted for any other source." },
+  target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_source workspace (or the legacy target_mode workspace). Resolved and existence-checked host-side; alternatively pass target_workspace_path or omit both (legacy mode only) to use this session's own workspace." },
+  target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_source workspace (or the legacy target_mode workspace); resolved to its registry id host-side. The directory must already be registered as a workspace in the GUI; no workspace is auto-created." },
+  target_preset_id: { type: "string", description: "Agent preset id, for target_source preset: the alarm wakes the conversation running that preset. For target_mode new it stamps the fresh session with the preset instead. Matching folds live sessions' effective preset (later selections included) and cold sessions' creation stamp." },
+  target_provider: { type: "string", description: "LLM provider for the wake turn, for target_mode new only (e.g. 'deepseek'). Both target_provider and target_model must be given together to win outright; a partial pair only fills the missing side of the fallback chain." },
+  target_model: { type: "string", description: "LLM model id for the wake turn, for target_mode new only. Must be a real model id on the chosen provider." },
   time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." },
   compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
 };
@@ -298,9 +310,12 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
           parameters: {
             id: { type: "string", required: true, description: "Exact alarm id to update." },
             ...ALARM_SPEC_PARAMETERS,
-            target_session_id: { type: "string", description: "Wake destination (any dsh session id). For resume/fork the target session; default is the alarm's OWNING session (not necessarily this one). Must be omitted when target_mode is new or workspace." },
-            target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_mode workspace. Resolved and existence-checked host-side; alternatively pass target_workspace_path, or omit both to keep the alarm's current workspace (for a non-workspace alarm being switched, omitting both uses this session's own workspace)." },
-            target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_mode workspace (resolved to its registry id host-side; the directory must already be registered). When this and target_workspace_id are both omitted: a workspace alarm keeps its current workspace, a non-workspace alarm being switched uses this session's own workspace." }
+            target_session_id: { type: "string", description: "The source session id, for target_source session. For resume the wake destination, for fork the parent; default is the alarm's OWNING session (not necessarily this one). Must be omitted for any other source." },
+            target_workspace_id: { type: "string", description: "Workspace registry id (uuid), for target_source workspace. Resolved and existence-checked host-side; alternatively pass target_workspace_path, or omit both to keep the alarm's current workspace (a non-workspace alarm being switched with none given uses this session's own workspace)." },
+            target_workspace_path: { type: "string", description: "Absolute directory path of an existing registered workspace, for target_source workspace; resolved to its registry id host-side. When this and target_workspace_id are both omitted: a workspace-sourced alarm keeps its current workspace, a non-workspace alarm being switched uses this session's own workspace." },
+            target_preset_id: { type: "string", description: "Agent preset id, for target_source preset or target_mode new. Omitted while keeping a preset-sourced alarm: the alarm's current preset carries over." },
+            target_provider: { type: "string", description: "LLM provider for the wake turn, target_mode new only. Omitted while updating a new-mode alarm: the stored provider carries over." },
+            target_model: { type: "string", description: "LLM model id for the wake turn, target_mode new only. Omitted while updating a new-mode alarm: the stored model carries over." }
           },
           output: {
             schema: { oneOf: [ALARM_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -322,20 +337,46 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             // Zone default chain follows the OWNING session's client (the
             // alarm belongs to its owner, not to whoever happens to edit it).
             let wired = wireTimeZones(spec, services.sessionEvents?.(current.ownerSessionId));
-            if (wired["target_mode"] === "workspace" || wired["target_workspace_id"] !== undefined || wired["target_workspace_path"] !== undefined) {
-              if (wired["target_workspace_id"] === undefined && wired["target_workspace_path"] === undefined && current.target.mode === "workspace") {
-                // No explicit workspace given: keep the alarm's already-resolved
-                // one (no re-check — a vanished workspace still lets the user
-                // retarget the alarm instead of blocking the edit).
-                wired = { ...wired, target_workspace_id: current.target.workspaceId };
-              } else {
-                if (services.resolveWorkspace === undefined) {
-                  return { code: "not_found", message: "workspace targets are unavailable on this host (no workspace registry)." } as ToolError;
-                }
-                const resolved = await services.resolveWorkspace(wired, sessionCwdOf(agent));
-                if (isToolError(resolved)) return resolved;
-                wired = resolved;
+            // v3 carryovers (full-replace dialect): a source/target field the
+            // caller leaves out keeps the alarm's current spelling — an edit of
+            // just the schedule must not silently retarget the conversation.
+            // They only fire when NO source-naming arg is present (an explicit
+            // retarget to another source must win, not collide).
+            const prev = current.target;
+            const noSourceNamed = wired["target_session_id"] === undefined && wired["target_workspace_id"] === undefined && wired["target_workspace_path"] === undefined && wired["target_preset_id"] === undefined;
+            // "Nothing selected" = the update neither names a source/mode nor
+            // any source id: a bare schedule edit keeps the conversation.
+            const nothingSelected = noSourceNamed && wired["target_source"] === undefined && wired["target_mode"] === undefined;
+            // The carryover injects the already-resolved workspace id; the
+            // resolver gate below must then stay closed (no re-check — a
+            // vanished workspace still lets the user retarget the alarm
+            // instead of blocking the edit).
+            let workspaceCarriedOver = false;
+            if (prev.mode === "resume" || prev.mode === "fork") {
+              const source = targetSourceOf(prev);
+              if (source === "workspace" && noSourceNamed && (nothingSelected || wired["target_source"] === "workspace")) {
+                wired = { ...wired, target_workspace_id: prev.workspaceId };
+                workspaceCarriedOver = true;
+              } else if (source === "preset" && noSourceNamed && (nothingSelected || wired["target_source"] === "preset")) {
+                wired = { ...wired, target_preset_id: prev.presetId };
               }
+              // source session: no carryover — the dialect default (the
+              // owning session) IS derivable and documented, per v2.
+            } else if (prev.mode === "workspace" && noSourceNamed && (nothingSelected || wired["target_mode"] === "workspace")) {
+              wired = { ...wired, target_workspace_id: prev.workspaceId };
+              workspaceCarriedOver = true;
+            } else if (prev.mode === "new" && wired["target_mode"] === "new") {
+              if (wired["target_preset_id"] === undefined && prev.presetId !== undefined) wired = { ...wired, target_preset_id: prev.presetId };
+              if (wired["target_provider"] === undefined && prev.provider !== undefined) wired = { ...wired, target_provider: prev.provider };
+              if (wired["target_model"] === undefined && prev.model !== undefined) wired = { ...wired, target_model: prev.model };
+            }
+            if (!workspaceCarriedOver && (wired["target_mode"] === "workspace" || wired["target_source"] === "workspace" || wired["target_workspace_id"] !== undefined || wired["target_workspace_path"] !== undefined)) {
+              if (services.resolveWorkspace === undefined) {
+                return { code: "not_found", message: "workspace targets are unavailable on this host (no workspace registry)." } as ToolError;
+              }
+              const resolved = await services.resolveWorkspace(wired, sessionCwdOf(agent));
+              if (isToolError(resolved)) return resolved;
+              wired = resolved;
             }
             const shape = validateCreateArgs(wired, current.ownerSessionId);
             if (isToolError(shape)) return shape;

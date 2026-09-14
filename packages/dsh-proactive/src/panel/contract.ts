@@ -12,6 +12,15 @@
 
 import type { AlarmView, ProactiveErrorCode, RunDecision } from "../domain.js";
 
+/** One preset row for pickers (path-free roster projection). */
+export interface PresetRosterRow {
+  id: string;
+  name?: string;
+  description?: string;
+  isDefault?: boolean;
+  broken?: string;
+}
+
 export interface RunView {
   id: string;
   alarmId: string;
@@ -51,6 +60,12 @@ export interface AlarmRowView extends AlarmView {
 export interface PanelSnapshot {
   server: { now: string; dataDir: string; corrupt: boolean };
   config: ConfigView;
+  /**
+   * Agent preset roster rows for pickers (v3). Optional for backward
+   * compatibility with pre-v3 clients; an absent/empty roster degrades the
+   * preset pickers to free-text inputs.
+   */
+  presets?: readonly PresetRosterRow[];
   alarms: AlarmRowView[];
   runs: RunView[];
 }
@@ -95,9 +110,16 @@ export type PanelResult = { ok: true; snapshot: PanelSnapshot } | { ok: false; e
  *
  * The form has NO owner field: the owner is derived by the caller — the
  * conversation tab pins its own session (scope rule), the settings page uses
- * the target session (resume/fork) or falls back to the host-panel pseudo
- * session (new). One "target session id" input serves resume (wake that
- * session) and fork (branch from that session); `new` ignores it entirely.
+ * the target session (resume session-source/fork) or falls back to the
+ * host-panel pseudo session (new / dynamic sources).
+ *
+ * v3 target dialect: targetMode (new/resume/fork; the stored "workspace"
+ * spelling round-trips into edit forms but new submissions send resume +
+ * targetSource) is orthogonal to targetSource (session/workspace/preset):
+ *  - new: fresh session per fire, optional workspace/preset/model config;
+ *  - resume/fork + session: the named session id;
+ *  - resume/fork + workspace: the workspace's most active session at fire time;
+ *  - resume/fork + preset: the preset's most active session at fire time.
  */
 export interface PanelCreateForm {
   prompt: string;
@@ -120,10 +142,18 @@ export interface PanelCreateForm {
   /** Per-alarm silent-wake compaction; absent = DEFAULT_COMPACTION (minimal). */
   compaction?: "off" | "minimal" | "aggressive";
   targetMode?: "resume" | "fork" | "new" | "workspace";
-  /** Destination for resume/fork; empty/absent = derive host-side. Ignored for new/workspace. */
+  /** Source for resume/fork targets: session (default) / workspace / preset. */
+  targetSource?: "session" | "workspace" | "preset";
+  /** Source session id, for targetSource session (resume destination, fork parent). */
   targetSessionId?: string;
-  /** Destination workspace registry id, for targetMode workspace. */
+  /** Workspace registry id, for targetSource workspace / legacy targetMode workspace / targetMode new. */
   targetWorkspaceId?: string;
+  /** Preset id, for targetSource preset (resume/fork) or the targetMode new preset stamp. */
+  targetPresetId?: string;
+  /** LLM provider, for targetMode new. */
+  targetProvider?: string;
+  /** LLM model id, for targetMode new. */
+  targetModel?: string;
 }
 
 /** Map a form to the shared argument root so one validator serves both surfaces. */
@@ -150,16 +180,37 @@ export function createArgsFromForm(form: PanelCreateForm): Record<string, unknow
   if (form.timeZone !== undefined && form.timeZone !== "") args["time_zone"] = form.timeZone;
   if (form.respectQuietHours !== undefined) args["respect_quiet_hours"] = form.respectQuietHours;
   if (form.compaction !== undefined) args["compaction"] = form.compaction;
-  if (form.targetMode !== undefined && form.targetMode !== "resume") args["target_mode"] = form.targetMode;
-  // A stale id left over from switching modes must not leak into a "new" or
-  // "workspace" target (the shared validator rejects those combinations);
-  // resume/fork ids are sent trimmed so a padded input never fails validation.
-  if (form.targetMode !== "new" && form.targetMode !== "workspace") {
-    const targetSessionId = (form.targetSessionId ?? "").trim();
-    if (targetSessionId !== "") args["target_session_id"] = targetSessionId;
-  }
-  if (form.targetMode === "workspace" && (form.targetWorkspaceId ?? "").trim() !== "") {
-    args["target_workspace_id"] = (form.targetWorkspaceId ?? "").trim();
+  const mode = form.targetMode ?? "resume";
+  const source = mode === "resume" || mode === "fork"
+    ? (form.targetSource ?? (form.targetWorkspaceId !== undefined && form.targetPresetId === undefined && form.targetSessionId === undefined ? "workspace" : "session"))
+    : undefined;
+  if (mode !== "resume") args["target_mode"] = mode;
+  if (source !== undefined && source !== "session") args["target_source"] = source;
+  // Stale fields left over from switching mode/source must not leak into a
+  // combination the shared validator rejects; ids are sent trimmed so a
+  // padded input never fails validation.
+  if (mode === "resume" || mode === "fork" || mode === "workspace") {
+    if (source === "session") {
+      const targetSessionId = (form.targetSessionId ?? "").trim();
+      if (targetSessionId !== "") args["target_session_id"] = targetSessionId;
+    }
+    if (source === "workspace" || mode === "workspace") {
+      const workspaceId = (form.targetWorkspaceId ?? "").trim();
+      if (workspaceId !== "") args["target_workspace_id"] = workspaceId;
+    }
+    if (source === "preset") {
+      const presetId = (form.targetPresetId ?? "").trim();
+      if (presetId !== "") args["target_preset_id"] = presetId;
+    }
+  } else if (mode === "new") {
+    const workspaceId = (form.targetWorkspaceId ?? "").trim();
+    if (workspaceId !== "") args["target_workspace_id"] = workspaceId;
+    const presetId = (form.targetPresetId ?? "").trim();
+    if (presetId !== "") args["target_preset_id"] = presetId;
+    const provider = (form.targetProvider ?? "").trim();
+    if (provider !== "") args["target_provider"] = provider;
+    const model = (form.targetModel ?? "").trim();
+    if (model !== "") args["target_model"] = model;
   }
   return args;
 }

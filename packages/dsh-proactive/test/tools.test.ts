@@ -173,16 +173,19 @@ test("proactive_set maps target_mode workspace through the create-side resolver"
       return { code: "not_found", message: "workspace not found" };
     }
   });
-  // explicit id
+  // explicit id — the legacy spelling NORMALIZES to resume + workspace source
   const byId = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-1" }));
-  assert.equal(byId.targetMode, "workspace");
+  assert.equal(byId.targetMode, "resume");
+  assert.equal((byId as { targetSource?: string }).targetSource, "workspace");
   assert.equal((byId as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-1");
   assert.equal(byId.targetSessionId, undefined);
   // path spelling normalizes before the closed validation
   const byPath = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_path: "/repos/alpha" }));
+  assert.equal((byPath as { targetSource?: string }).targetSource, "workspace");
   assert.equal((byPath as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-1");
   // no selector: the creator session's cwd (/work from the harness agent)
   const byDefault = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace" }));
+  assert.equal((byDefault as { targetSource?: string }).targetSource, "workspace");
   assert.equal((byDefault as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-1");
   assert.equal(seen.length, 3);
   assert.equal(seen[2]["__sessionCwd"], "/work");
@@ -197,12 +200,17 @@ test("proactive_set maps target_mode workspace through the create-side resolver"
   // workspace + target_session_id is rejected by the closed validator
   const mixed = harness({ resolveWorkspace: async (args) => args });
   assert.equal(code(await mixed.run("proactive_set", { prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-1", target_session_id: "s9" })), "invalid_trigger");
-  // non-workspace modes reject target_workspace_id even when a resolver exists
-  const wrongMode = harness({ resolveWorkspace: async (args) => args });
-  assert.equal(code(await wrongMode.run("proactive_set", { prompt: "x", after_seconds: 5, target_workspace_id: "ws-1" })), "invalid_trigger");
+  // v3 dialect: a bare target_workspace_id under the default resume mode
+  // infers the workspace source (the old strict rejection is superseded)
+  const inferred = harness({ resolveWorkspace: async (args) => args });
+  const inferredView = asView(await inferred.run("proactive_set", { prompt: "x", after_seconds: 5, target_workspace_id: "ws-1" }));
+  assert.equal(inferredView.targetMode, "resume");
+  assert.equal((inferredView as { targetSource?: string }).targetSource, "workspace");
+  // resume + target_source session still rejects a stray workspace id
+  assert.equal(code(await inferred.run("proactive_set", { prompt: "x", after_seconds: 5, target_source: "session", target_session_id: "s1", target_workspace_id: "ws-1" })), "invalid_trigger");
   bare.cleanup();
   mixed.cleanup();
-  wrongMode.cleanup();
+  inferred.cleanup();
   h.cleanup();
 });
 
@@ -367,7 +375,9 @@ test("proactive_update: workspace target keeps the alarm's workspace unless give
   const wsAlarm: Alarm = { ...v2Fixture("ws-alarm", "s2"), target: { mode: "workspace", workspaceId: "ws-9" } };
   h.store.addAlarm(wsAlarm);
   const view = asView(await h.run("proactive_update", { id: "ws-alarm", prompt: "x", after_seconds: 5, target_mode: "workspace" }));
-  assert.equal(view.targetMode, "workspace");
+  // the legacy spelling re-normalizes to resume + workspace source
+  assert.equal(view.targetMode, "resume");
+  assert.equal((view as { targetSource?: string }).targetSource, "workspace");
   assert.equal((view as { targetWorkspaceId?: string }).targetWorkspaceId, "ws-9");
   // a new explicit id routes through the resolver (unavailable here → closed error)
   assert.equal(code(await h.run("proactive_update", { id: "ws-alarm", prompt: "x", after_seconds: 5, target_mode: "workspace", target_workspace_id: "ws-other" })), "not_found");

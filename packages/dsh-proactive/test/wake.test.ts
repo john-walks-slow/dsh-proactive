@@ -812,7 +812,8 @@ test("workspace alarm with a failing port surfaces the closed error", async () =
   const store = new ProactiveStore(dir);
   const port: WorkspaceWakePort = {
     resolveTarget: async () => ({ error: "workspace ws-a no longer exists (deleted in the GUI?); cancel or edit this alarm" }),
-    attach: async () => { throw new Error("must not be called"); }
+    attach: async () => { throw new Error("must not be called"); },
+    cwdOf: async () => { throw new Error("must not be called"); }
   };
   const agents: AgentsFacade = { get: () => undefined, resume: async () => { throw new Error("unused"); }, create: async () => { throw new Error("unused"); } };
   const driver = new WakeDriver({ agents, workspaces: port, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
@@ -830,7 +831,8 @@ test("workspace alarm lands in the resolved session via the resume path", async 
   const attached: string[] = [];
   const port: WorkspaceWakePort = {
     resolveTarget: async () => ({ kind: "session", sessionId: "s1" }),
-    attach: async (_workspaceId, sessionId) => { attached.push(sessionId); }
+    attach: async (_workspaceId, sessionId) => { attached.push(sessionId); },
+    cwdOf: async () => { throw new Error("must not be called"); }
   };
   const driver = new WakeDriver({
     agents: {
@@ -866,7 +868,8 @@ test("workspace alarm creates a session in the workspace and attaches BEFORE del
   const trace: string[] = [];
   const port: WorkspaceWakePort = {
     resolveTarget: async () => ({ kind: "create", cwd: "/repos/alpha" }),
-    attach: async (_workspaceId, sessionId) => { trace.push("attach:" + sessionId); }
+    attach: async (_workspaceId, sessionId) => { trace.push("attach:" + sessionId); },
+    cwdOf: async () => "/repos/alpha"
   };
   let captured: CreateFacadeOptions | undefined;
   const agents: AgentsFacade = {
@@ -900,7 +903,8 @@ test("workspace create arm failing the attach never delivers the wake", async ()
   const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
   const port: WorkspaceWakePort = {
     resolveTarget: async () => ({ kind: "create", cwd: "/repos/alpha" }),
-    attach: async () => { throw new Error("attach failed: registry rejected"); }
+    attach: async () => { throw new Error("attach failed: registry rejected"); },
+    cwdOf: async () => "/repos/alpha"
   };
   const agents: AgentsFacade = {
     get: () => undefined as never,

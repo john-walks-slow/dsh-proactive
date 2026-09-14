@@ -28,6 +28,7 @@
  *  subagent child.
  */
 
+import * as agentPresetsModule from "@deepseek-ai/dsh-agent-presets";
 import { isRecord, isValidWorkspaceId, type ToolError } from "./domain.js";
 
 /** Narrow read of one workspace registry record (dsh-workspace Workspace). */
@@ -56,7 +57,7 @@ export interface LiveSessionLike {
   readonly events?: readonly unknown[];
   /** dsh ≥0.1.2-rc.1 event log snapshot (supersedes `events`). */
   snapshotEvents?(): readonly unknown[];
-  readonly header?: { createdAt?: number; cwd?: string; origin?: string };
+  readonly header?: { createdAt?: number; cwd?: string; origin?: string; agentPreset?: string };
 }
 
 /**
@@ -83,8 +84,31 @@ export interface SessionHeaderLike {
   readonly createdAt: number;
   readonly cwd?: string;
   readonly origin?: string;
+  /** Creation-time preset stamp (dsh-session SessionHeader.agentPreset). */
+  readonly agentPreset?: string;
   /** Fork children (seeded headers) get no bare-listing projection-cache row. */
   readonly isSeeded?: boolean;
+}
+
+/**
+ * The session's effective preset id, latest `agent-preset/selected` first,
+ * header stamp second. Uses the upstream `resolveSessionPreset` when the
+ * installed dsh-agent-presets exports it (0.1.1-rc.2 does); 0.1.2-rc.1
+ * REMOVED the export, and a named import would then fail at ESM link time
+ * and take the whole plugin tree down — the namespace import lets us fall
+ * back to this identical local fold instead. Lives here (not wake.ts) so
+ * the preset-source session ranking below shares one fold with the wake
+ * composition path; wake.ts re-exports it for source compatibility.
+ */
+const upstreamResolveSessionPreset = (agentPresetsModule as unknown as { resolveSessionPreset?: (session: { header: { agentPreset?: string }; events: readonly unknown[] }) => string | undefined }).resolveSessionPreset;
+
+export function resolveSessionPresetOf(session: { header: { agentPreset?: string }; events: readonly unknown[] }): string | undefined {
+  if (typeof upstreamResolveSessionPreset === "function") return upstreamResolveSessionPreset(session);
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index] as { type?: string; data?: { agentPreset?: string } } | null;
+    if (event?.type === "agent-preset/selected") return event.data?.agentPreset;
+  }
+  return session.header.agentPreset;
 }
 
 /** The persisted projection cache row (ctx.sessionProjectionCache.cachedSnapshot). */
@@ -343,6 +367,13 @@ export async function resolveWorkspaceWakeTarget(deps: WorkspaceWakeDeps, worksp
 export interface WorkspaceWakePort {
   resolveTarget(workspaceId: string): Promise<WorkspaceWakeDestination | { error: string }>;
   attach(workspaceId: string, sessionId: string): Promise<void>;
+  /**
+   * Canonical directory path for creating a session inside the workspace
+   * (target_mode new with a configured workspace). Same missing-dir guard
+   * as the create arm of resolveTarget: a wake must never mkdir a ghost
+   * directory as a side effect.
+   */
+  cwdOf(workspaceId: string): Promise<string | { error: string }>;
 }
 
 /** Assemble the driver-facing port from host-level deps (index.ts wiring). */
@@ -356,6 +387,123 @@ export function createWorkspaceWakePort(deps: WorkspaceWakeDeps): WorkspaceWakeP
         throw new Error("workspace " + workspaceId + " exposes no attachSession (registry contract drift)");
       }
       await workspace.attachSession(sessionId);
+    },
+    async cwdOf(workspaceId) {
+      const workspace = await requireWorkspace(deps, workspaceId);
+      if ("error" in workspace) return workspace;
+      if (typeof workspace.status === "function") {
+        const status = await workspace.status();
+        if (status === "missing-dir") {
+          return { error: "workspace directory is missing: " + workspace.path + " (restore the directory or edit this alarm)" };
+        }
+      }
+      return workspace.path;
     }
+  };
+}
+
+/**
+ * Fire-time destination for a preset-sourced target: the most recently
+ * updated session RUNNING that preset, or "none" when no eligible session
+ * exists. Unlike the workspace resolver there is no create arm here — the
+ * caller decides what "none" means (resume creates a fresh session on the
+ * preset; fork fails closed).
+ */
+export type PresetWakeDestination =
+  | { kind: "session"; sessionId: string }
+  | { kind: "none" };
+
+/** Inputs the preset-source resolver needs from the host. */
+export interface PresetWakeDeps {
+  /** Live in-memory session store (ctx.sessions). */
+  liveSessions(): readonly LiveSessionLike[];
+  /** Cold session headers (ctx.sessionPersistence.list); absent on headless hosts. */
+  coldHeaders?(): Promise<readonly SessionHeaderLike[]>;
+  /** Persisted projection cache rows (ctx.sessionProjectionCache). */
+  projectionCache?: ProjectionCacheLike;
+  /** Archived-session exclusion (registry-backed; absent = no registry, nothing to exclude). */
+  archivedSessionIds?(): readonly string[];
+  log: (level: "info" | "warn" | "error", message: string) => void;
+}
+
+/**
+ * Rank every session running the preset and pick the same way the workspace
+ * resolver does (visible first, sidebar recency, subagent/archived never).
+ *
+ * Preset matching: a LIVE session folds its effective preset (latest
+ * `agent-preset/selected` event, header stamp second — the exact fold the
+ * wake composition uses); a COLD session only carries its creation-time
+ * header stamp, the same limitation the sidebar's cold rows have.
+ */
+export async function resolvePresetWakeTarget(deps: PresetWakeDeps, presetId: string): Promise<PresetWakeDestination | { error: string }> {
+  const archived = new Set(deps.archivedSessionIds?.() ?? []);
+  const liveById = new Map<string, LiveSessionLike>();
+  for (const session of deps.liveSessions()) liveById.set(session.id, session);
+  const coldById = new Map<string, SessionHeaderLike>();
+  let coldListFailed = false;
+  if (deps.coldHeaders !== undefined) {
+    try {
+      for (const header of await deps.coldHeaders()) coldById.set(header.id, header);
+    } catch (error) {
+      // Same conservative rule as the workspace resolver: a failed cold
+      // listing must not fold into "no sessions" — remember it so an empty
+      // result fails into the retry path instead of a wrong decision.
+      coldListFailed = true;
+      deps.log("warn", "preset wake: cold session listing failed: " + (error instanceof Error ? error.message : String(error)));
+    }
+  }
+  const candidates: WorkspaceCandidate[] = [];
+  for (const live of liveById.values()) {
+    if (archived.has(live.id)) continue;
+    const header = live.header;
+    if (header?.origin === "subagent") continue;
+    const events = liveEventsOf(live);
+    if (resolveSessionPresetOf({ header: header ?? {}, events }) !== presetId) continue;
+    const metadata = listMetadataOf(events);
+    candidates.push({
+      sessionId: live.id,
+      updatedAt: updatedAtOf(header?.createdAt ?? 0, metadata),
+      createdAt: header?.createdAt ?? 0,
+      blank: metadata.blank,
+      subagent: false
+    });
+  }
+  for (const header of coldById.values()) {
+    if (liveById.has(header.id)) continue;
+    if (archived.has(header.id)) continue;
+    if (header.origin === "subagent") continue;
+    if (header.agentPreset !== presetId) continue;
+    // The sidebar fold's exact cold read: seeded (fork) headers carry no
+    // cache row; a missing row is conservatively visible.
+    const metadata = header.isSeeded === true
+      ? undefined
+      : deps.projectionCache?.cachedSnapshot(header, 0)?.values?.sessionListMetadata;
+    candidates.push({
+      sessionId: header.id,
+      updatedAt: updatedAtOf(header.createdAt, metadata),
+      createdAt: header.createdAt,
+      blank: metadata?.blank === true,
+      subagent: false
+    });
+  }
+  if (candidates.length === 0) {
+    if (coldListFailed) {
+      return { error: "cold session listing failed; cannot safely pick a preset destination (will retry)" };
+    }
+    return { kind: "none" };
+  }
+  const pick = pickWorkspaceTarget(candidates);
+  return pick.kind === "session" ? pick : { kind: "none" };
+}
+
+/** The driver-facing port for preset-sourced targets. */
+export interface PresetWakePort {
+  resolveTarget(presetId: string): Promise<PresetWakeDestination | { error: string }>;
+}
+
+/** Assemble the preset-source port from host-level deps (index.ts wiring). */
+export function createPresetWakePort(deps: PresetWakeDeps): PresetWakePort {
+  return {
+    resolveTarget: (presetId) => resolvePresetWakeTarget(deps, presetId)
   };
 }

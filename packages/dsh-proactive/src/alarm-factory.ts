@@ -13,6 +13,7 @@
 import {
   canonicalizeTimeZone,
   isRecord,
+  isValidPresetId,
   isValidSessionId,
   isValidWorkspaceId,
   jitterDelay,
@@ -32,6 +33,7 @@ import {
   type AlarmType,
   type AtInput,
   type RandomSource,
+  type TargetSourceType,
   type ToolError
 } from "./domain.js";
 import { parseCron, nextCronOccurrence } from "./cron.js";
@@ -68,9 +70,14 @@ function allocateId(prefix: string): string {
  * behaviour — the alarm wakes its creator).
  */
 export function validateCreateArgs(args: Record<string, unknown>, defaultTargetSessionId: string): CreateSpec | ToolError {
-  const allowed = new Set(["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "target_mode", "target_session_id", "target_workspace_id", "compaction"]);
+  const allowed = new Set([
+    "prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds",
+    "time_zone", "respect_quiet_hours", "target_mode", "target_source",
+    "target_session_id", "target_workspace_id", "target_preset_id",
+    "target_provider", "target_model", "compaction"
+  ]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "the alarm spec accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_session_id, target_workspace_id, compaction." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "the alarm spec accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_source, target_session_id, target_workspace_id, target_preset_id, target_provider, target_model, compaction." };
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined) + Number(args["cron"] !== undefined);
   if (selectors !== 1) return { code: "invalid_trigger", message: "the alarm spec requires exactly one of at, after_seconds, every_seconds, or cron." };
@@ -114,25 +121,120 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     if (args["target_session_id"] !== undefined) {
       return { code: "invalid_trigger", message: "target_session_id must be omitted when target_mode is new." };
     }
-    if (args["target_workspace_id"] !== undefined) {
-      return { code: "invalid_trigger", message: "target_workspace_id must be omitted when target_mode is new." };
+    if (args["target_source"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_source must be omitted when target_mode is new." };
     }
-    target = { mode: "new" };
+    let workspaceId: string | undefined;
+    if (args["target_workspace_id"] !== undefined) {
+      if (typeof args["target_workspace_id"] !== "string" || !isValidWorkspaceId(args["target_workspace_id"])) {
+        return { code: "invalid_trigger", message: "target_workspace_id must be a valid workspace registry id (uuid)." };
+      }
+      workspaceId = args["target_workspace_id"];
+    }
+    let presetId: string | undefined;
+    if (args["target_preset_id"] !== undefined) {
+      if (typeof args["target_preset_id"] !== "string" || !isValidPresetId(args["target_preset_id"])) {
+        return { code: "invalid_trigger", message: "target_preset_id must be a valid agent preset id." };
+      }
+      presetId = args["target_preset_id"];
+    }
+    let provider: string | undefined;
+    if (args["target_provider"] !== undefined) {
+      if (typeof args["target_provider"] !== "string" || args["target_provider"].trim() === "") {
+        return { code: "invalid_trigger", message: "target_provider must be a non-empty string." };
+      }
+      provider = args["target_provider"].trim();
+    }
+    let model: string | undefined;
+    if (args["target_model"] !== undefined) {
+      if (typeof args["target_model"] !== "string" || args["target_model"].trim() === "") {
+        return { code: "invalid_trigger", message: "target_model must be a non-empty string." };
+      }
+      model = args["target_model"].trim();
+    }
+    target = {
+      mode: "new",
+      ...(workspaceId !== undefined ? { workspaceId } : {}),
+      ...(presetId !== undefined ? { presetId } : {}),
+      ...(provider !== undefined ? { provider } : {}),
+      ...(model !== undefined ? { model } : {})
+    };
   } else if (mode === "workspace") {
+    // Legacy v2 spelling of target_mode "workspace": accepted verbatim but
+    // NORMALIZED to the v3 resume+workspace shape, so stored data converges
+    // on one dialect (only pre-v3 records still carry mode "workspace").
     if (args["target_session_id"] !== undefined) {
       return { code: "invalid_trigger", message: "target_session_id must be omitted when target_mode is workspace." };
+    }
+    if (args["target_source"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_source must be omitted when target_mode is workspace (the workspace spelling already names the source)." };
+    }
+    if (args["target_preset_id"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_preset_id is not valid when target_mode is workspace." };
+    }
+    if (args["target_provider"] !== undefined || args["target_model"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_provider/target_model is only valid when target_mode is new." };
     }
     if (typeof args["target_workspace_id"] !== "string" || !isValidWorkspaceId(args["target_workspace_id"])) {
       return { code: "invalid_trigger", message: "target_mode workspace requires a valid target_workspace_id." };
     }
-    target = { mode, workspaceId: args["target_workspace_id"] };
+    target = { mode: "resume", sourceType: "workspace", workspaceId: args["target_workspace_id"] };
   } else {
-    if (args["target_workspace_id"] !== undefined) {
-      return { code: "invalid_trigger", message: "target_workspace_id is only valid when target_mode is workspace." };
+    // mode is "resume" | "fork"
+    if (args["target_provider"] !== undefined || args["target_model"] !== undefined) {
+      return { code: "invalid_trigger", message: "target_provider/target_model is only valid when target_mode is new." };
     }
-    const sessionId = typeof args["target_session_id"] === "string" && args["target_session_id"].length > 0 ? args["target_session_id"] : defaultTargetSessionId;
-    if (!isValidSessionId(sessionId)) return { code: "invalid_trigger", message: "target_session_id must be a valid dsh session id." };
-    target = { mode, sessionId };
+    let source: TargetSourceType;
+    if (args["target_source"] !== undefined) {
+      if (typeof args["target_source"] !== "string" || !["session", "workspace", "preset"].includes(args["target_source"])) {
+        return { code: "invalid_trigger", message: "target_source must be one of session, workspace, preset." };
+      }
+      source = args["target_source"] as TargetSourceType;
+    } else {
+      // Infer source from provided arguments
+      if (args["target_workspace_id"] !== undefined && args["target_preset_id"] === undefined && args["target_session_id"] === undefined) {
+        source = "workspace";
+      } else if (args["target_preset_id"] !== undefined && args["target_workspace_id"] === undefined && args["target_session_id"] === undefined) {
+        source = "preset";
+      } else {
+        source = "session";
+      }
+    }
+
+    if (source === "workspace") {
+      if (args["target_session_id"] !== undefined) {
+        return { code: "invalid_trigger", message: "target_session_id must be omitted when target_source is workspace." };
+      }
+      if (args["target_preset_id"] !== undefined) {
+        return { code: "invalid_trigger", message: "target_preset_id is not valid when target_source is workspace." };
+      }
+      if (typeof args["target_workspace_id"] !== "string" || !isValidWorkspaceId(args["target_workspace_id"])) {
+        return { code: "invalid_trigger", message: "target_source workspace requires a valid target_workspace_id." };
+      }
+      target = { mode, sourceType: "workspace", workspaceId: args["target_workspace_id"] };
+    } else if (source === "preset") {
+      if (args["target_session_id"] !== undefined) {
+        return { code: "invalid_trigger", message: "target_session_id must be omitted when target_source is preset." };
+      }
+      if (args["target_workspace_id"] !== undefined) {
+        return { code: "invalid_trigger", message: "target_workspace_id is not valid when target_source is preset." };
+      }
+      if (typeof args["target_preset_id"] !== "string" || !isValidPresetId(args["target_preset_id"])) {
+        return { code: "invalid_trigger", message: "target_source preset requires a valid target_preset_id." };
+      }
+      target = { mode, sourceType: "preset", presetId: args["target_preset_id"] };
+    } else {
+      // source is "session"
+      if (args["target_workspace_id"] !== undefined) {
+        return { code: "invalid_trigger", message: "target_workspace_id is only valid when target_source is workspace (or target_mode is new/workspace)." };
+      }
+      if (args["target_preset_id"] !== undefined) {
+        return { code: "invalid_trigger", message: "target_preset_id is not valid when target_source is session." };
+      }
+      const sessionId = typeof args["target_session_id"] === "string" && args["target_session_id"].length > 0 ? args["target_session_id"] : defaultTargetSessionId;
+      if (!isValidSessionId(sessionId)) return { code: "invalid_trigger", message: "target_session_id must be a valid dsh session id." };
+      target = { mode, sourceType: "session", sessionId };
+    }
   }
   const timeZone = typeof args["time_zone"] === "string" && args["time_zone"].length > 0 ? args["time_zone"] : undefined;
   // Validate the zone up front regardless of selector: every/after must not let

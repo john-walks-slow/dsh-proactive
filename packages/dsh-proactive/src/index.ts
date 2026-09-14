@@ -25,7 +25,7 @@ import { ProactivePanelService } from "./panel/service.js";
 import { installPanelRoutes } from "./panel/routes.js";
 import { wireSettings } from "./settings.js";
 import { PROACTIVE_PLUGIN } from "./domain.js";
-import { createWorkspaceWakePort, liveEventsOf, resolveWorkspaceArg, type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type WorkspaceRegistryFacade } from "./workspace.js";
+import { createPresetWakePort, createWorkspaceWakePort, liveEventsOf, resolveWorkspaceArg, type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type WorkspaceRegistryFacade } from "./workspace.js";
 
 export const name = PROACTIVE_PLUGIN;
 export const inject = ["agents", "tools", "sessionPersistence"];
@@ -126,6 +126,21 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
         projectionCache: ctx.get("sessionProjectionCache", false) as ProjectionCacheLike | undefined,
         log: (level, message) => ctx.logger[level](message)
       });
+  // Preset-sourced targets (target_source "preset"): the same live/cold
+  // ranking inputs as the workspace port, minus the registry — the preset
+  // roster itself is NOT needed to match sessions (the header/event fold is
+  // the source of truth); only the archived exclusion reads the registry.
+  const liveSessionsForTargets = () => {
+    const sessions = ctx.get("sessions", false) as { list?: () => readonly LiveSessionLike[] } | undefined;
+    return sessions?.list?.() ?? [];
+  };
+  const presetTargets = createPresetWakePort({
+    liveSessions: liveSessionsForTargets,
+    coldHeaders: persistenceService === undefined ? undefined : () => persistenceService.list(),
+    projectionCache: ctx.get("sessionProjectionCache", false) as ProjectionCacheLike | undefined,
+    archivedSessionIds: registry === undefined ? undefined : () => registry.archivedSessionIds,
+    log: (level, message) => ctx.logger[level](message)
+  });
 
   const driver = new WakeDriver({
     agents: ctx.agents,
@@ -135,6 +150,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     // exists when dsh-session-persistence types are loaded into the profile.
     sessionPersistence: persistenceService,
     workspaces,
+    presetTargets,
     agentPresets: presetsService,
     modelSelection: () => currentModelSelection(ctx),
     store,
@@ -183,7 +199,15 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     log: (level, message) => ctx.logger[level](message),
     sessionTitle: resolveSessionTitle(ctx),
     sessionEvents: sessionEventsOf(ctx),
-    resolveWorkspace
+    resolveWorkspace,
+    // Roster rows for the create form's preset pickers; the same defensive
+    // read as the wake path (rosterless deployments get a degraded picker).
+    ...(presetsService === undefined ? {} : {
+      presetRoster: async () => {
+        const roster = await (presetsService as unknown as { remoteExportList?: () => Promise<{ presets: readonly { id: string; name?: string; description?: string; isDefault?: boolean; broken?: string }[] }> }).remoteExportList?.();
+        return roster?.presets ?? [];
+      }
+    })
   });
 
   // Optional surfaces: panel HTTP routes (needs the host webserver) and the

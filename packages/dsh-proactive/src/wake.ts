@@ -1,31 +1,41 @@
 /**
  * Wake driver: the agent-world mechanics behind one alarm fire.
  *
+ * v3 target dialect — the wake INTENT (new/resume/fork) is orthogonal to the
+ * SOURCE that names the conversation:
+ *
+ *   target new    -> drive the wake in a brand-new empty session, optionally
+ *                    configured: workspaceId (meta.cwd + attach), presetId
+ *                    (composition stamp), provider/model (wake selection).
  *   target resume -> reuse the live agent handle (follow-up queued politely)
  *                    or ctx.agents.resume() on the same session id when cold.
  *   target fork   -> copy the parent's completed-turn prefix (host session.fork
  *                    semantics: last `turn/end` boundary, seedLength metadata,
  *                    parentSession lineage) into a brand-new child session and
- *                    drive the wake there.
- *   target new    -> drive the wake in a brand-new empty session.
- *                    Fork/new children are real persisted sessions and stay in
- *                    the sidebar once created.
- *   target workspace -> resolve the destination at fire time through the
- *                    WorkspaceWakePort (most recently updated session in the
- *                    workspace; else its newest blank New Session slot; else a
- *                    fresh session created with meta.cwd = the workspace path
- *                    and attached to the workspace). The session arm is the
- *                    plain resume flow; the create arm mirrors target new plus
- *                    the workspace attach.
+ *                    drive the wake there. Fork/new children are real persisted
+ *                    sessions and stay in the sidebar once created.
+ *
+ *   source session  (resume/fork) -> the named target_session_id.
+ *   source workspace (resume/fork, and the legacy target_mode "workspace") ->
+ *                    resolve at fire time through the WorkspaceWakePort (most
+ *                    recently updated session in the workspace; else its newest
+ *                    blank New Session slot; else a fresh session created with
+ *                    meta.cwd = the workspace path and attached). Resume falls
+ *                    back to create; fork fails closed (nothing to branch from).
+ *   source preset   (resume/fork) -> resolve at fire time through the
+ *                    PresetWakePort (the most recently updated session RUNNING
+ *                    that preset). Resume falls back to a fresh session
+ *                    composed on the preset; fork fails closed.
  *
  * Every created/resumed agent gets a model-selection installed on its scope
  * (mirroring the web host's selectionFor), so its first buildRequest resolves
- * provider/model even when AgentOptions are empty: the session's own committed
- * request header wins, agentDefaultModel is the fallback. It is also composed
- * onto the session's agent preset (mirroring the web host's composeAgent):
- * preset-owned tools live on the agent's scope, so a resume/create that skips
- * the join leaves the agent on the host-plane-only registry — bash, read, ...
- * all answer "unknown tool". The preset id comes from the session's own header
+ * provider/model even when AgentOptions are empty: an alarm-level provider/
+ * model override (target new) wins outright, else the session's own committed
+ * request header, else agentDefaultModel. It is also composed onto the
+ * session's agent preset (mirroring the web host's composeAgent): preset-owned
+ * tools live on the agent's scope, so a resume/create that skips the join
+ * leaves the agent on the host-plane-only registry — bash, read, ... all
+ * answer "unknown tool". The preset id comes from the session's own header
  * plus any later `agent-preset/selected` events, so a wake rebuilds the exact
  * composition the session's history ran under.
  *
@@ -40,10 +50,9 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type { Agent, AgentOptions, AgentSetup, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
-import * as agentPresetsModule from "@deepseek-ai/dsh-agent-presets";
 import type { EpochHeader, SessionEvent, SessionHeader } from "@deepseek-ai/dsh-session";
 import { randomUUID } from "node:crypto";
-import { DEFAULT_COMPACTION, type Alarm, type AlarmCompaction, type RunDecision } from "./domain.js";
+import { DEFAULT_COMPACTION, targetSourceOf, type Alarm, type AlarmCompaction, type AlarmTarget, type RunDecision } from "./domain.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveConfig } from "./config.js";
 import { analyzeWakeTurn, type MinimalEvent } from "./observer.js";
@@ -51,7 +60,12 @@ import { createFramingMessage, type FramingContext } from "./framing.js";
 import type { UserPresence } from "./framing.js";
 import { isInQuietHours } from "./config.js";
 import { applyWakeCompaction, planWakeCompaction, type CompactEvent, type CompactSession } from "./compact.js";
-import type { WorkspaceWakePort } from "./workspace.js";
+import { resolveSessionPresetOf, type PresetWakeDestination, type PresetWakePort, type WorkspaceWakeDestination, type WorkspaceWakePort } from "./workspace.js";
+
+// The session preset fold lives in workspace.ts (shared with the
+// preset-source session ranking); re-exported here so existing importers of
+// wake.js keep working.
+export { resolveSessionPresetOf };
 
 export interface WakeAnalysisResult {
   decision: RunDecision;
@@ -84,25 +98,6 @@ export function sessionLogOf(session: unknown): readonly unknown[] {
   if (Array.isArray(probe.events)) return probe.events;
   if (typeof probe.snapshotEvents === "function") return probe.snapshotEvents();
   return [];
-}
-
-/**
- * The session's effective preset id, latest `agent-preset/selected` first,
- * header stamp second. Uses the upstream `resolveSessionPreset` when the
- * installed dsh-agent-presets exports it (0.1.1-rc.2 does); 0.1.2-rc.1
- * REMOVED the export, and a named import would then fail at ESM link time
- * and take the whole plugin tree down — the namespace import lets us fall
- * back to this identical local fold instead.
- */
-const upstreamResolveSessionPreset = (agentPresetsModule as unknown as { resolveSessionPreset?: (session: { header: { agentPreset?: string }; events: readonly unknown[] }) => string | undefined }).resolveSessionPreset;
-
-export function resolveSessionPresetOf(session: { header: { agentPreset?: string }; events: readonly unknown[] }): string | undefined {
-  if (typeof upstreamResolveSessionPreset === "function") return upstreamResolveSessionPreset(session);
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index] as { type?: string; data?: { agentPreset?: string } } | null;
-    if (event?.type === "agent-preset/selected") return event.data?.agentPreset;
-  }
-  return session.header.agentPreset;
 }
 
 /** Narrow facade over the pieces of AgentRegistry / agents we actually use. */
@@ -163,8 +158,10 @@ export interface WakeDriverDeps {
   agents: AgentsFacade;
   /** Persisted-session reader for forking from cold parents (optional: fork degrades to failed when absent). */
   sessionPersistence?: SessionInspectLike;
-  /** Workspace destination resolution for target_mode workspace alarms (absent -> those alarms fail loudly). */
+  /** Workspace destination resolution for workspace-sourced targets (absent -> those alarms fail loudly). */
   workspaces?: WorkspaceWakePort;
+  /** Preset destination resolution for preset-sourced targets (absent -> those alarms fail loudly). */
+  presetTargets?: PresetWakePort;
   /** Preset roster for composing wake agents onto their session's preset (absent on a rosterless deployment). */
   agentPresets?: AgentPresetsPort;
   /** Provider/model override for resumed/created agents (from ctx.agentDefaultModel or config). */
@@ -235,27 +232,50 @@ export class WakeDriver {
   }
 
   /**
-   * Model selection for a resumed/created agent: the session's own committed
-   * request header wins (the same model the live session last used),
-   * agentDefaultModel is the fallback for sessions without any header.
-   * Installed on the agent's scope so the first buildRequest resolves
-   * provider/model even when AgentOptions are empty — the web host's exact
-   * pattern (selectionFor).
+   * Model selection for a resumed/created agent: an alarm-level override with
+   * BOTH provider and model wins outright (a "new" target naming its model);
+   * otherwise the session's own committed request header wins (the same model
+   * the live session last used), and the fallback chain is the host's
+   * agentDefaultModel MERGED with any partial override. Installed on the
+   * agent's scope so the first buildRequest resolves provider/model even when
+   * AgentOptions are empty — the web host's exact pattern (selectionFor).
    */
-  private createWakeSelection(agent: Agent): ModelSelectionRef {
-    return createWakeSelectionRef(agent.session.requestHeader(), this.deps.modelSelection, this.deps.log);
+  private createWakeSelection(agent: Agent, override?: { provider?: string; model?: string }): ModelSelectionRef {
+    if (override !== undefined && override.provider !== undefined && override.model !== undefined) {
+      const fixed: ModelSelection = { provider: override.provider, model: override.model };
+      let picked: ModelSelection | undefined;
+      return {
+        get current(): ModelSelection | undefined { return picked ?? fixed; },
+        set current(next: ModelSelection | undefined) { picked = next; },
+        assembled: void 0
+      };
+    }
+    return createWakeSelectionRef(
+      agent.session.requestHeader(),
+      () => {
+        const base = this.deps.modelSelection();
+        return {
+          ...(base ?? {}),
+          ...(override?.provider !== undefined ? { provider: override.provider } : {}),
+          ...(override?.model !== undefined ? { model: override.model } : {})
+        };
+      },
+      this.deps.log
+    );
   }
 
-  private agentOptions(): AgentOptions | undefined {
-    const model = this.deps.modelSelection();
-    if (model === undefined || (model.provider === undefined && model.model === undefined)) return undefined;
+  private agentOptions(override?: { provider?: string; model?: string }): AgentOptions | undefined {
+    const base = this.deps.modelSelection();
+    const provider = override?.provider ?? base?.provider;
+    const model = override?.model ?? base?.model;
+    if (provider === undefined && model === undefined) return undefined;
     const options: AgentOptions = {};
-    if (model.provider !== undefined) options.provider = model.provider;
-    if (model.model !== undefined) options.model = model.model;
+    if (provider !== undefined) options.provider = provider;
+    if (model !== undefined) options.model = model;
     return options;
   }
 
-  private installSelection(agentCtx: unknown): void {
+  private installSelection(agentCtx: unknown, override?: { provider?: string; model?: string }): void {
     const agent = (agentCtx as unknown as { agent: Agent }).agent;
     // react-loop installs `agent` on the scoped ctx before setup runs;
     // absence means the setup contract drifted — fail loudly instead of
@@ -263,7 +283,7 @@ export class WakeDriver {
     if (agent === undefined) {
       throw new Error("wake resume: resumed agent has no scoped .agent (dsh-agent setup contract drift)");
     }
-    installModelSelection(agentCtx as Parameters<typeof installModelSelection>[0], this.createWakeSelection(agent));
+    installModelSelection(agentCtx as Parameters<typeof installModelSelection>[0], this.createWakeSelection(agent, override));
   }
 
   /**
@@ -291,8 +311,8 @@ export class WakeDriver {
    * reads `.events` directly, so it always receives the compat-adapted view —
    * never the raw live Session.
    */
-  private async composeAgent(agentCtx: unknown): Promise<void> {
-    this.installSelection(agentCtx);
+  private async composeAgent(agentCtx: unknown, override?: { provider?: string; model?: string }): Promise<void> {
+    this.installSelection(agentCtx, override);
     const presets = this.deps.agentPresets;
     if (presets === undefined) return;
     const agent = (agentCtx as unknown as { agent: Agent }).agent;
@@ -395,24 +415,164 @@ export class WakeDriver {
     let ownedHandle: AgentHandleLike | null = null;
     let agent: Agent | undefined;
     let presence: UserPresence = "live";
-    // The session the wake will actually run in (differs from the owner for fork/new/workspace-create).
+    // The session the wake will actually run in (differs from the owner for fork/new/create arms).
     let actualSessionId = "";
     // The session currently holding the inflight guard ("" = none yet).
     let guardSessionId = "";
     try {
-      if (alarm.target.mode === "workspace") {
-        const port = this.deps.workspaces;
-        if (port === undefined) {
-          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace alarms are unavailable on this host (no workspace registry)");
-          return { outcome: "failed", error: "workspace alarms are unavailable on this host (no workspace registry)" };
+      // Legacy v2 "workspace" targets fold into the v3 resume+workspace
+      // spelling here, so every downstream arm sees exactly one dialect.
+      const target: Extract<AlarmTarget, { mode: "resume" | "fork" | "new" }> =
+        alarm.target.mode === "workspace"
+          ? { mode: "resume", sourceType: "workspace", workspaceId: alarm.target.workspaceId }
+          : alarm.target;
+
+      if (target.mode === "new") {
+        // A fresh session per fire, optionally configured: workspace (cwd +
+        // attach), preset (composition), provider/model (wake selection).
+        let cwd: string | undefined;
+        if (target.workspaceId !== undefined) {
+          const port = this.deps.workspaces;
+          if (port === undefined) {
+            this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace-configured alarms are unavailable on this host (no workspace registry)");
+            return { outcome: "failed", error: "workspace-configured alarms are unavailable on this host (no workspace registry)" };
+          }
+          let resolved: string | { error: string };
+          try {
+            resolved = await port.cwdOf(target.workspaceId);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace resolution failed: " + message);
+            return { outcome: "failed", error: "workspace resolution failed: " + message };
+          }
+          if (typeof resolved !== "string") {
+            this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + resolved.error);
+            return { outcome: "failed", error: resolved.error };
+          }
+          cwd = resolved;
         }
-        let destination;
+        const override = target.provider !== undefined || target.model !== undefined
+          ? { provider: target.provider, model: target.model }
+          : undefined;
+        actualSessionId = "session-" + randomUUID();
+        const presetMeta = target.presetId !== undefined ? { agentPreset: target.presetId } : this.defaultPresetMeta();
+        const meta = cwd !== undefined || presetMeta !== undefined
+          ? { ...(cwd !== undefined ? { cwd } : {}), ...(presetMeta ?? {}) }
+          : undefined;
+        ownedHandle = await this.deps.agents.create({
+          sessionId: actualSessionId,
+          agentOptions: this.agentOptions(override),
+          meta,
+          setup: (agentCtx) => this.composeAgent(agentCtx, override)
+        });
+        if (target.workspaceId !== undefined) {
+          // Attach BEFORE driving, so a failed attach never delivers a wake
+          // into an ungrouped session.
+          const port = this.deps.workspaces!;
+          try {
+            await port.attach(target.workspaceId, actualSessionId);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error("workspace attach failed: " + message + " (created session " + actualSessionId + " is left unattached; it will not receive wakes)");
+          }
+        }
+        this.inflightBySession.add(actualSessionId);
+        guardSessionId = actualSessionId;
+        agent = ownedHandle.agent;
+        presence = "cold";
+        return await this.drive(alarm, agent, actualSessionId, presence);
+      }
+
+      const source = targetSourceOf(target);
+
+      if (target.mode === "resume") {
+        if (source === "session") {
+          const sessionId = target.sessionId;
+          if (sessionId === undefined || sessionId === "") {
+            return { outcome: "failed", error: "resume target has no session id (corrupt alarm record); cancel or edit this alarm" };
+          }
+          if (this.inflightBySession.has(sessionId)) return { outcome: "busy" };
+          this.inflightBySession.add(sessionId);
+          guardSessionId = sessionId;
+          actualSessionId = sessionId;
+          const acquired = await this.acquireForResume(sessionId);
+          agent = acquired.agent;
+          ownedHandle = acquired.handle;
+          presence = acquired.presence;
+          return await this.drive(alarm, agent, actualSessionId, presence);
+        }
+        if (source === "workspace") {
+          const workspaceId = target.workspaceId;
+          if (workspaceId === undefined || workspaceId === "") {
+            return { outcome: "failed", error: "workspace-sourced target has no workspace id (corrupt alarm record); cancel or edit this alarm" };
+          }
+          const port = this.deps.workspaces;
+          if (port === undefined) {
+            this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace-source alarms are unavailable on this host (no workspace registry)");
+            return { outcome: "failed", error: "workspace-source alarms are unavailable on this host (no workspace registry)" };
+          }
+          let destination: WorkspaceWakeDestination | { error: string };
+          try {
+            destination = await port.resolveTarget(workspaceId);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace resolution failed: " + message);
+            return { outcome: "failed", error: "workspace resolution failed: " + message };
+          }
+          if ("error" in destination) {
+            this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + destination.error);
+            return { outcome: "failed", error: destination.error };
+          }
+          if (destination.kind === "session") {
+            if (this.inflightBySession.has(destination.sessionId)) return { outcome: "busy" };
+            this.inflightBySession.add(destination.sessionId);
+            guardSessionId = destination.sessionId;
+            actualSessionId = destination.sessionId;
+            const acquired = await this.acquireForResume(destination.sessionId);
+            agent = acquired.agent;
+            ownedHandle = acquired.handle;
+            presence = acquired.presence;
+            return await this.drive(alarm, agent, actualSessionId, presence);
+          }
+          // No eligible session: create a fresh one inside the workspace and
+          // attach it BEFORE driving, so a failed attach never delivers a wake
+          // into an ungrouped session.
+          actualSessionId = "session-" + randomUUID();
+          ownedHandle = await this.deps.agents.create({
+            sessionId: actualSessionId,
+            agentOptions: this.agentOptions(),
+            meta: { cwd: destination.cwd, ...this.defaultPresetMeta() },
+            setup: (agentCtx) => this.composeAgent(agentCtx)
+          });
+          try {
+            await port.attach(workspaceId, actualSessionId);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error("workspace attach failed: " + message + " (created session " + actualSessionId + " is left unattached; it will not receive wakes)");
+          }
+          this.inflightBySession.add(actualSessionId);
+          guardSessionId = actualSessionId;
+          agent = ownedHandle.agent;
+          presence = "cold";
+          return await this.drive(alarm, agent, actualSessionId, presence);
+        }
+        // source === "preset"
+        const presetId = target.presetId;
+        if (presetId === undefined || presetId === "") {
+          return { outcome: "failed", error: "preset-sourced target has no preset id (corrupt alarm record); cancel or edit this alarm" };
+        }
+        const port = this.deps.presetTargets;
+        if (port === undefined) {
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": preset-source alarms are unavailable on this host (no preset roster)");
+          return { outcome: "failed", error: "preset-source alarms are unavailable on this host (no preset roster)" };
+        }
+        let destination: PresetWakeDestination | { error: string };
         try {
-          destination = await port.resolveTarget(alarm.target.workspaceId);
+          destination = await port.resolveTarget(presetId);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace resolution failed: " + message);
-          return { outcome: "failed", error: "workspace resolution failed: " + message };
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": preset resolution failed: " + message);
+          return { outcome: "failed", error: "preset resolution failed: " + message };
         }
         if ("error" in destination) {
           this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + destination.error);
@@ -429,72 +589,103 @@ export class WakeDriver {
           presence = acquired.presence;
           return await this.drive(alarm, agent, actualSessionId, presence);
         }
-        // No eligible session: create a fresh one inside the workspace and
-        // attach it BEFORE driving, so a failed attach never delivers a wake
-        // into an ungrouped session.
+        // No session runs the preset yet: start one composed on it, so the
+        // alarm's semantics ("wake the conversation on this preset") holds
+        // from the very first fire.
         actualSessionId = "session-" + randomUUID();
         ownedHandle = await this.deps.agents.create({
           sessionId: actualSessionId,
           agentOptions: this.agentOptions(),
-          meta: { cwd: destination.cwd, ...this.defaultPresetMeta() },
+          meta: { agentPreset: presetId },
           setup: (agentCtx) => this.composeAgent(agentCtx)
         });
-        try {
-          await port.attach(alarm.target.workspaceId, actualSessionId);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          throw new Error("workspace attach failed: " + message + " (created session " + actualSessionId + " is left unattached; it will not receive wakes)");
-        }
         this.inflightBySession.add(actualSessionId);
         guardSessionId = actualSessionId;
         agent = ownedHandle.agent;
         presence = "cold";
         return await this.drive(alarm, agent, actualSessionId, presence);
       }
-      if (alarm.target.mode === "resume") {
-        if (this.inflightBySession.has(alarm.target.sessionId)) return { outcome: "busy" };
-        this.inflightBySession.add(alarm.target.sessionId);
-        guardSessionId = alarm.target.sessionId;
-        actualSessionId = alarm.target.sessionId;
-        const acquired = await this.acquireForResume(alarm.target.sessionId);
-        agent = acquired.agent;
-        ownedHandle = acquired.handle;
-        presence = acquired.presence;
-        return await this.drive(alarm, agent, actualSessionId, presence);
-      }
-      // fork / new — build the child session and drive it there.
-      if (alarm.target.mode === "fork") {
-        const parent = await this.parentLog(alarm.target.sessionId);
-        if (parent === undefined) {
-          return { outcome: "failed", error: "fork unavailable: parent session could not be read", sessionId: alarm.target.sessionId };
+
+      // fork — resolve the source session, then branch from its history.
+      let parentSessionId: string;
+      if (source === "session") {
+        if (target.sessionId === undefined || target.sessionId === "") {
+          return { outcome: "failed", error: "fork target has no session id (corrupt alarm record); cancel or edit this alarm" };
         }
-        const cut = completedTurnCut(parent.events);
-        if (cut === 0) {
-          return { outcome: "failed", error: "fork unavailable: parent session has no completed turn", sessionId: alarm.target.sessionId };
+        parentSessionId = target.sessionId;
+      } else if (source === "workspace") {
+        if (target.workspaceId === undefined || target.workspaceId === "") {
+          return { outcome: "failed", error: "fork target has no workspace id (corrupt alarm record); cancel or edit this alarm" };
         }
-        const meta = {
-          parentSession: alarm.target.sessionId,
-          seedLength: cut,
-          ...(parent.cwd !== undefined ? { cwd: parent.cwd } : {}),
-          ...(parent.presetId !== undefined ? { agentPreset: parent.presetId } : {})
-        };
-        actualSessionId = "session-" + randomUUID();
-        ownedHandle = await this.deps.agents.create({
-          sessionId: actualSessionId,
-          seed: parent.events.slice(0, cut),
-          meta,
-          agentOptions: this.agentOptions(),
-          setup: (agentCtx) => this.composeAgent(agentCtx)
-        });
+        const port = this.deps.workspaces;
+        if (port === undefined) {
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace-source alarms are unavailable on this host (no workspace registry)");
+          return { outcome: "failed", error: "workspace-source alarms are unavailable on this host (no workspace registry)" };
+        }
+        let destination: WorkspaceWakeDestination | { error: string };
+        try {
+          destination = await port.resolveTarget(target.workspaceId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": workspace resolution failed: " + message);
+          return { outcome: "failed", error: "workspace resolution failed: " + message };
+        }
+        if ("error" in destination) {
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + destination.error);
+          return { outcome: "failed", error: destination.error };
+        }
+        if (destination.kind !== "session") {
+          return { outcome: "failed", error: "fork unavailable: workspace has no eligible session to fork from" };
+        }
+        parentSessionId = destination.sessionId;
       } else {
-        actualSessionId = "session-" + randomUUID();
-        ownedHandle = await this.deps.agents.create({
-          sessionId: actualSessionId,
-          agentOptions: this.agentOptions(),
-          meta: this.defaultPresetMeta(),
-          setup: (agentCtx) => this.composeAgent(agentCtx)
-        });
+        if (target.presetId === undefined || target.presetId === "") {
+          return { outcome: "failed", error: "fork target has no preset id (corrupt alarm record); cancel or edit this alarm" };
+        }
+        const port = this.deps.presetTargets;
+        if (port === undefined) {
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": preset-source alarms are unavailable on this host (no preset roster)");
+          return { outcome: "failed", error: "preset-source alarms are unavailable on this host (no preset roster)" };
+        }
+        let destination: PresetWakeDestination | { error: string };
+        try {
+          destination = await port.resolveTarget(target.presetId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": preset resolution failed: " + message);
+          return { outcome: "failed", error: "preset resolution failed: " + message };
+        }
+        if ("error" in destination) {
+          this.deps.log("warn", "wake failed for alarm " + alarm.id + ": " + destination.error);
+          return { outcome: "failed", error: destination.error };
+        }
+        if (destination.kind !== "session") {
+          return { outcome: "failed", error: "fork unavailable: no session found running preset " + target.presetId };
+        }
+        parentSessionId = destination.sessionId;
       }
+      const parent = await this.parentLog(parentSessionId);
+      if (parent === undefined) {
+        return { outcome: "failed", error: "fork unavailable: parent session could not be read", sessionId: parentSessionId };
+      }
+      const cut = completedTurnCut(parent.events);
+      if (cut === 0) {
+        return { outcome: "failed", error: "fork unavailable: parent session has no completed turn", sessionId: parentSessionId };
+      }
+      const meta = {
+        parentSession: parentSessionId,
+        seedLength: cut,
+        ...(parent.cwd !== undefined ? { cwd: parent.cwd } : {}),
+        ...(parent.presetId !== undefined ? { agentPreset: parent.presetId } : {})
+      };
+      actualSessionId = "session-" + randomUUID();
+      ownedHandle = await this.deps.agents.create({
+        sessionId: actualSessionId,
+        seed: parent.events.slice(0, cut),
+        meta,
+        agentOptions: this.agentOptions(),
+        setup: (agentCtx) => this.composeAgent(agentCtx)
+      });
       this.inflightBySession.add(actualSessionId);
       guardSessionId = actualSessionId;
       agent = ownedHandle.agent;

@@ -65,10 +65,25 @@ export interface ProactivePanelCopy {
   targetFork: string;
   targetNew: string;
   targetWorkspace: string;
+  targetSourceLabel: string;
+  sourceSession: string;
+  sourceWorkspace: string;
+  sourcePreset: string;
+  presetSourceHint: string;
   targetWorkspaceLabel: string;
   workspaceHint: string;
   workspacePickPlaceholder: string;
   noWorkspaces: string;
+  targetPresetLabel: string;
+  presetPickPlaceholder: string;
+  presetIdPlaceholder: string;
+  noPresets: string;
+  newWorkspaceLabel: string;
+  newPresetLabel: string;
+  newModelLabel: string;
+  newConfigHint: string;
+  providerPlaceholder: string;
+  modelPlaceholder: string;
   quietLabel: string;
   /* runs table */
   runTime: string;
@@ -175,10 +190,25 @@ export const zh: ProactivePanelCopy = {
   targetFork: "分支",
   targetNew: "新建",
   targetWorkspace: "工作区",
+  targetSourceLabel: "来源",
+  sourceSession: "会话 ID",
+  sourceWorkspace: "工作区最近活跃",
+  sourcePreset: "Preset 最近活跃",
+  presetSourceHint: "唤醒投递到运行该 preset 的最近活跃会话；没有时复用会新建一个、分支会失败。",
   targetWorkspaceLabel: "目标工作区",
   workspaceHint: "唤醒会投递到该工作区最近更新的会话；无可用会话时在其内新建。",
   workspacePickPlaceholder: "选择工作区…",
   noWorkspaces: "暂无已注册工作区（先把目录注册为工作区，见侧边栏）",
+  targetPresetLabel: "目标 preset",
+  presetPickPlaceholder: "选择 preset…",
+  presetIdPlaceholder: "preset id",
+  noPresets: "主机未提供 preset 列表，可手动输入 preset id",
+  newWorkspaceLabel: "工作区（可选）",
+  newPresetLabel: "Preset（可选）",
+  newModelLabel: "模型（可选）",
+  newConfigHint: "可选配置：工作区决定会话目录，preset 决定组合，模型决定唤醒回合所用的 LLM（全部留空 = 主机默认）。",
+  providerPlaceholder: "provider，如 deepseek",
+  modelPlaceholder: "model id",
   quietLabel: "免打扰",
   runTime: "时间",
   runDecision: "决策",
@@ -280,10 +310,25 @@ export const en: ProactivePanelCopy = {
   targetFork: "Fork",
   targetNew: "New",
   targetWorkspace: "Workspace",
+  targetSourceLabel: "Source",
+  sourceSession: "Session id",
+  sourceWorkspace: "Workspace recent",
+  sourcePreset: "Preset recent",
+  presetSourceHint: "The wake lands in the most recently active session running this preset; resume creates one when none exists, fork fails.",
   targetWorkspaceLabel: "Target workspace",
   workspaceHint: "The wake lands in the workspace's most recently updated session; a fresh one is created when it has none.",
   workspacePickPlaceholder: "Pick a workspace…",
   noWorkspaces: "No registered workspaces yet (register a directory as one in the sidebar first)",
+  targetPresetLabel: "Target preset",
+  presetPickPlaceholder: "Pick a preset…",
+  presetIdPlaceholder: "preset id",
+  noPresets: "No preset roster from the host; type a preset id manually",
+  newWorkspaceLabel: "Workspace (optional)",
+  newPresetLabel: "Preset (optional)",
+  newModelLabel: "Model (optional)",
+  newConfigHint: "Optional: the workspace sets the session directory, the preset its composition, the model its LLM (all empty = host defaults).",
+  providerPlaceholder: "provider, e.g. deepseek",
+  modelPlaceholder: "model id",
   quietLabel: "Quiet",
   runTime: "Time",
   runDecision: "Decision",

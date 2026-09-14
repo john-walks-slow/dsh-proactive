@@ -19,7 +19,7 @@ import type { ProactiveStore } from "../store.js";
 import type { ProactiveScheduler } from "../scheduler.js";
 import { applyHotConfig, hotSubset, validateSettingsPatch } from "../settings.js";
 import { writeConfigFile } from "../config.js";
-import type { AlarmRowView, PanelAction, PanelError, PanelResult, PanelSnapshot, RunView } from "./contract.js";
+import type { AlarmRowView, PanelAction, PanelError, PanelResult, PanelSnapshot, PresetRosterRow, RunView } from "./contract.js";
 
 const RUNS_WINDOW = 200;
 
@@ -36,6 +36,12 @@ export interface PanelServiceDeps {
   sessionEvents: (sessionId: string) => readonly unknown[] | undefined;
   /** Create-side workspace argument normalization (the panel sends explicit ids); absent -> workspace creates fail closed. */
   resolveWorkspace?: (args: Record<string, unknown>, sessionCwd?: string) => Promise<Record<string, unknown> | ToolError>;
+  /**
+   * Agent preset roster rows (AgentPresets.remoteExportList projected): feeds
+   * the preset pickers in the create form. Absent/failed -> empty roster, the
+   * pickers degrade to free-text preset ids.
+   */
+  presetRoster?: () => Promise<readonly PresetRosterRow[]>;
 }
 
 export class ProactivePanelService {
@@ -75,9 +81,21 @@ export class ProactivePanelService {
         quietHours: { start: cfg.quietHours.start, end: cfg.quietHours.end, timeZone: cfg.quietHours.timeZone },
         defaultPrompt: cfg.defaultPrompt
       },
+      presets: await this.presetRows(),
       alarms: alarmRows,
       runs: rows
     };
+  }
+
+  /** Roster rows for the create form; failures degrade to an empty roster. */
+  private async presetRows(): Promise<readonly PresetRosterRow[]> {
+    if (this.deps.presetRoster === undefined) return [];
+    try {
+      return await this.deps.presetRoster();
+    } catch (error) {
+      this.deps.log("warn", "dsh-proactive: preset roster unavailable: " + (error instanceof Error ? error.message : String(error)));
+      return [];
+    }
   }
 
   private rowFor(alarm: Alarm, now: number): AlarmRowView {
@@ -116,7 +134,7 @@ export class ProactivePanelService {
    */
   private async wireWorkspace(args: Record<string, unknown>, sessionEvents: readonly unknown[] | undefined): Promise<{ args: Record<string, unknown> } | { error: PanelError }> {
     let wired = wireTimeZones(args, sessionEvents);
-    if (wired["target_mode"] === "workspace" || wired["target_workspace_id"] !== undefined) {
+    if (wired["target_mode"] === "workspace" || wired["target_source"] === "workspace" || wired["target_workspace_id"] !== undefined || wired["target_workspace_path"] !== undefined) {
       if (this.deps.resolveWorkspace === undefined) {
         return { error: { code: "not_found", message: "workspace targets are unavailable on this host (no workspace registry)." } };
       }

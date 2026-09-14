@@ -17,7 +17,7 @@
  */
 
 import { mkdir, readFile, rename, writeFile, appendFile } from "node:fs/promises";
-import { COMPACTION_MODES, isRecord, isValidWorkspaceId, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
+import { COMPACTION_MODES, isRecord, isValidPresetId, isValidWorkspaceId, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
 
 export interface StoreState {
   version: number;
@@ -37,6 +37,7 @@ const STATE_FILE = "state.json";
 const LEGACY_REASONS = { alarm: false, heartbeat: true } as const;
 
 const TARGET_MODES: readonly string[] = ["resume", "fork", "new", "workspace"];
+const TARGET_SOURCES: readonly string[] = ["session", "workspace", "preset"];
 const ALARM_TYPES: readonly string[] = ["once", "every", "cron"];
 const ALARM_STATUSES: readonly string[] = ["scheduled", "in-flight", "completed", "cancelled", "failed", "paused"];
 
@@ -45,6 +46,45 @@ function isTriggerForType(type: AlarmType, trigger: unknown): boolean {
   if (type === "once") return typeof trigger["at"] === "string";
   if (type === "every") return typeof trigger["everySeconds"] === "number" && typeof trigger["anchor"] === "string" && (trigger["jitterSeconds"] === undefined || typeof trigger["jitterSeconds"] === "number");
   return typeof trigger["expr"] === "string";
+}
+
+/**
+ * Stored-target shape check. v3 targets carry a sourceType for resume/fork
+ * (session | workspace | preset) and optional workspaceId/presetId/provider/
+ * model on "new"; v2 records (sourceType absent, sessionId always present)
+ * keep loading unchanged — the source folds to "session".
+ */
+function targetIsValid(target: Record<string, unknown>): boolean {
+  if (target["mode"] === "workspace") {
+    return typeof target["workspaceId"] === "string" && isValidWorkspaceId(target["workspaceId"]);
+  }
+  if (target["mode"] === "new") {
+    if (target["sessionId"] !== undefined) return false;
+    if (target["sourceType"] !== undefined) return false;
+    if (target["workspaceId"] !== undefined && (typeof target["workspaceId"] !== "string" || !isValidWorkspaceId(target["workspaceId"]))) return false;
+    if (target["presetId"] !== undefined && typeof target["presetId"] !== "string") return false;
+    if (target["provider"] !== undefined && typeof target["provider"] !== "string") return false;
+    if (target["model"] !== undefined && typeof target["model"] !== "string") return false;
+    return true;
+  }
+  if (target["mode"] === "resume" || target["mode"] === "fork") {
+    if (target["provider"] !== undefined || target["model"] !== undefined) return false;
+    const source = target["sourceType"];
+    if (source === undefined) {
+      // v2 record: a plain sessionId target; a workspaceId/presetId next to it
+      // is the v3 spelling and must come with its sourceType.
+      return typeof target["sessionId"] === "string" && target["workspaceId"] === undefined && target["presetId"] === undefined;
+    }
+    if (!TARGET_SOURCES.includes(source as string)) return false;
+    if (source === "session") {
+      return typeof target["sessionId"] === "string" && target["workspaceId"] === undefined && target["presetId"] === undefined;
+    }
+    if (source === "workspace") {
+      return typeof target["workspaceId"] === "string" && isValidWorkspaceId(target["workspaceId"]) && target["sessionId"] === undefined && target["presetId"] === undefined;
+    }
+    return typeof target["presetId"] === "string" && isValidPresetId(target["presetId"]) && target["sessionId"] === undefined && target["workspaceId"] === undefined;
+  }
+  return false;
 }
 
 function alarmIsValid(value: unknown): value is Alarm {
@@ -57,12 +97,7 @@ function alarmIsValid(value: unknown): value is Alarm {
   if (!ALARM_STATUSES.includes(value["status"] as string)) return false;
   const target = value["target"];
   if (!isRecord(target) || typeof target["mode"] !== "string" || !TARGET_MODES.includes(target["mode"])) return false;
-  if (target["mode"] === "resume" || target["mode"] === "fork") {
-    if (typeof target["sessionId"] !== "string") return false;
-  }
-  if (target["mode"] === "workspace") {
-    if (typeof target["workspaceId"] !== "string" || !isValidWorkspaceId(target["workspaceId"])) return false;
-  }
+  if (!targetIsValid(target)) return false;
   // compaction is optional: absent = DEFAULT_COMPACTION (legacy v2 records);
   // a present value must be a known mode so a typo never silently degrades.
   const compaction = value["compaction"];

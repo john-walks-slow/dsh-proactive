@@ -550,7 +550,9 @@ test("panel: workspace target creates through the shared resolver", async () => 
   assert.equal(created.ok, true);
   if (!created.ok) return;
   const alarm = created.snapshot.alarms[0] as unknown as Record<string, unknown>;
-  assert.equal(alarm["targetMode"], "workspace");
+  // legacy "workspace" spelling normalizes to resume + workspace source
+  assert.equal(alarm["targetMode"], "resume");
+  assert.equal(alarm["targetSource"], "workspace");
   assert.equal(alarm["targetWorkspaceId"], "ws-1");
   assert.equal(alarm["targetSessionId"], undefined);
   assert.equal(seen.length, 1); // panel sends the explicit id; no cwd fallback needed

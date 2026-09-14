@@ -65,25 +65,58 @@ export function isValidWorkspaceId(workspaceId: string): boolean {
   return WORKSPACE_ID_PATTERN.test(workspaceId);
 }
 
+/** Preset ids are alphanumeric plus `._-`, max 100 characters. */
+export function isValidPresetId(presetId: string): boolean {
+  if (presetId === "" || presetId.length > 100) return false;
+  return SESSION_ID_PATTERN.test(presetId);
+}
+
 export type AlarmType = "once" | "every" | "cron";
 /** Per-alarm surface compaction policy for silent wake turns. */
 export type AlarmCompaction = "off" | "minimal" | "aggressive";
 export type TargetMode = "resume" | "fork" | "new" | "workspace";
+export type TargetSourceType = "session" | "workspace" | "preset";
 export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" | "failed" | "paused";
 export type RunDecision = "no_reply" | "reply" | "skipped" | "failed";
 
 /**
- * Where the wake should land. `resume`/`fork` name an existing session; `new`
- * creates one; `workspace` names a dsh workspace registry id and resolves the
- * destination at fire time (most recently updated session in the workspace,
- * else the workspace's blank New Session slot, else a fresh session attached
- * to the workspace — see workspace.ts).
+ * Where the wake should land:
+ *  - `new`: creates a fresh session on each fire; optionally configured with workspaceId, presetId, provider, model.
+ *  - `resume`: wakes an existing or dynamically resolved session.
+ *  - `fork`: branches from an existing or dynamically resolved source session.
+ *  Source resolution for resume/fork:
+ *    - `session`: direct specific sessionId.
+ *    - `workspace`: dynamically resolves the workspace's most active session.
+ *    - `preset`: dynamically resolves the preset's most active session.
+ *  - `workspace`: legacy compatibility arm (folds into resume with workspace source).
  */
 export type AlarmTarget =
-  | { mode: "resume"; sessionId: string }
-  | { mode: "fork"; sessionId: string }
-  | { mode: "new" }
+  | {
+      mode: "resume" | "fork";
+      sourceType?: TargetSourceType;
+      sessionId?: string;
+      workspaceId?: string;
+      presetId?: string;
+    }
+  | {
+      mode: "new";
+      workspaceId?: string;
+      presetId?: string;
+      provider?: string;
+      model?: string;
+    }
   | { mode: "workspace"; workspaceId: string };
+
+/**
+ * Effective source arm of a resume/fork target. v3 records carry an explicit
+ * sourceType; v2 records (and the legacy workspace mode) fold to their stored
+ * spelling. "new" targets have no source — undefined.
+ */
+export function targetSourceOf(target: AlarmTarget): TargetSourceType | undefined {
+  if (target.mode === "workspace") return "workspace";
+  if (target.mode === "new") return undefined;
+  return target.sourceType ?? (target.workspaceId !== undefined ? "workspace" : target.presetId !== undefined ? "preset" : "session");
+}
 
 export interface OnceTrigger {
   /** Canonical RFC 3339 UTC instant. */
@@ -157,10 +190,16 @@ export type AlarmView = {
   sessionId: string;
   type: AlarmType;
   targetMode: TargetMode;
-  /** Present for resume/fork targets. */
+  targetSource?: TargetSourceType;
+  /** Present for session-sourced resume/fork targets. */
   targetSessionId?: string;
-  /** Present for workspace targets. */
+  /** Present for workspace-sourced resume/fork targets, workspace legacy targets, or workspace-configured new targets. */
   targetWorkspaceId?: string;
+  /** Present for preset-sourced resume/fork targets, or preset-configured new targets. */
+  targetPresetId?: string;
+  /** Present for model-configured new targets. */
+  targetProvider?: string;
+  targetModel?: string;
   respectQuietHours: boolean;
   prompt: string;
   nextDueAt: string;
@@ -479,13 +518,19 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function toAlarmView(alarm: Alarm, now: number): AlarmView {
   const overdue = alarm.status === "scheduled" && instantEpoch(alarm.nextDueAt) <= now;
+  const targetSource = targetSourceOf(alarm.target);
+
   return {
     id: alarm.id,
     sessionId: alarm.ownerSessionId,
     type: alarm.type,
     targetMode: alarm.target.mode,
-    ...("sessionId" in alarm.target ? { targetSessionId: alarm.target.sessionId } : {}),
-    ...("workspaceId" in alarm.target ? { targetWorkspaceId: alarm.target.workspaceId } : {}),
+    ...(targetSource !== undefined ? { targetSource } : {}),
+    ...("sessionId" in alarm.target && alarm.target.sessionId !== undefined ? { targetSessionId: alarm.target.sessionId } : {}),
+    ...("workspaceId" in alarm.target && alarm.target.workspaceId !== undefined ? { targetWorkspaceId: alarm.target.workspaceId } : {}),
+    ...("presetId" in alarm.target && alarm.target.presetId !== undefined ? { targetPresetId: alarm.target.presetId } : {}),
+    ...("provider" in alarm.target && alarm.target.provider !== undefined ? { targetProvider: alarm.target.provider } : {}),
+    ...("model" in alarm.target && alarm.target.model !== undefined ? { targetModel: alarm.target.model } : {}),
     respectQuietHours: alarm.respectQuietHours,
     prompt: alarm.prompt,
     nextDueAt: alarm.nextDueAt,

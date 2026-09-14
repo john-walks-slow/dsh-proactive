@@ -149,12 +149,15 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
 
   /**
    * Owner for a settings-page create: the wake target session for
-   * resume/fork; the GUI's current session for "new" and "workspace" (the
-   * workspace destination is dynamic, resolved at fire time).
+   * resume/fork with a session source; otherwise (new mode, or a
+   * workspace/preset source whose destination is resolved at fire time) the
+   * GUI's current session, falling back to the host-panel pseudo session.
    */
   const ownerForCreate = useCallback((form_: PanelCreateForm): string => {
     const mode = form_.targetMode ?? "resume";
-    if (mode === "new" || mode === "workspace") return currentSession !== "" ? currentSession : HOST_PANEL_SESSION;
+    if (mode === "new" || (form_.targetSource ?? "session") !== "session") {
+      return currentSession !== "" ? currentSession : HOST_PANEL_SESSION;
+    }
     return (form_.targetSessionId ?? "").trim();
   }, [currentSession]);
 
@@ -309,7 +312,7 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
           copy={copy} editing={editingId !== null} knownSessions={knownSessions}
-          knownWorkspaces={knownWorkspaces} defaultWorkspaceId={defaultWorkspaceId}
+          knownWorkspaces={knownWorkspaces} knownPresets={snapshot?.presets} defaultWorkspaceId={defaultWorkspaceId}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 

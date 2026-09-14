@@ -189,7 +189,7 @@ export function ProactiveSessionPanel(props: ConvViewProps & { workspaces?: Work
       {showForm ? (
         <CreateForm form={form} setForm={setForm} showForm={showForm} setShowForm={setShowForm} busy={busy}
           copy={copy} editing={editingId !== null} knownSessions={knownSessions}
-          knownWorkspaces={knownWorkspaces} defaultWorkspaceId={defaultWorkspaceId}
+          knownWorkspaces={knownWorkspaces} knownPresets={snapshot?.presets} defaultWorkspaceId={defaultWorkspaceId}
           onSubmit={() => { void (editingId !== null ? submitEdit() : submitCreate()); }} />
       ) : null}
 
