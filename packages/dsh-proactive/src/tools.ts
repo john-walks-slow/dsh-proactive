@@ -25,6 +25,7 @@ import type { ContentBlock } from "@deepseek-ai/dsh-llm";
 import type { JsonValue } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
+  DEFAULT_WAKE_PROMPT,
   MAX_JITTER_SECONDS,
   MAX_NO_REPLY_REASON_LENGTH,
   inputError,
@@ -177,7 +178,10 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   prompt: {
     type: "string",
     required: true,
-    description: "What the wake turn should do, in the user's language and context. Plain, concrete instruction; always required."
+    description:
+      "What the wake turn should do, in the user's language and context. Always required. For general heartbeat or periodic check-in alarms without custom instructions, use the recommended default prompt: '" +
+      DEFAULT_WAKE_PROMPT +
+      "'."
   },
   at: {
     oneOf: [
