@@ -196,7 +196,7 @@ export const proactiveSettingsSchema = z.object({
   // value is never silently truncated on the next boot.
   maxPromptLength: z.number().min(100).max(MAX_SET_PROMPT_LENGTH).default(4000),
   defaultPrompt: z.string().default(DEFAULT_WAKE_PROMPT),
-  silentWakeCompaction: z.boolean().default(false)
+  silentWakeCompaction: z.boolean().default(true)
 });
 
 export interface SettingsWire {

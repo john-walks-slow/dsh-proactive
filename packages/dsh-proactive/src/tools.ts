@@ -6,6 +6,7 @@
  *   proactive_list      view this session's active alarms (all=true: every session's)
  *   proactive_cancel    cancel one active alarm by exact id — any owner
  *   proactive_update    replace one active alarm's spec by exact id — any owner
+ *   proactive_silence    conclude a dsh-proactive wake in deep silence (reclaim the turn)
  *   proactive_update_settings  partially update host-level settings (only the given fields)
  *
  * The stores they touch are host-level (the plugin singleton), so they work
@@ -26,6 +27,7 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
   DEFAULT_WAKE_PROMPT,
   MAX_JITTER_SECONDS,
+  MAX_NO_REPLY_REASON_LENGTH,
   inputError,
   internalError,
   isToolError,
@@ -205,7 +207,7 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
 };
 
-/** Build the five tool definitions bound to one agent + its host services. */
+/** Build the six tool definitions bound to one agent + its host services. */
 export function proactiveToolDefinitions(agent: Agent, services: ToolServices): ToolDefinition[] {
   return [
         defineTool({
@@ -409,6 +411,35 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
         }),
 
         defineTool({
+          name: "proactive_silence",
+          description: "Conclude the current dsh-proactive wake in deep silence: call it as your ONLY action with no chat text when there is nothing to do this turn — the whole wake exchange is collapsed off the model surface (reclaimed). Only available during an active dsh-proactive wake. If you did work but no user-facing message is needed, end the turn with no chat text instead (a no-reply tool, if one is available on this host, may also work); proactive_silence is for when the entire wake turn should be reclaimed. Any chat text already committed before this call still counts toward the daily budget.",
+          parameters: {
+            reason: { type: "string", description: "Short internal reason, at most " + MAX_NO_REPLY_REASON_LENGTH + " characters. Recorded in the run history and the compaction tombstone." }
+          },
+          output: {
+            schema: { oneOf: [{ type: "object", additionalProperties: false, properties: { accepted: { type: "boolean", required: true, const: true }, silent: { type: "boolean", required: true, const: true } } }, ERROR_SCHEMA] },
+            render: renderValue
+          },
+          async execute(args, exec) {
+            if (exec.agent !== agent) return internalError();
+            // Only meaningful inside an active wake: the reclaim/compact path
+            // is a wake-turn concept. Outside a wake, surface a closed error
+            // so the model can end with no text, or use a no-reply tool if
+            // one is available — no hard coupling to any other plugin.
+            if (!services.driver.isActiveWake(agent.session.id)) {
+              return { code: "invalid_action", message: "proactive_silence is only available during an active dsh-proactive wake. To stay silent in an ordinary turn, produce no chat text, or use a no-reply tool if one is available." } as ToolError;
+            }
+            const reason = typeof args["reason"] === "string" ? args["reason"] : "";
+            if (reason.length > MAX_NO_REPLY_REASON_LENGTH) {
+              return { code: "invalid_trigger", message: "reason must be at most " + MAX_NO_REPLY_REASON_LENGTH + " characters." } as ToolError;
+            }
+            exec.concludeTurn();
+            return { accepted: true, silent: true };
+          },
+          presentCall: (callArgs) => presentCard("Silent wake acknowledgment", String((callArgs as { reason?: unknown })["reason"] ?? ""))
+        }),
+
+        defineTool({
           name: "proactive_update_settings",
           description: "Partially update host-level dsh-proactive settings: only the fields you pass are changed, the rest keep their current values. The update is persisted to config.json and hot-applied to the running scheduler immediately. Supply at least one field.",
           parameters: {
@@ -469,7 +500,7 @@ function settingsView(config: ProactiveConfig): JsonValue {
 }
 
 /**
- * Register the five tools on an agent's scoped context; returns disposable
+ * Register the six tools on an agent's scoped context; returns disposable
  * tools. The definitions themselves live in {@link proactiveToolDefinitions}
  * so they can be unit-tested without a cordis context.
  */

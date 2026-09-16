@@ -75,19 +75,19 @@ test("resolveConfig honors env overrides", () => {
   }
 });
 
-test("silentWakeCompaction defaults to false and resolves only strict true", () => {
+test("silentWakeCompaction defaults to true; explicit false disables; non-boolean falls back to true", () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-gates-"));
   try {
-    assert.equal(DEFAULT_CONFIG.silentWakeCompaction, false);
+    assert.equal(DEFAULT_CONFIG.silentWakeCompaction, true);
     const bare = resolveConfig(dir);
-    assert.equal(bare.silentWakeCompaction, false);
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ silentWakeCompaction: true }));
+    assert.equal(bare.silentWakeCompaction, true);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ silentWakeCompaction: false }));
     const over = resolveConfig(dir);
-    assert.equal(over.silentWakeCompaction, true);
-    // Non-boolean file values are ignored (the gate is opt-in, `=== true` only).
+    assert.equal(over.silentWakeCompaction, false);
+    // Non-boolean file values fall back to the default (on), not to false.
     writeFileSync(join(dir, "config.json"), JSON.stringify({ silentWakeCompaction: 1 }));
     const strict = resolveConfig(dir);
-    assert.equal(strict.silentWakeCompaction, false);
+    assert.equal(strict.silentWakeCompaction, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

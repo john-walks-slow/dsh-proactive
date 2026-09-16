@@ -7,9 +7,11 @@
  * follow-up, then scans the appended slice for the turn boundary, tool calls,
  * and the final assistant message. The slice is anchored to the wake framing
  * notice (user/message with source.kind=plugin) so a pending pre-wake turn is
- * never misattributed. A model that called no_reply and produced no
- * chat text is "no_reply" (deep silence); visible chat text is charged one
- * budget unit.
+ * never misattributed. A settled turn with no visible chat text is
+ * "no_reply" (deep silence); a proactive_silence call (or an implicit
+ * no-text turn) is compactable, while a "no_reply" tool call (conventionally
+ * a host no-reply tool) keeps the work in context. Visible chat text is
+ * charged one budget unit.
  */
 
 import { isRecord, type RunDecision } from "./domain.js";
@@ -31,10 +33,32 @@ export interface WakeAnalysis {
   reasoningSummary?: string;
   /** Truncated visible-reply summary of the turn, for the run history. */
   replySummary?: string;
-  /** The no_reply reason the model gave for staying silent, for the run history. */
+  /** The proactive_silence reason the model gave for staying silent, for the run history. */
   noReplyReason?: string;
+  /**
+   * Whether the settled wake turn should be compacted off the model surface
+   * (subject to the silentWakeCompaction gate in the driver). Reply turns are
+   * never compacted; a silence signaled by proactive_silence (or an implicit
+   * no-text turn) is compactable; a silence signaled by a "no_reply" tool call
+   * (conventionally a host no-reply tool, e.g. dsh-im's) keeps the work in
+   * context and is NOT compacted.
+   */
+  compactable: boolean;
 }
 
+/**
+ * The proactive wake's own silence tool: calling it reclaims the turn
+ * (collapses the wake exchange off the model surface via compaction) and
+ * records an optional reason in the run history.
+ */
+const PROACTIVE_SILENCE_TOOL = "proactive_silence";
+/**
+ * Convention only (no hard coupling): a tool/call named "no_reply" is treated
+ * as a host-level "stayed silent, but keep the work in context" signal — i.e.
+ * the turn did work but produced no user-facing text and should NOT be
+ * compacted. dsh-im registers such a tool; if no host plugin does, this string
+ * simply never appears in a wake slice and the convention is inert.
+ */
 const NO_REPLY_TOOL = "no_reply";
 
 /** Per-field summary cap for the run history (reasoning + reply are stored truncated). */
@@ -88,8 +112,8 @@ export function extractReasoningBlocks(data: Record<string, unknown>): string[] 
   return [];
 }
 
-/** The no_reply tool's reason argument from one tool/call event's JSON arguments field, truncated. */
-function extractNoReplyReason(data: Record<string, unknown>): string | undefined {
+/** The proactive_silence tool's reason argument from one tool/call event's JSON arguments field, truncated. */
+function extractSilenceReason(data: Record<string, unknown>): string | undefined {
   const raw = data["arguments"];
   if (typeof raw !== "string" || raw.length === 0) return undefined;
   try {
@@ -152,6 +176,8 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   const reasoningParts: string[] = [];
   const toolNames: string[] = [];
   let noReplyReason: string | undefined;
+  let proactiveSilence = false;
+  let noReplyTool = false;
   for (const event of turnSegment) {
     if (event.type === "assistant/message") {
       const texts = extractTextBlocks(event.data);
@@ -165,7 +191,15 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     if (event.type === "tool/call") {
       const name = typeof event.data["name"] === "string" ? event.data["name"] : "";
       if (name.length > 0) toolNames.push(name);
-      if (name === NO_REPLY_TOOL && noReplyReason === undefined) noReplyReason = extractNoReplyReason(event.data);
+      if (name === PROACTIVE_SILENCE_TOOL) {
+        proactiveSilence = true;
+        if (noReplyReason === undefined) noReplyReason = extractSilenceReason(event.data);
+      } else if (name === NO_REPLY_TOOL) {
+        // Convention: a "no_reply" tool call means "stayed silent, keep work
+        // in context" — NOT the reclaim/compact path. (No hard coupling: this
+        // is a name match against the session log, not an import.)
+        noReplyTool = true;
+      }
     }
   }
   const turnEnded = turnEndIndex >= 0;
@@ -173,19 +207,29 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
 
   let decision: RunDecision;
   let note: string | undefined;
+  let compactable = false;
   if (hasText) {
     decision = "reply";
+    // Reply turns are never compacted (the user already saw the text).
   } else if (!turnEnded || errorEnd) {
     decision = "failed";
+    // A failed/abnormal wake is compacted off the surface (past behavior).
+    compactable = true;
     note = errorEnd ? "wake turn ended abnormally" : "wake turn did not settle cleanly";
   } else {
     decision = "no_reply";
+    // Compact (reclaim) unless the silence was signaled by a "no_reply" tool
+    // AND proactive_silence was not also called. An explicit proactive_silence
+    // wins (the model asked to reclaim even if it also called no_reply); an
+    // implicit no-text turn (neither tool) is also reclaimable.
+    compactable = !noReplyTool || proactiveSilence;
   }
   return {
     decision,
     budgetDelta: decision === "reply" ? 1 : 0,
     toolNames,
     hasText,
+    compactable,
     ...(reasoningParts.length > 0 ? { reasoningSummary: truncateSummary(reasoningParts.join("\n")) } : {}),
     ...(textParts.length > 0 ? { replySummary: truncateSummary(textParts.join("\n")) } : {}),
     ...(noReplyReason !== undefined ? { noReplyReason } : {}),

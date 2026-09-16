@@ -47,7 +47,7 @@ function makeFakeAgent(rec: FakeRecording, opts: { busy?: boolean; failWhenIdle?
       rec.messages.push({ message });
       rec.activeDuringFollowup = true; // driver must still count this wake as active
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => {
@@ -124,7 +124,7 @@ test("cold wake resumes the session, frames the message, and can be silent", asy
     assert.equal(h.rec.messages.length, 1);
     const text = extractText(h.rec.messages[0].message);
     assert.ok(text.startsWith("[dsh-proactive wake cold1 once cold]"), "v3 minimal header expected, got: " + text.slice(0, 60));
-    assert.ok(text.includes("end the turn with no text at all"));
+    assert.ok(text.includes("proactive_silence(reason) as your ONLY action"));
     assert.ok(text.includes("进水提醒"));
     assert.equal(h.driver.isActiveWake("s1"), false); // cleared after the wake
   } finally {
@@ -540,7 +540,7 @@ function makeWakeAgent(header: EpochHeader) {
     session: { id: "s1", events, requestHeader: () => header },
     followup: () => {
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
@@ -591,11 +591,11 @@ test("silent wake collapses on the model surface after the turn settles", async 
         turn: 1,
         step: 1,
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_silence", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
       }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
@@ -635,11 +635,10 @@ test("silent wake collapses on the model surface after the turn settles", async 
   }
 });
 
-test("silent wake is NOT compacted when silentWakeCompaction is off (default)", async () => {
+test("silent wake is NOT compacted when silentWakeCompaction is off", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
-  // Off by default: the gate must leave the whole silent exchange on the model
-  // surface even though the turn produced no visible output.
+  cfg.silentWakeCompaction = false; // gate off: the silent exchange stays on the surface
   const store = new ProactiveStore(dir);
   const session = Session.create("s1" as never);
   const agent = {
@@ -651,11 +650,11 @@ test("silent wake is NOT compacted when silentWakeCompaction is off (default)", 
         turn: 1,
         step: 1,
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_silence", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
       }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
@@ -682,6 +681,64 @@ test("silent wake is NOT compacted when silentWakeCompaction is off (default)", 
     const texts = derived.map((m) => (m.content[0] as { text?: string }).text ?? "");
     assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake silentoff1 ")), "framing must stay on the surface (no compaction)");
     assert.ok(!texts.some((t) => t.startsWith("[dsh-proactive silent wake ")), "no tombstone may appear when the gate is off");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a host 'no_reply' silence keeps the work in context (NOT compacted, even with the gate on)", async () => {
+  // Convention: a tool/call named "no_reply" means "stayed silent, keep work
+  // in context" (e.g. dsh-im's no_reply). Even with silentWakeCompaction on,
+  // such a turn is NOT reclaimed — the model's work stays on the surface.
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  cfg.silentWakeCompaction = true;
+  const store = new ProactiveStore(dir);
+  const session = Session.create("s1" as never);
+  const agent = {
+    session,
+    followup: (message: unknown) => {
+      session.append("turn/start", { turn: 1 });
+      session.append("user/message", message as never, { surfaceOp: "append" });
+      // The model did work (a tool call) then stayed silent via a host
+      // "no_reply" tool — no visible chat text.
+      session.append("assistant/message", {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage({
+          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: "{}" }],
+          source: { provider: "cpa", model: "gemini-3-flash" }
+        })
+      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      session.append("tool/result", {
+        turn: 1,
+        step: 1,
+        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ acknowledged: true }) }], isError: false })
+      }, { surfaceOp: "append" });
+      session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+    },
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const agents: AgentsFacade = {
+    get: () => agent,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => ({ provider: "cpa", model: "x" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("keepwork1"));
+    assert.equal(fire.outcome, "ok");
+    if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
+    // No tombstone: the wake exchange (framing + the model's tool work) stays
+    // on the model surface so later turns can see what was done.
+    const texts = session.surface.nodes
+      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .filter((message) => message !== null)
+      .map((m) => (m.content[0] as { text?: string }).text ?? "");
+    assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake keepwork1 ")), "framing must stay (no compaction)");
+    assert.ok(!texts.some((t) => t.startsWith("[dsh-proactive silent wake ")), "no tombstone may appear for a no_reply silence");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -806,11 +863,11 @@ test("raced user turn with text does not block compaction of a SILENT wake", asy
         turn: 1,
         step: 1,
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_silence", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
       }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,

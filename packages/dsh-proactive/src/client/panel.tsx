@@ -58,7 +58,7 @@ function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
     quietStart: snapshot.config.quietHours.start,
     quietEnd: snapshot.config.quietHours.end,
     defaultPrompt: snapshot.config.defaultPrompt ?? "",
-    silentWakeCompaction: snapshot.config.silentWakeCompaction ?? false
+    silentWakeCompaction: snapshot.config.silentWakeCompaction ?? true
   };
 }
 

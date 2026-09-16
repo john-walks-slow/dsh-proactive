@@ -57,7 +57,7 @@ export const DEFAULT_CONFIG: ProactiveConfig = {
   maxRetriesPerFire: 3,
   maxPromptLength: 4000,
   defaultPrompt: DEFAULT_WAKE_PROMPT,
-  silentWakeCompaction: false,
+  silentWakeCompaction: true,
   dataDir: "/root/.dsh/proactive"
 };
 
@@ -164,7 +164,10 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     defaultPrompt: typeof file["defaultPrompt"] === "string" && file["defaultPrompt"].trim().length > 0
       ? sliceCodePoints(file["defaultPrompt"].trim(), Math.min(maxPromptLength, MAX_PROMPT_LENGTH))
       : DEFAULT_CONFIG.defaultPrompt,
-    silentWakeCompaction: file["silentWakeCompaction"] === true,
+    // Default ON (tombstone compaction reclaims silent/failed wakes off the
+    // model surface). An explicit boolean in config.json wins; any non-boolean
+    // value falls back to the default (on), not to false.
+    silentWakeCompaction: typeof file["silentWakeCompaction"] === "boolean" ? file["silentWakeCompaction"] : DEFAULT_CONFIG.silentWakeCompaction,
     dataDir: dir
   };
   if (env["DSH_PROACTIVE_ENABLED"] === "0" || env["DSH_PROACTIVE_ENABLED"] === "false") config.enabled = false;
