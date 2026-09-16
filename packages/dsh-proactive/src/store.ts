@@ -53,7 +53,7 @@ const ALARM_STATUSES: readonly string[] = ["scheduled", "in-flight", "completed"
 function isTriggerForType(type: AlarmType, trigger: unknown): boolean {
   if (!isRecord(trigger)) return false;
   if (type === "once") return typeof trigger["at"] === "string";
-  if (type === "every") return typeof trigger["everySeconds"] === "number" && typeof trigger["anchor"] === "string" && (trigger["jitterSeconds"] === undefined || typeof trigger["jitterSeconds"] === "number");
+  if (type === "every") return typeof trigger["everySeconds"] === "number" && (trigger["anchor"] === undefined || typeof trigger["anchor"] === "string") && (trigger["jitterSeconds"] === undefined || typeof trigger["jitterSeconds"] === "number");
   return typeof trigger["expr"] === "string";
 }
 

@@ -26,6 +26,7 @@
 - 静默 = framing 规则引导 + `exec.concludeTurn()` 机械结束（agent-loop 不再请求下一次补全）+ 不产出文本；GUI 对无文本 assistant 消息不渲染。文本先行的泄漏由 observer 标记并按可见文本计费，不阻断
 - 预算：唤醒回合写了可见聊天文本 1 单位/UTC 日，上限 `maxDeliveriesPerDay`；no_reply 免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
 - 安静时段（IANA 时区、跨午夜）：非 alarm 唤醒每 5 分钟延迟重评估；重复闹钟错过不补跑，推进到下一个锚点
+- 循环模式（260916 更新）：推进改用漂移语义（`nextDriftingOccurrence`），下次唤醒时刻基于本次真实唤醒时刻（`wakeEpoch`，记录于 `lastRunAt`）加上间隔与随机抖动，允许时间漂移，确保每次唤醒之间至少保持设定的周期间隔；极端超时自动安全重锚，杜绝惊群
 - 唤醒回合判定依据**已提交的会话日志**（startIndex 之后的事件切片），不信任运行期假设
 - 静默唤醒压缩（per-alarm `compaction` 三态，默认 `minimal`）：observer 判 no_reply/failed 后，`off` 在驱动层短路不压缩；`minimal`/`aggressive` 用平台 surfaceOp replace 把唤醒交换折叠——minimal tombstone 含 `no_reply: <reason>`（~200-400B），aggressive 只 id+time（~70B），两者都用空 content assistant/message 擦除器（deriveEventMessage→null）；reply 回合绝不压缩；非本插件注入的 surface 节点（runtime-context snapshot 等）打断 run 并保留——shadow snapshot 会使 RuntimeContextProjection.retained 置空、下回合强制重发全量快照；GUI 人类 transcript 用 append-origin 事件，不受替换影响。no_reply reason 无条件提取进 run history（runs.jsonl/面板 RunView），与上下文压缩正交
 - 面板表单（两面板同一方言）：目标会话=会话 ID 文本输入（默认当前会话，设置页经 GlobalStandardProps `useSessions` 读 GUI 选中会话）；输入框下方实时显示该 ID 的会话标题（`knownSessions: ReadonlyMap<id,title>` 来自 state 快照的 session.list，精确命中即显示）；不在列表的 ID 为**软提示且 500ms settle 去抖**（负面反馈不能逐键闪现，正面标题即时）；owner 非表单字段——会话页钉死本会话（host scope 规则），设置页按目标派生（resume/fork=目标会话，new=当前会话→host-panel 伪会话）；prompt 预填 `config.defaultPrompt`（常量在 domain.ts，快照缺该字段的旧 host 由 client 回退同值，配置编辑项也仅在字段存在时渲染/提交）

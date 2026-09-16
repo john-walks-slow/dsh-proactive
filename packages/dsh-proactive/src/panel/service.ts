@@ -10,7 +10,7 @@
  * to is owned BY the session.
  */
 
-import { isRecord, isToolError, isValidSessionId, toAlarmView, instantEpoch, nextEveryOccurrence, nextJitteredOccurrence, jitterDelay, type Alarm, type RunRecord, type ToolError } from "../domain.js";
+import { isRecord, isToolError, isValidSessionId, toAlarmView, instantEpoch, nextDriftingOccurrence, jitterDelay, type Alarm, type RunRecord, type ToolError } from "../domain.js";
 import { nextCronOccurrence } from "../cron.js";
 import { buildAlarm, validateCreateArgs, type CreateSpec } from "../alarm-factory.js";
 import { wireTimeZones } from "../zone.js";
@@ -253,15 +253,9 @@ export class ProactivePanelService {
         // pause; once alarms keep their original due instant (an expired one
         // fires at once).
         if (current.type === "every" && "everySeconds" in current.trigger) {
-          // Resume off the trigger's ORIGINAL anchor, not the last run: a
-          // jittered grid must not drift every pause/resume cycle.
-          const rawAnchor = current.trigger["anchor"];
-          const anchor = typeof rawAnchor === "string" && rawAnchor.length > 0 ? rawAnchor : (current.lastRunAt ?? current.createdAt);
           const every = current.trigger.everySeconds as number;
           const jitterSeconds = typeof current.trigger["jitterSeconds"] === "number" && current.trigger["jitterSeconds"] > 0 ? current.trigger["jitterSeconds"] : undefined;
-          next = new Date(jitterSeconds === undefined
-            ? nextEveryOccurrence(instantEpoch(anchor), every, now)
-            : nextJitteredOccurrence(instantEpoch(anchor), every, now, jitterSeconds)).toISOString();
+          next = new Date(nextDriftingOccurrence(now, every, now, jitterSeconds)).toISOString();
         } else if (current.type === "cron" && "expr" in current.trigger) {
           try {
             const base = nextCronOccurrence(current.trigger["expr"], current.timeZone, now);

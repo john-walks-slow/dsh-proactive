@@ -283,10 +283,29 @@ test("failed repeating alarm advances to next occurrence after maxRetriesPerFire
   assert.equal(h.store.getAlarm("fr1")?.status, "scheduled");
   h.clock.t += 31_000;
   h.scheduler.requestDrive();
-  await h.flush(() => h.fired.length === 2 && h.store.getAlarm("fr1")?.status === "scheduled" && Date.parse(h.store.getAlarm("fr1")!.nextDueAt) === BASE_NOW + 3600_000);
+  await h.flush(() => h.fired.length === 2 && h.store.getAlarm("fr1")?.status === "scheduled" && Date.parse(h.store.getAlarm("fr1")!.nextDueAt) === BASE_NOW + 31_000 + 3600_000);
   assert.equal(h.fired.length, 2);
   assert.equal(h.store.getAlarm("fr1")?.status, "scheduled");
-  assert.equal(Date.parse(h.store.getAlarm("fr1")!.nextDueAt), BASE_NOW + 3600_000);
+  assert.equal(Date.parse(h.store.getAlarm("fr1")!.nextDueAt), BASE_NOW + 31_000 + 3600_000);
+});
+
+test("every alarm drifts based on actual wake time with jitter", async (tctx) => {
+  // Wake occurs at BASE_NOW + 15 minutes (900s). The next due instant must be
+  // computed from that actual wake time, not the original anchor.
+  const wakeOffset = 900_000;
+  const h = await harness({ random: () => 0.5 });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.clock.t += wakeOffset; // actual wake runs at 09:15:00
+  h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
+  // every 1 hour (3600s), jitter 300s -> jitter delay = 150s (150_000ms)
+  h.store.addAlarm(everyAlarm("drift1", 3600, "2026-09-01T08:00:00.000Z", 300, { nextDueAt: new Date(BASE_NOW + wakeOffset - 1).toISOString() }));
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("drift1")?.runCount === 1);
+  const row = h.store.getAlarm("drift1")!;
+  assert.equal(row.status, "scheduled");
+  // Next due = (BASE_NOW + 900s) + 3600s + 150s
+  const expected = (BASE_NOW + wakeOffset) + 3600_000 + 150_000;
+  assert.equal(Date.parse(row.nextDueAt), expected);
 });
 
 test("visible reply outcome spends budget", async (tctx) => {

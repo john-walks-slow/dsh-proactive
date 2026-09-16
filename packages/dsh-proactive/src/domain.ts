@@ -140,9 +140,9 @@ export interface OnceTrigger {
 
 export interface EveryTrigger {
   everySeconds: number;
-  /** Grid anchor: occurrences stay aligned to this instant (misses are skipped, never re-fired). */
-  anchor: string;
-  /** Optional per-occurrence random delay in seconds; absent/0 = exact grid. */
+  /** Anchor instant for backward compatibility or reference to the latest wake. */
+  anchor?: string;
+  /** Optional per-occurrence random delay in seconds; absent/0 = exact intervals. */
   jitterSeconds?: number;
 }
 
@@ -520,6 +520,29 @@ export function jitterDelay(jitterSeconds: number | undefined, random: RandomSou
 export function nextJitteredOccurrence(anchorEpoch: number, everySeconds: number, now: number, jitterSeconds: number | undefined, random: RandomSource = Math.random): number {
   const scheduled = nextEveryOccurrence(anchorEpoch, everySeconds, now);
   return scheduled + jitterDelay(jitterSeconds, random);
+}
+
+/**
+ * The next occurrence of an every alarm with drifting semantics:
+ * Advances from the last wake instant by everySeconds plus jitterDelay.
+ * If the resulting instant is already in the past (e.g. system sleep or prolonged
+ * wake execution), re-anchors to nowEpoch so the next occurrence is strictly in the future.
+ */
+export function nextDriftingOccurrence(
+  wakeEpoch: number,
+  everySeconds: number,
+  nowEpoch: number,
+  jitterSeconds: number | undefined,
+  random: RandomSource = Math.random
+): number {
+  if (!Number.isSafeInteger(everySeconds) || everySeconds < MIN_EVERY_SECONDS) {
+    throw new ProactiveInputError("frequency_too_high", "every_seconds must be a safe integer of at least {min} seconds.".replace("{min}", String(MIN_EVERY_SECONDS)));
+  }
+  const interval = everySeconds * 1000;
+  const delay = jitterDelay(jitterSeconds, random);
+  const scheduled = wakeEpoch + interval + delay;
+  if (scheduled > nowEpoch) return scheduled;
+  return nowEpoch + interval + delay;
 }
 
 /** Whether the alarm target time is still in the future. */

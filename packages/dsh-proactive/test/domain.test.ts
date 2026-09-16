@@ -12,6 +12,7 @@ import {
   validateJitterSeconds,
   nextEveryOccurrence,
   nextJitteredOccurrence,
+  nextDriftingOccurrence,
   requireFuture,
   resolveAtInput,
   toAlarmView,
@@ -120,6 +121,24 @@ test("nextJitteredOccurrence stays strictly future and adds the delay on top of 
   assert.equal(nextJitteredOccurrence(anchor, 300, anchor + 10_000, 600, () => 0), planned);
   // Validation still applies: sub-floor every_seconds rejects.
   assert.throws(() => nextJitteredOccurrence(anchor, 299, anchor + 1, 600), errCode("frequency_too_high"));
+});
+
+test("nextDriftingOccurrence calculates next run from wake instant and drifts", () => {
+  const wake = Date.parse("2026-09-01T09:15:20.000Z");
+  const now = wake + 5000; // wake turn completed in 5 seconds
+  // exact drift: wake + 3600s
+  assert.equal(nextDriftingOccurrence(wake, 3600, now, undefined), wake + 3600_000);
+  // with jitter: wake + 3600s + delay
+  assert.equal(nextDriftingOccurrence(wake, 3600, now, 600, () => 0.5), wake + 3600_000 + 300_000);
+  // sub-floor rejects
+  assert.throws(() => nextDriftingOccurrence(wake, 299, now, 0), errCode("frequency_too_high"));
+
+  // Extreme delay: if prolonged execution or system sleep caused wake + interval to be in the past
+  const pastWake = Date.parse("2026-09-01T00:00:00.000Z");
+  const farFutureNow = pastWake + 7200_000; // 2 hours later
+  // Should re-anchor strictly in the future from now
+  const next = nextDriftingOccurrence(pastWake, 3600, farFutureNow, 120, () => 0.5);
+  assert.equal(next, farFutureNow + 3600_000 + 60_000);
 });
 
 test("requireFuture rejects the past", () => {

@@ -23,7 +23,7 @@
 
 import type { Alarm, RunDecision } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
-import { instantEpoch, isRecord, nextEveryOccurrence, nextJitteredOccurrence } from "./domain.js";
+import { instantEpoch, isRecord, nextDriftingOccurrence } from "./domain.js";
 import { nextCronOccurrence } from "./cron.js";
 import { isInQuietHours } from "./config.js";
 import type { ProactiveStore } from "./store.js";
@@ -306,19 +306,19 @@ export class ProactiveScheduler {
     }
     const trigger = alarm.trigger;
     let nextDueEpoch: number;
+    let nextTrigger = trigger;
     if (alarm.type === "every") {
       // Corrupt every data (missing/invalid trigger) must fail closed instead
       // of throwing into the drive loop: mark failed so it leaves the due set.
-      if (!isRecord(trigger) || !("everySeconds" in trigger) || typeof trigger["everySeconds"] !== "number" || !Number.isSafeInteger(trigger["everySeconds"]) || typeof trigger["anchor"] !== "string") {
+      if (!isRecord(trigger) || !("everySeconds" in trigger) || typeof trigger["everySeconds"] !== "number" || !Number.isSafeInteger(trigger["everySeconds"])) {
         return { ...alarm, status: "failed", lastRunAt: stamp, runCount: alarm.runCount + 1, updatedAt: stamp };
       }
       // jitterSeconds is an enhancement field: a corrupt/malformed value
-      // degrades softly to the deterministic grid instead of killing the
-      // alarm — the anchor+everySeconds pair is the load-bearing part.
+      // degrades softly to the deterministic interval instead of killing the
+      // alarm — everySeconds is the load-bearing part.
       const jitterSeconds = typeof trigger["jitterSeconds"] === "number" && Number.isFinite(trigger["jitterSeconds"]) && trigger["jitterSeconds"] > 0 ? trigger["jitterSeconds"] : undefined;
-      nextDueEpoch = jitterSeconds === undefined
-        ? nextEveryOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now)
-        : nextJitteredOccurrence(instantEpoch(trigger["anchor"] as string), trigger["everySeconds"], now, jitterSeconds, this.deps.random ?? Math.random);
+      nextDueEpoch = nextDriftingOccurrence(now, trigger["everySeconds"], this.now(), jitterSeconds, this.deps.random ?? Math.random);
+      nextTrigger = { ...trigger, anchor: stamp };
     } else {
       // cron — the expression and zone are the load-bearing parts; a corrupt
       // pair fails closed to "failed" and leaves the due set.
@@ -335,6 +335,7 @@ export class ProactiveScheduler {
     }
     return {
       ...alarm,
+      trigger: nextTrigger,
       status: "scheduled",
       nextDueAt: new Date(nextDueEpoch).toISOString(),
       lastRunAt: stamp,
