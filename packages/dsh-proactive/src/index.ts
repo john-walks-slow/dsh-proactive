@@ -124,6 +124,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
         },
         coldHeaders: persistenceService === undefined ? undefined : () => persistenceService.list(),
         projectionCache: ctx.get("sessionProjectionCache", false) as ProjectionCacheLike | undefined,
+        createdSessionKind: (sessionId) => store.createdSessionKind(sessionId),
         log: (level, message) => ctx.logger[level](message)
       });
   // Preset-sourced targets (target_source "preset"): the same live/cold
@@ -139,6 +140,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     coldHeaders: persistenceService === undefined ? undefined : () => persistenceService.list(),
     projectionCache: ctx.get("sessionProjectionCache", false) as ProjectionCacheLike | undefined,
     archivedSessionIds: registry === undefined ? undefined : () => registry.archivedSessionIds,
+    createdSessionKind: (sessionId) => store.createdSessionKind(sessionId),
     log: (level, message) => ctx.logger[level](message)
   });
 

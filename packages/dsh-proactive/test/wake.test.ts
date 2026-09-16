@@ -255,6 +255,9 @@ test("fork target creates a child session seeded with the parent's completed his
     assert.equal(captured.meta?.cwd, "/work");
     assert.equal(captured.meta?.agentPreset, "general"); // child inherits the parent's composition
     assert.ok(captured.sessionId.startsWith("session-"));
+    // Bookkeeping: the fork child is recorded so workspace/preset resolvers
+    // never capture it (its human history is inherited, not adopted).
+    assert.equal(store.createdSessionKind(captured.sessionId), "fork");
     if (fire.outcome === "ok") {
       assert.equal(fire.sessionId, captured.sessionId);
     }
@@ -916,14 +919,47 @@ test("workspace alarm lands in the resolved session via the resume path", async 
   }
 });
 
-test("workspace alarm creates a session in the workspace and attaches BEFORE delivering", async () => {
+test("workspace alarm with nothing eligible SKIPS the fire (no create, no delivery)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
   const store = new ProactiveStore(dir);
-  const trace: string[] = [];
+  const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
   const port: WorkspaceWakePort = {
-    resolveTarget: async () => ({ kind: "create", cwd: "/repos/alpha" }),
-    attach: async (_workspaceId, sessionId) => { trace.push("attach:" + sessionId); },
+    // Nothing eligible: only archived/subagent/plugin-created sessions, or an
+    // empty workspace. The old arm created a session here — that minted a
+    // fresh top-ranked candidate every fire and the next wake landed inside
+    // the plugin's own echo.
+    resolveTarget: async () => ({ kind: "none" }),
+    attach: async () => { throw new Error("must not be called"); },
+    cwdOf: async () => { throw new Error("must not be called"); }
+  };
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("must not be called"); }
+  };
+  const driver = new WakeDriver({ agents, workspaces: port, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("ws4", { mode: "workspace", workspaceId: "ws-a" }));
+    assert.equal(fire.outcome, "skipped");
+    if (fire.outcome === "skipped") {
+      assert.ok(fire.skipReason.includes("no eligible session"), "the reason must explain the skip");
+      assert.ok(fire.skipReason.includes("target_mode new"), "the reason must point at target_mode new");
+    }
+    assert.equal(rec.messages.length, 0); // nothing delivered, nothing created
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("new mode with a workspace: failing attach never delivers the wake, the session stays bookkept", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
+  const port: WorkspaceWakePort = {
+    resolveTarget: async () => { throw new Error("unused in new mode"); },
+    attach: async () => { throw new Error("attach failed: registry rejected"); },
     cwdOf: async () => "/repos/alpha"
   };
   let captured: CreateFacadeOptions | undefined;
@@ -932,46 +968,20 @@ test("workspace alarm creates a session in the workspace and attaches BEFORE del
     resume: async () => { throw new Error("unused"); },
     create: async (options) => {
       captured = options;
-      return { agent: makeFakeAgent({ messages: [], disposed: false, resumed: false, activeDuringFollowup: null }), dispose: async () => undefined };
+      return { agent: makeFakeAgent(rec), dispose: async () => undefined };
     }
   };
   const driver = new WakeDriver({ agents, workspaces: port, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
   try {
-    const fire = await driver.fire(alarm("ws4", { mode: "workspace", workspaceId: "ws-a" }));
-    assert.equal(fire.outcome, "ok");
-    assert.ok(captured !== undefined);
-    assert.equal(captured.meta?.cwd, "/repos/alpha"); // session lands inside the workspace dir
-    assert.ok(captured.sessionId.startsWith("session-"));
-    // ordering: the created session is grouped into the workspace BEFORE the
-    // wake is delivered — a failed attach must never deliver an orphan.
-    assert.deepEqual(trace, ["attach:" + captured.sessionId]);
-    if (fire.outcome === "ok") assert.equal(fire.sessionId, captured.sessionId);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("workspace create arm failing the attach never delivers the wake", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
-  const cfg = resolveConfig(dir);
-  const store = new ProactiveStore(dir);
-  const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
-  const port: WorkspaceWakePort = {
-    resolveTarget: async () => ({ kind: "create", cwd: "/repos/alpha" }),
-    attach: async () => { throw new Error("attach failed: registry rejected"); },
-    cwdOf: async () => "/repos/alpha"
-  };
-  const agents: AgentsFacade = {
-    get: () => undefined as never,
-    resume: async () => { throw new Error("unused"); },
-    create: async () => ({ agent: makeFakeAgent(rec), dispose: async () => undefined })
-  };
-  const driver = new WakeDriver({ agents, workspaces: port, modelSelection: () => undefined, store, config: cfg, log: () => undefined });
-  try {
-    const fire = await driver.fire(alarm("ws5", { mode: "workspace", workspaceId: "ws-a" }));
+    const fire = await driver.fire(alarm("ws5", { mode: "new", workspaceId: "ws-a" }));
     assert.equal(fire.outcome, "failed");
     if (fire.outcome === "failed") assert.ok(fire.error.includes("attach failed"));
     assert.equal(rec.messages.length, 0); // no wake delivered into the ungrouped session
+    // Bookkeeping happens BEFORE attach: the orphaned session must still be
+    // excluded from later "most recently active" resolutions.
+    assert.ok(captured !== undefined);
+    assert.equal(captured.meta?.cwd, "/repos/alpha");
+    assert.equal(store.createdSessionKind(captured.sessionId), "new");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

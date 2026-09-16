@@ -33,14 +33,17 @@ const BUSY_RETRY_MS = 30_000;
 const QUIET_DEFER_MS = 5 * 60_000;
 
 /** Wake-driver outcomes the scheduler translates into alarm transitions. */
-export type WakeOutcome = "ok" | "busy" | "failed";
+export type WakeOutcome = "ok" | "busy" | "failed" | "skipped";
 export type FireResult = "completed" | "advanced" | "skipped" | "retry" | "failed";
 
 export interface SchedulerDeps {
   store: ProactiveStore;
   config: ProactiveConfig;
-  /** Runs one alarm through the agent world; returns ok + analysis + the session the wake actually ran in (fork/new children differ from the owner). */
-  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
+  /**
+   * Runs one alarm through the agent world; returns ok + analysis + the session the wake actually ran in (fork/new children differ from the owner).
+   * "skipped" = no eligible destination (nothing was woken): the reason rides along for the run record.
+   */
+  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; skipReason?: string; analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
   now?: () => number;
   /** Uniform(0,1) source for jittered repeats; defaults to Math.random. */
   random?: () => number;
@@ -236,6 +239,16 @@ export class ProactiveScheduler {
         return "failed";
       }
       return "retry";
+    }
+    if (result.outcome === "skipped") {
+      // Nothing was woken (no eligible destination): a legitimate no-op, not
+      // a failure — record it, advance past this occurrence, never retry
+      // (the condition does not change on its own) and never burn the
+      // hourly cap or the budget.
+      this.retries.delete(alarm.id);
+      await this.recordSkip(alarm, result.skipReason ?? "no eligible target session");
+      this.advancePast(alarm, now, "skipped");
+      return "skipped";
     }
     // ok — count successful wakes only, so busy/failed retries do not burn
     // the hourly cap window for unrelated alarms.

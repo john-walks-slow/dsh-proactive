@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProactiveStore } from "../src/store.js";
+import { ProactiveStore, MAX_CREATED_SESSIONS } from "../src/store.js";
 import type { Alarm, RunRecord } from "../src/domain.js";
 
 function alarm(id: string, ownerSessionId = "s1", nextDueAt = "2026-09-02T00:00:00.000Z"): Alarm {
@@ -196,6 +196,74 @@ test("appendRun appends one JSON line per record", async () => {
     assert.equal(JSON.parse(lines[0]).id, "r1");
     assert.equal(JSON.parse(lines[1]).decision, "reply");
     assert.equal(existsSync(join(dir, "alarms.json")), false); // appendRun should not create it
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordCreatedSession bookkeeps kinds, round-trips through load, and is idempotent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-created-"));
+  try {
+    const store = new ProactiveStore(dir);
+    assert.equal(store.createdSessionKind("s-new"), undefined);
+    await store.recordCreatedSession("s-new", "new");
+    await store.recordCreatedSession("s-fork", "fork");
+    // same id again: kind is NOT rewritten (first bookkeeping wins)
+    await store.recordCreatedSession("s-new", "fork");
+    assert.equal(store.createdSessionKind("s-new"), "new");
+    assert.equal(store.createdSessionKind("s-fork"), "fork");
+    assert.equal(store.createdSessionKind("s-other"), undefined);
+
+    const loaded = await ProactiveStore.load(dir);
+    assert.equal(loaded.store.createdSessionKind("s-new"), "new");
+    assert.equal(loaded.store.createdSessionKind("s-fork"), "fork");
+
+    const raw = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+    assert.equal(raw.createdSessions.length, 2);
+    assert.equal(raw.createdSessions[0].sessionId, "s-new");
+    assert.equal(raw.createdSessions[0].kind, "new");
+    assert.equal(typeof raw.createdSessions[0].createdAt, "string");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createdSessions cap: newest last, oldest ages out beyond MAX_CREATED_SESSIONS", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-created-cap-"));
+  try {
+    // Preseed a full ledger via the constructor (no per-record persistence).
+    const full = Array.from({ length: MAX_CREATED_SESSIONS }, (_unused, index) => ({
+      sessionId: "s-" + index,
+      kind: "new" as const,
+      createdAt: "2026-09-01T00:00:00.000Z"
+    }));
+    const store = new ProactiveStore(dir, undefined, { date: "2026-09-01", delivered: 0, createdSessions: full });
+    await store.recordCreatedSession("s-fresh", "fork");
+    assert.equal(store.createdSessionKind("s-0"), undefined); // oldest aged out
+    assert.equal(store.createdSessionKind("s-1"), "new");
+    assert.equal(store.createdSessionKind("s-fresh"), "fork");
+
+    const raw = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+    assert.equal(raw.createdSessions.length, MAX_CREATED_SESSIONS);
+    assert.equal(raw.createdSessions[raw.createdSessions.length - 1].sessionId, "s-fresh");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("state.json with a corrupt createdSessions array degrades to an empty ledger", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-created-bad-"));
+  try {
+    writeFileSync(join(dir, "state.json"), JSON.stringify({
+      date: "2026-09-01",
+      delivered: 2,
+      createdSessions: [{ sessionId: "ok", kind: "new", createdAt: "t" }, { noKind: true }, "junk", 42]
+    }), "utf8");
+    const loaded = await ProactiveStore.load(dir);
+    assert.equal(loaded.corrupt, false);
+    assert.equal(loaded.store.createdSessionKind("ok"), "new");
+    assert.equal(loaded.store.createdSessionKind("junk"), undefined);
+    assert.equal(loaded.store.budgetFor("2026-09-01"), 2); // budget survived the tolerant read
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

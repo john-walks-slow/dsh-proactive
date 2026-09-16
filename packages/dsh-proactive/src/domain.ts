@@ -80,6 +80,21 @@ export type AlarmStatus = "scheduled" | "in-flight" | "completed" | "cancelled" 
 export type RunDecision = "no_reply" | "reply" | "skipped" | "failed";
 
 /**
+ * Why the plugin created a session itself: "new" = a target_mode-new product,
+ * "fork" = a fork-mode child. Bookkept in state.json so the fire-time
+ * resolvers (workspace/preset) never route a wake into the plugin's own
+ * output — the alarm follows the USER's activity, not its own echo.
+ */
+export type CreatedSessionKind = "new" | "fork";
+
+/** One bookkept plugin-created session (store.ts persists these in state.json). */
+export interface CreatedSessionRecord {
+  sessionId: string;
+  kind: CreatedSessionKind;
+  createdAt: string;
+}
+
+/**
  * Where the wake should land:
  *  - `new`: creates a fresh session on each fire; optionally configured with workspaceId, presetId, provider, model.
  *  - `resume`: wakes an existing or dynamically resolved session.

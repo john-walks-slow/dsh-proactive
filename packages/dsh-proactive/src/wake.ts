@@ -19,13 +19,16 @@
  *   source workspace (resume/fork, and the legacy target_mode "workspace") ->
  *                    resolve at fire time through the WorkspaceWakePort (most
  *                    recently updated session in the workspace; else its newest
- *                    blank New Session slot; else a fresh session created with
- *                    meta.cwd = the workspace path and attached). Resume falls
- *                    back to create; fork fails closed (nothing to branch from).
+ *                    blank New Session slot; else SKIP — nothing eligible).
+ *                    The resolver never creates; plugin-created products are
+ *                    never eligible (store bookkeeping).
  *   source preset   (resume/fork) -> resolve at fire time through the
  *                    PresetWakePort (the most recently updated session RUNNING
- *                    that preset). Resume falls back to a fresh session
- *                    composed on the preset; fork fails closed.
+ *                    that preset; else SKIP for resume, fail-closed for fork).
+ *
+ * Sessions this driver creates itself (target_mode new products, fork
+ * children) are bookkept into the store right after agents.create, so later
+ * workspace/preset resolutions never wake inside the plugin's own echo.
  *
  * Every created/resumed agent gets a model-selection installed on its scope
  * (mirroring the web host's selectionFor), so its first buildRequest resolves
@@ -82,7 +85,9 @@ export interface WakeAnalysisResult {
 export type WakeFireResult =
   | { outcome: "ok"; analysis: WakeAnalysisResult; /** The session the wake actually ran in. */ sessionId: string }
   | { outcome: "busy" }
-  | { outcome: "failed"; error: string; sessionId?: string };
+  | { outcome: "failed"; error: string; sessionId?: string }
+  /** Nothing to wake (workspace/preset source resolved to no eligible session): the scheduler records a skip and advances — no retry, no budget. */
+  | { outcome: "skipped"; skipReason: string };
 
 /**
  * The live Session log surface across host lines: 0.1.1-rc.2 exposes `.events`,
@@ -295,6 +300,19 @@ export class WakeDriver {
   }
 
   /**
+   * Bookkeep one just-created session so the fire-time resolvers never route
+   * a later wake into it (see workspace.ts). Best-effort persistence: the
+   * in-memory book is already updated when the write fails, and this
+   * process keeps the exclusion until a restart loses it.
+   */
+  private bookkeepCreatedSession(sessionId: string, kind: "new" | "fork"): void {
+    void this.deps.store.recordCreatedSession(sessionId, kind).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.deps.log("warn", "created-session bookkeeping failed for " + sessionId + ": " + message + " (dynamic-target alarms may capture this session until restart)");
+    });
+  }
+
+  /**
    * Creation/resume-time composition, the web host's exact pattern
    * (composeAgent in the session controller): model selection first, then the
    * session's own preset — resolved from its header plus any later
@@ -464,6 +482,10 @@ export class WakeDriver {
           meta,
           setup: (agentCtx) => this.composeAgent(agentCtx, override)
         });
+        // Bookkeep BEFORE attach/drive: even a failed attach or drive leaves
+        // a real session behind, and it must never become a later wake's
+        // "most recently active" destination.
+        this.bookkeepCreatedSession(actualSessionId, "new");
         if (target.workspaceId !== undefined) {
           // Attach BEFORE driving, so a failed attach never delivers a wake
           // into an ungrouped session.
@@ -533,27 +555,15 @@ export class WakeDriver {
             presence = acquired.presence;
             return await this.drive(alarm, agent, actualSessionId, presence);
           }
-          // No eligible session: create a fresh one inside the workspace and
-          // attach it BEFORE driving, so a failed attach never delivers a wake
-          // into an ungrouped session.
-          actualSessionId = "session-" + randomUUID();
-          ownedHandle = await this.deps.agents.create({
-            sessionId: actualSessionId,
-            agentOptions: this.agentOptions(),
-            meta: { cwd: destination.cwd, ...this.defaultPresetMeta() },
-            setup: (agentCtx) => this.composeAgent(agentCtx)
-          });
-          try {
-            await port.attach(workspaceId, actualSessionId);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            throw new Error("workspace attach failed: " + message + " (created session " + actualSessionId + " is left unattached; it will not receive wakes)");
-          }
-          this.inflightBySession.add(actualSessionId);
-          guardSessionId = actualSessionId;
-          agent = ownedHandle.agent;
-          presence = "cold";
-          return await this.drive(alarm, agent, actualSessionId, presence);
+          // Nothing eligible (only archived/subagent/plugin-created sessions,
+          // or an empty workspace): skip the fire. Creating here would defeat
+          // the bookkeeping — every fire would mint a fresh top-ranked
+          // candidate and the next wake would land inside the plugin's own
+          // echo. target_mode "new" is the "ensure a session" spelling.
+          return {
+            outcome: "skipped",
+            skipReason: "workspace " + workspaceId + " has no eligible session to wake (only archived, subagent-owned, or this plugin's own created sessions); use target_mode new to wake a fresh session"
+          };
         }
         // source === "preset"
         const presetId = target.presetId;
@@ -588,21 +598,15 @@ export class WakeDriver {
           presence = acquired.presence;
           return await this.drive(alarm, agent, actualSessionId, presence);
         }
-        // No session runs the preset yet: start one composed on it, so the
-        // alarm's semantics ("wake the conversation on this preset") holds
-        // from the very first fire.
-        actualSessionId = "session-" + randomUUID();
-        ownedHandle = await this.deps.agents.create({
-          sessionId: actualSessionId,
-          agentOptions: this.agentOptions(),
-          meta: { agentPreset: presetId },
-          setup: (agentCtx) => this.composeAgent(agentCtx)
-        });
-        this.inflightBySession.add(actualSessionId);
-        guardSessionId = actualSessionId;
-        agent = ownedHandle.agent;
-        presence = "cold";
-        return await this.drive(alarm, agent, actualSessionId, presence);
+        // No session runs the preset (user sessions only — plugin-created
+        // products are never eligible): skip the fire. Same reasoning as the
+        // workspace arm: creating here would mint a fresh preset-stamped
+        // candidate every fire; target_mode "new" with target_preset_id is
+        // the "start one" spelling.
+        return {
+          outcome: "skipped",
+          skipReason: "no session is running preset " + presetId + " (archived, subagent-owned, and this plugin's own created sessions are never eligible); use target_mode new with target_preset_id to start one"
+        };
       }
 
       // fork — resolve the source session, then branch from its history.
@@ -685,6 +689,10 @@ export class WakeDriver {
         agentOptions: this.agentOptions(),
         setup: (agentCtx) => this.composeAgent(agentCtx)
       });
+      // Fork children inherit the parent's human history, so lastPromptAt
+      // can never expose them — only the bookkeeping keeps them out of
+      // later workspace/preset resolutions.
+      this.bookkeepCreatedSession(actualSessionId, "fork");
       this.inflightBySession.add(actualSessionId);
       guardSessionId = actualSessionId;
       agent = ownedHandle.agent;

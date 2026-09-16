@@ -1,14 +1,15 @@
 /**
  * Workspace-target unit tests: the pure ranking/fold functions, the
  * create-side argument normalization, and the fire-side destination
- * resolution (live fold, cold projection-cache rows, blank reuse, create arm).
- * Driver-level delivery (guard/attach ordering) lives in wake.test.ts.
+ * resolution (live fold, cold projection-cache rows, blank reuse,
+ * plugin-created exclusion). Driver-level delivery (guard/attach ordering)
+ * lives in wake.test.ts.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  createWorkspaceWakePort, listMetadataOf, liveEventsOf, pickWorkspaceTarget,
+  createdSessionEligible, createWorkspaceWakePort, listMetadataOf, liveEventsOf, pickWorkspaceTarget,
   resolveWorkspaceArg, resolveWorkspaceWakeTarget, updatedAtOf,
   type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type WorkspaceCandidate, type WorkspaceLike, type WorkspaceRegistryFacade
 } from "../src/workspace.js";
@@ -106,8 +107,8 @@ test("pickWorkspaceTarget: subagent sessions are never eligible", () => {
   ]);
   assert.deepEqual(pick, { kind: "session", sessionId: "conversation" });
 
-  // ONLY subagents exist -> create, never land in a subagent child
-  assert.deepEqual(pickWorkspaceTarget([candidate({ sessionId: "sub", subagent: true })]), { kind: "create" });
+  // ONLY subagents exist -> none, never land in a subagent child
+  assert.deepEqual(pickWorkspaceTarget([candidate({ sessionId: "sub", subagent: true })]), { kind: "none" });
 });
 
 test("pickWorkspaceTarget: deterministic tie-break updatedAt -> createdAt -> id", () => {
@@ -124,8 +125,8 @@ test("pickWorkspaceTarget: deterministic tie-break updatedAt -> createdAt -> id"
   assert.deepEqual(fullTie, { kind: "session", sessionId: "zzz" });
 });
 
-test("pickWorkspaceTarget: empty workspace creates", () => {
-  assert.deepEqual(pickWorkspaceTarget([]), { kind: "create" });
+test("pickWorkspaceTarget: empty workspace picks none (the fire is skipped, never creates)", () => {
+  assert.deepEqual(pickWorkspaceTarget([]), { kind: "none" });
 });
 
 /* ------------------------------------------------- create-side wiring ----- */
@@ -364,7 +365,7 @@ test("resolveWorkspaceWakeTarget: cold session without a cache row counts as vis
   assert.deepEqual(destination, { kind: "session", sessionId: "no-row" });
 });
 
-test("resolveWorkspaceWakeTarget: cold session absent from persistence is not a destination", async () => {
+test("resolveWorkspaceWakeTarget: cold session absent from persistence is not a destination (none, not create)", async () => {
   const deps = {
     registry: registry({
       get: () => workspace({ sessionIds: ["ghost"] }),
@@ -375,21 +376,165 @@ test("resolveWorkspaceWakeTarget: cold session absent from persistence is not a 
     log: () => undefined
   };
   const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
-  assert.deepEqual(destination, { kind: "create", cwd: "/repos/alpha" });
+  assert.deepEqual(destination, { kind: "none" });
 });
 
-test("resolveWorkspaceWakeTarget: create arm checks the directory, create-on-missing-dir is an error", async () => {
+test("cwdOf: missing workspace directory is a closed error (never mkdir a ghost dir)", async () => {
   const missingDir = workspace({
     sessionIds: [],
     status: async () => "missing-dir" as const
   });
-  const deps = {
-    registry: registry({ get: () => missingDir, resolveByPath: async () => undefined }),
+  const port = createWorkspaceWakePort({
+    registry: registry({ get: (id: string) => (id === missingDir.id ? missingDir : undefined), resolveByPath: async () => undefined }),
     liveSessions: () => [],
+    log: () => undefined
+  });
+  const cwd = await port.cwdOf("ws-1");
+  assert.equal((cwd as { error: string }).error.includes("missing"), true);
+
+  const healthy = createWorkspaceWakePort({
+    registry: registry({ resolveByPath: async () => undefined }),
+    liveSessions: () => [],
+    log: () => undefined
+  });
+  assert.deepEqual(await healthy.cwdOf("ws-1"), "/repos/alpha");
+});
+
+/* --------------------------------------------- plugin-created exclusion ---- */
+
+test("createdSessionEligible: only adopted new products stay eligible", () => {
+  // a target_mode-new product the user typed in follows the user again
+  assert.equal(createdSessionEligible("new", 950), true);
+  // nobody typed in the plugin's fresh session
+  assert.equal(createdSessionEligible("new", null), false);
+  // cold row with no cache entry: lastPromptAt unknown
+  assert.equal(createdSessionEligible("new", undefined), false);
+  // fork children inherit their parent's human history — never eligible
+  assert.equal(createdSessionEligible("fork", 900), false);
+  assert.equal(createdSessionEligible("fork", null), false);
+});
+
+test("resolveWorkspaceWakeTarget: live plugin-created new product without a human prompt is excluded, older conversation wins", async () => {
+  // The capture bug this fixes: the plugin's own target_mode-new product is
+  // createdAt-top-ranked (createdAt = fire time), so a workspace alarm would
+  // wake inside the plugin's own echo. Bookkeeping (kind "new", lastPromptAt
+  // null) must drop it.
+  const deps = {
+    registry: registry({
+      get: () => workspace({ sessionIds: ["plugin-new", "conversation"] }),
+      resolveByPath: async () => undefined
+    }),
+    liveSessions: () => [
+      liveSession({ id: "plugin-new", header: { createdAt: 900 }, events: [
+        { type: "turn/start", seq: 0, time: 900, data: { turn: 1 } },
+        { type: "user/message", seq: 1, time: 950, data: { source: { kind: "plugin", name: "dsh-proactive", summary: "s" } } }
+      ] }),
+      liveSession({ id: "conversation", header: { createdAt: 100 }, events: [
+        { type: "turn/start", seq: 0, time: 100, data: { turn: 1 } },
+        { type: "user/message", seq: 1, time: 500, data: { source: { kind: "user" } } }
+      ] })
+    ],
+    createdSessionKind: (id: string) => (id === "plugin-new" ? "new" as const : undefined),
     log: () => undefined
   };
   const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
-  assert.equal((destination as { error: string }).error.includes("missing"), true);
+  assert.deepEqual(destination, { kind: "session", sessionId: "conversation" });
+});
+
+test("resolveWorkspaceWakeTarget: live plugin-created new product the user adopted (human prompt) wins again", async () => {
+  const deps = {
+    registry: registry({
+      get: () => workspace({ sessionIds: ["plugin-new", "conversation"] }),
+      resolveByPath: async () => undefined
+    }),
+    liveSessions: () => [
+      liveSession({ id: "plugin-new", header: { createdAt: 900 }, events: [
+        { type: "turn/start", seq: 0, time: 900, data: { turn: 1 } },
+        { type: "user/message", seq: 1, time: 950, data: { source: { kind: "user" } } }
+      ] }),
+      liveSession({ id: "conversation", header: { createdAt: 100 }, events: [
+        { type: "turn/start", seq: 0, time: 100, data: { turn: 1 } },
+        { type: "user/message", seq: 1, time: 500, data: { source: { kind: "user" } } }
+      ] })
+    ],
+    createdSessionKind: (id: string) => (id === "plugin-new" ? "new" as const : undefined),
+    log: () => undefined
+  };
+  const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
+  assert.deepEqual(destination, { kind: "session", sessionId: "plugin-new" }); // 950 > 500
+});
+
+test("resolveWorkspaceWakeTarget: live fork child is excluded even though it carries human history", async () => {
+  // A fork child inherits the parent's human turns, so lastPromptAt alone is
+  // no proof of adoption — only bookkeeping can drop it.
+  const deps = {
+    registry: registry({
+      get: () => workspace({ sessionIds: ["fork-child", "conversation"] }),
+      resolveByPath: async () => undefined
+    }),
+    liveSessions: () => [
+      liveSession({ id: "fork-child", header: { createdAt: 900 }, events: [
+        { type: "turn/start", seq: 0, time: 900, data: { turn: 1 } },
+        { type: "user/message", seq: 1, time: 950, data: { source: { kind: "user" } } }
+      ] }),
+      liveSession({ id: "conversation", header: { createdAt: 100 }, events: [
+        { type: "turn/start", seq: 0, time: 100, data: { turn: 1 } },
+        { type: "user/message", seq: 1, time: 500, data: { source: { kind: "user" } } }
+      ] })
+    ],
+    createdSessionKind: (id: string) => (id === "fork-child" ? "fork" as const : undefined),
+    log: () => undefined
+  };
+  const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
+  assert.deepEqual(destination, { kind: "session", sessionId: "conversation" });
+});
+
+test("resolveWorkspaceWakeTarget: cold plugin-created rows follow the cache row's lastPromptAt", async () => {
+  const deps = {
+    registry: registry({
+      get: () => workspace({ sessionIds: ["cold-adopted", "cold-fresh", "cold-no-row", "plain"] }),
+      resolveByPath: async () => undefined
+    }),
+    liveSessions: () => [],
+    coldHeaders: async () => [
+      coldHeader({ id: "cold-adopted", createdAt: 10 }),
+      coldHeader({ id: "cold-fresh", createdAt: 900 }),
+      coldHeader({ id: "cold-no-row", createdAt: 800 }),
+      coldHeader({ id: "plain", createdAt: 5 })
+    ],
+    // cold-no-row deliberately has NO cache row (unknown lastPromptAt).
+    projectionCache: cacheWith({
+      "cold-adopted": { blank: false, lastPromptAt: 800 },
+      "cold-fresh": { blank: false, lastPromptAt: null }
+    }),
+    createdSessionKind: (id: string) => (id === "plain" ? undefined : "new" as const),
+    log: () => undefined
+  };
+  const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
+  // cold-adopted (800) eligible; cold-fresh excluded (null); cold-no-row
+  // excluded (no cache row = unknown lastPromptAt, conservative); plain is
+  // not plugin-created so it stays — 800 > 5.
+  assert.deepEqual(destination, { kind: "session", sessionId: "cold-adopted" });
+});
+
+test("resolveWorkspaceWakeTarget: only plugin-created sessions -> none", async () => {
+  const deps = {
+    registry: registry({
+      get: () => workspace({ sessionIds: ["plugin-new", "fork-child"] }),
+      resolveByPath: async () => undefined
+    }),
+    liveSessions: () => [
+      liveSession({ id: "plugin-new", header: { createdAt: 900 }, events: [{ type: "turn/start", seq: 0, time: 900, data: { turn: 1 } }] }),
+      liveSession({ id: "fork-child", header: { createdAt: 800 }, events: [
+        { type: "turn/start", seq: 0, time: 800, data: { turn: 1 } },
+        { type: "user/message", seq: 1, time: 850, data: { source: { kind: "user" } } }
+      ] })
+    ],
+    createdSessionKind: (id: string) => (id === "plugin-new" ? "new" as const : "fork" as const),
+    log: () => undefined
+  };
+  const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
+  assert.deepEqual(destination, { kind: "none" });
 });
 
 test("resolveWorkspaceWakeTarget: vanished workspace is a closed error", async () => {
@@ -412,10 +557,10 @@ test("resolveWorkspaceWakeTarget: persistence listing failure degrades to live-o
   assert.deepEqual(destination, { kind: "session", sessionId: "live-only" });
 });
 
-test("resolveWorkspaceWakeTarget: cold failure with NO live candidates is a closed error, not create", async () => {
-  // All-cold workspace + transient persistence failure: "no sessions" is
-  // unproven, so the create arm must not run (it would duplicate an unseen
-  // session) — fail into the retry path instead.
+test("resolveWorkspaceWakeTarget: cold failure with NO live candidates is a closed error, not a skip", async () => {
+  // All-cold workspace + transient persistence failure: "no eligible
+  // session" is unproven, so the fire must not be skipped — fail into the
+  // retry path instead.
   const deps = {
     registry: registry({
       get: () => workspace({ sessionIds: ["cold-1"] }),

@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProactiveScheduler } from "../src/scheduler.js";
+import { WakeDriver } from "../src/wake.js";
+import type { WorkspaceWakePort } from "../src/workspace.js";
 import { ProactiveStore } from "../src/store.js";
 import { resolveConfig, type ProactiveConfig, type QuietHours } from "../src/config.js";
 import type { Alarm, RunDecision } from "../src/domain.js";
@@ -59,8 +61,9 @@ async function rmSyncSafe(dir: string, maxAttempts = 20): Promise<void> {
 }
 
 interface Outcome {
-  outcome: "ok" | "busy" | "failed";
+  outcome: "ok" | "busy" | "failed" | "skipped";
   sessionId?: string;
+  skipReason?: string;
   analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string };
 }
 
@@ -149,6 +152,56 @@ test("skipped runs carry no summary fields", async (tctx) => {
   assert.equal(rows[0]!.decision, "skipped");
   assert.equal(rows[0]!.reasoningSummary, undefined);
   assert.equal(rows[0]!.replySummary, undefined);
+});
+
+test("runWake skip outcome: once completes with the reason in the run record, never retried", async (tctx) => {
+  const h = await harness();
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  // The destination resolver found nothing eligible (only archived /
+  // subagent / plugin-created sessions): a legitimate no-op, not a failure.
+  h.outcomes.push({
+    outcome: "skipped",
+    skipReason: "workspace ws-a has no eligible session to wake (only archived, subagent-owned, or this plugin's own created sessions); use target_mode new to wake a fresh session"
+  });
+  h.store.addAlarm(alarm("sk1"));
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("sk1")?.status === "completed");
+  assert.equal(h.fired.length, 1, "a skip is terminal for the occurrence — no retry");
+  assert.equal(h.store.getAlarm("sk1")?.runCount, 1);
+  const runs = readFileSync(join(h.dir, "runs.jsonl"), "utf8");
+  assert.match(runs, /"decision":"skipped"/);
+  assert.match(runs, /"note":"workspace ws-a has no eligible session to wake/);
+  const rows = await h.store.listRecentRuns(10);
+  assert.equal(rows[0]!.budgetDelta, 0);
+});
+
+test("runWake skip outcome: every alarm advances to the next grid occurrence", async (tctx) => {
+  const h = await harness();
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.outcomes.push({ outcome: "skipped", skipReason: "no session is running preset dev" });
+  h.store.addAlarm(everyAlarm("sk2", 3600, "2026-09-01T08:00:00.000Z"));
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("sk2")?.runCount === 1);
+  const alarmRow = h.store.getAlarm("sk2")!;
+  assert.equal(alarmRow.status, "scheduled");
+  assert.equal(alarmRow.nextDueAt, "2026-09-01T10:00:00.000Z"); // next grid point strictly after BASE_NOW
+});
+
+test("runWake skip outcome does not burn the hourly cap", async (tctx) => {
+  const h = await harness();
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  // With a 1-per-hour cap, a skipped fire must not consume the window: the
+  // next alarm's real wake still runs instead of being deflected.
+  h.config.maxWakeupsPerHour = 1;
+  h.outcomes.push({ outcome: "skipped", skipReason: "nothing eligible" });
+  h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
+  h.store.addAlarm(alarm("skipA"));
+  h.store.addAlarm(alarm("skipB"));
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("skipB")?.runCount === 1);
+  assert.equal(h.fired.length, 2, "the skipped fire leaves the hourly window intact for skipB");
+  assert.equal(h.store.getAlarm("skipA")?.status, "completed");
+  assert.equal(h.store.getAlarm("skipB")?.status, "completed");
 });
 
 test("every advances to the next anchor", async (tctx) => {
@@ -416,4 +469,34 @@ test("recovers in-flight alarms on boot as scheduled", async (tctx) => {
   h.scheduler.start();
   await h.flush(() => h.store.getAlarm("i1")?.status !== "in-flight");
   assert.notEqual(h.store.getAlarm("i1")?.status, "in-flight");
+});
+
+test("driver.fire skipped skipReason threads through the scheduler runWake seam into the run record", async (tctx) => {
+  // Guards the index.ts wiring `runWake: (alarm) => driver.fire(alarm)`: the
+  // driver's skipped field name must match the scheduler's, or the note
+  // silently falls back to the generic "no eligible target session".
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-seam-"));
+  const config = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const port: WorkspaceWakePort = {
+    resolveTarget: async () => ({ kind: "none" }),
+    attach: async () => { throw new Error("must not be called"); },
+    cwdOf: async () => { throw new Error("must not be called"); }
+  };
+  const driver = new WakeDriver({ agents: { get: () => undefined as never, resume: async () => { throw new Error("unused"); }, create: async () => { throw new Error("unused"); } }, workspaces: port, modelSelection: () => undefined, store, config, log: () => undefined });
+  const scheduler = new ProactiveScheduler({
+    store, config,
+    runWake: async (alarm) => driver.fire(alarm), // mirror index.ts verbatim — no field adaptation
+    now: () => BASE_NOW,
+    log: () => undefined
+  });
+  tctx.after(async () => { scheduler.stop(); rmSyncSafe(dir); });
+  store.addAlarm(alarm("seam1", { target: { mode: "workspace", workspaceId: "ws-a" } }));
+  scheduler.start();
+  for (let i = 0; i < 100 && store.getAlarm("seam1")?.status !== "completed"; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(store.getAlarm("seam1")?.status, "completed", "a once skip completes the occurrence");
+  const runs = readFileSync(join(dir, "runs.jsonl"), "utf8");
+  assert.match(runs, /"decision":"skipped"/);
+  assert.match(runs, /"note":"workspace ws-a has no eligible session to wake/);
+  assert.ok(!runs.includes("no eligible target session"), "the fallback string must not appear — skipReason threaded verbatim");
 });

@@ -20,16 +20,25 @@
  *       elsewhere in the workspace);
  *    2. else the workspace's newest BLANK session (the GUI's New Session
  *       slot — dsh-client-runtime connectWorkspace reuses it the same way);
- *    3. else a brand-new session created inside the workspace
- *       (meta.cwd = workspace path, then attachSession).
+ *    3. else "none": nothing is eligible, the fire is SKIPPED. The resolver
+ *       never creates a session — ensuring a conversation is target_mode
+ *  "new"'s job, not the last-active resolver's.
  *
- *  Subagent-origin sessions and archived sessions are never eligible — the
- *  GUI hides both from the workspace tree, and a wake must never land in a
- *  subagent child.
+ *  Subagent-origin sessions, archived sessions, and sessions this plugin
+ *  created itself are never eligible. The plugin's own wake products
+ *  (target_mode-new sessions, fork children) are bookkept in state.json
+ *  (store.recordCreatedSession) and excluded at resolution time: without
+ *  that, every new/fork fire injects a fresh top-ranked candidate (createdAt
+ *  = fire time) and a later workspace/preset alarm would wake inside the
+ *  plugin's own echo instead of the user's conversation. One adoption
+ *  escape: a target_mode-new session the user has since typed in (positive
+ *  evidence — lastPromptAt !== null) follows the user's activity again.
+ *  Fork children inherit their parent's human history (lastPromptAt is not
+ *  their own) and stay excluded unconditionally.
  */
 
 import * as agentPresetsModule from "@deepseek-ai/dsh-agent-presets";
-import { isRecord, isValidWorkspaceId, type ToolError } from "./domain.js";
+import { isRecord, isValidWorkspaceId, type CreatedSessionKind, type ToolError } from "./domain.js";
 
 /** Narrow read of one workspace registry record (dsh-workspace Workspace). */
 export interface WorkspaceLike {
@@ -235,7 +244,7 @@ export interface WorkspaceCandidate {
 
 export type WorkspacePick =
   | { kind: "session"; sessionId: string }
-  | { kind: "create" };
+  | { kind: "none" };
 
 /** Deterministic recency comparison: updatedAt, then createdAt, then id. */
 function moreRecent(left: WorkspaceCandidate, right: WorkspaceCandidate): number {
@@ -248,7 +257,7 @@ function moreRecent(left: WorkspaceCandidate, right: WorkspaceCandidate): number
  * The fire-time destination, mirroring the GUI workspace tree + New Session:
  * the topmost VISIBLE (non-blank, non-subagent) row by recency; else the
  * newest blank row (the New Session slot, connectWorkspace-style); else
- * "create" (a fresh session attached to the workspace).
+ * "none" (the caller skips the fire — it never creates).
  */
 export function pickWorkspaceTarget(candidates: readonly WorkspaceCandidate[]): WorkspacePick {
   const eligible = candidates.filter((candidate) => !candidate.subagent);
@@ -257,13 +266,24 @@ export function pickWorkspaceTarget(candidates: readonly WorkspaceCandidate[]): 
   for (const candidate of visible.length > 0 ? visible : eligible) {
     if (best === undefined || moreRecent(candidate, best) > 0) best = candidate;
   }
-  return best === undefined ? { kind: "create" } : { kind: "session", sessionId: best.sessionId };
+  return best === undefined ? { kind: "none" } : { kind: "session", sessionId: best.sessionId };
 }
 
 /** Where a workspace wake should land, resolved at fire time. */
 export type WorkspaceWakeDestination =
   | { kind: "session"; sessionId: string }
-  | { kind: "create"; cwd: string };
+  | { kind: "none" };
+
+/**
+ * Whether one plugin-created session stays a legal wake destination. A
+ * target_mode-new product the user has ADOPTED (typed in — positive
+ * evidence, lastPromptAt !== null) follows the user's activity again;
+ * everything else the plugin created (new products nobody typed in, fork
+ * children whose human history is inherited) is never eligible.
+ */
+export function createdSessionEligible(kind: CreatedSessionKind, lastPromptAt: number | null | undefined): boolean {
+  return kind === "new" && lastPromptAt != null;
+}
 
 /** Inputs the fire-side resolver needs from the host. */
 export interface WorkspaceWakeDeps {
@@ -274,6 +294,8 @@ export interface WorkspaceWakeDeps {
   coldHeaders?(): Promise<readonly SessionHeaderLike[]>;
   /** Persisted projection cache rows (ctx.sessionProjectionCache). */
   projectionCache?: ProjectionCacheLike;
+  /** Plugin-created session bookkeeping (store); absent = no exclusion. */
+  createdSessionKind?(sessionId: string): CreatedSessionKind | undefined;
   log: (level: "info" | "warn" | "error", message: string) => void;
 }
 
@@ -289,9 +311,9 @@ async function requireWorkspace(deps: WorkspaceWakeDeps, workspaceId: string): P
 /**
  * Fire-time destination: rank the workspace's sessions (live fold first,
  * cold projection-cache row second — both are the exact sources the GUI's
- * session.list uses) and pick per {@link pickWorkspaceTarget}. The "create"
- * arm additionally verifies the workspace directory still exists: a wake must
- * not mkdir a ghost directory as a side effect.
+ * session.list uses), excluding plugin-created products (see
+ * {@link createdSessionEligible}), and pick per {@link pickWorkspaceTarget}.
+ * "none" means nothing is eligible — the caller skips the fire.
  */
 export async function resolveWorkspaceWakeTarget(deps: WorkspaceWakeDeps, workspaceId: string): Promise<WorkspaceWakeDestination | { error: string }> {
   const workspace = await requireWorkspace(deps, workspaceId);
@@ -307,7 +329,7 @@ export async function resolveWorkspaceWakeTarget(deps: WorkspaceWakeDeps, worksp
     } catch (error) {
       // A persistence listing failure must not turn into "no sessions":
       // rank from the live store only — but remember it, so an empty result
-      // below can fail loudly instead of creating a duplicate session.
+      // below can fail loudly instead of skipping a wake it could not see.
       coldListFailed = true;
       deps.log("warn", "workspace wake: cold session listing failed: " + (error instanceof Error ? error.message : String(error)));
     }
@@ -315,10 +337,12 @@ export async function resolveWorkspaceWakeTarget(deps: WorkspaceWakeDeps, worksp
   const candidates: WorkspaceCandidate[] = [];
   for (const sessionId of workspace.sessionIds) {
     if (archived.has(sessionId)) continue;
+    const created = deps.createdSessionKind?.(sessionId);
     const live = liveById.get(sessionId);
     if (live !== undefined) {
       const header = live.header;
       const metadata = listMetadataOf(liveEventsOf(live));
+      if (created !== undefined && !createdSessionEligible(created, metadata.lastPromptAt)) continue;
       candidates.push({
         sessionId,
         updatedAt: updatedAtOf(header?.createdAt ?? 0, metadata),
@@ -336,6 +360,7 @@ export async function resolveWorkspaceWakeTarget(deps: WorkspaceWakeDeps, worksp
     const metadata = header.isSeeded === true
       ? undefined
       : deps.projectionCache?.cachedSnapshot(header, 0)?.values?.sessionListMetadata;
+    if (created !== undefined && !createdSessionEligible(created, metadata?.lastPromptAt)) continue;
     candidates.push({
       sessionId,
       updatedAt: updatedAtOf(header.createdAt, metadata),
@@ -350,17 +375,11 @@ export async function resolveWorkspaceWakeTarget(deps: WorkspaceWakeDeps, worksp
   if (pick.kind === "session") return pick;
   if (coldListFailed) {
     // All-cold workspace + transient persistence failure: "no candidates"
-    // is unproven here — fail into the retry path rather than creating a
-    // session that would duplicate one we could not see.
-    return { error: "cold session listing failed; cannot safely pick or create a destination (will retry)" };
+    // is unproven here — fail into the retry path rather than skipping a
+    // wake aimed at a session we could not see.
+    return { error: "cold session listing failed; cannot safely pick a destination (will retry)" };
   }
-  if (typeof workspace.status === "function") {
-    const status = await workspace.status();
-    if (status === "missing-dir") {
-      return { error: "workspace directory is missing: " + workspace.path + " (restore the directory or edit this alarm)" };
-    }
-  }
-  return { kind: "create", cwd: workspace.path };
+  return { kind: "none" };
 }
 
 /** The driver-facing port: resolve at fire time + attach created sessions. */
@@ -369,9 +388,8 @@ export interface WorkspaceWakePort {
   attach(workspaceId: string, sessionId: string): Promise<void>;
   /**
    * Canonical directory path for creating a session inside the workspace
-   * (target_mode new with a configured workspace). Same missing-dir guard
-   * as the create arm of resolveTarget: a wake must never mkdir a ghost
-   * directory as a side effect.
+   * (target_mode new with a configured workspace). Missing-dir guard: a
+   * wake must never mkdir a ghost directory as a side effect.
    */
   cwdOf(workspaceId: string): Promise<string | { error: string }>;
 }
@@ -405,9 +423,9 @@ export function createWorkspaceWakePort(deps: WorkspaceWakeDeps): WorkspaceWakeP
 /**
  * Fire-time destination for a preset-sourced target: the most recently
  * updated session RUNNING that preset, or "none" when no eligible session
- * exists. Unlike the workspace resolver there is no create arm here — the
- * caller decides what "none" means (resume creates a fresh session on the
- * preset; fork fails closed).
+ * exists. No create arm: the caller decides what "none" means (resume skips
+ * the fire; fork fails closed) — a fresh session is target_mode "new"'s job.
+ * Plugin-created products follow {@link createdSessionEligible}.
  */
 export type PresetWakeDestination =
   | { kind: "session"; sessionId: string }
@@ -423,12 +441,15 @@ export interface PresetWakeDeps {
   projectionCache?: ProjectionCacheLike;
   /** Archived-session exclusion (registry-backed; absent = no registry, nothing to exclude). */
   archivedSessionIds?(): readonly string[];
+  /** Plugin-created session bookkeeping (store); absent = no exclusion. */
+  createdSessionKind?(sessionId: string): CreatedSessionKind | undefined;
   log: (level: "info" | "warn" | "error", message: string) => void;
 }
 
 /**
  * Rank every session running the preset and pick the same way the workspace
- * resolver does (visible first, sidebar recency, subagent/archived never).
+ * resolver does (visible first, sidebar recency, subagent/archived/
+ * plugin-created never).
  *
  * Preset matching: a LIVE session folds its effective preset (latest
  * `agent-preset/selected` event, header stamp second — the exact fold the
@@ -460,6 +481,8 @@ export async function resolvePresetWakeTarget(deps: PresetWakeDeps, presetId: st
     const events = liveEventsOf(live);
     if (resolveSessionPresetOf({ header: header ?? {}, events }) !== presetId) continue;
     const metadata = listMetadataOf(events);
+    const created = deps.createdSessionKind?.(live.id);
+    if (created !== undefined && !createdSessionEligible(created, metadata.lastPromptAt)) continue;
     candidates.push({
       sessionId: live.id,
       updatedAt: updatedAtOf(header?.createdAt ?? 0, metadata),
@@ -478,6 +501,8 @@ export async function resolvePresetWakeTarget(deps: PresetWakeDeps, presetId: st
     const metadata = header.isSeeded === true
       ? undefined
       : deps.projectionCache?.cachedSnapshot(header, 0)?.values?.sessionListMetadata;
+    const created = deps.createdSessionKind?.(header.id);
+    if (created !== undefined && !createdSessionEligible(created, metadata?.lastPromptAt)) continue;
     candidates.push({
       sessionId: header.id,
       updatedAt: updatedAtOf(header.createdAt, metadata),

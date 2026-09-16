@@ -3,7 +3,7 @@
  *
  *   alarms.json  — one object { version, alarms: Alarm[] }  (atomic tmp+rename)
  *   runs.jsonl   — append-only run records
- *   state.json   — per-UTC-day delivery budget counter
+ *   state.json   — per-UTC-day delivery budget + plugin-created session bookkeeping
  *
  * A corrupt alarms.json never bricks the plugin: load() falls back to an empty
  * store and surfaces { code: "corrupt_store" } from tools that would mutate it.
@@ -17,17 +17,26 @@
  */
 
 import { mkdir, readFile, rename, writeFile, appendFile } from "node:fs/promises";
-import { COMPACTION_MODES, isRecord, isValidPresetId, isValidWorkspaceId, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type RunRecord } from "./domain.js";
+import { COMPACTION_MODES, isRecord, isValidPresetId, isValidWorkspaceId, type Alarm, type AlarmTarget, type AlarmTrigger, type AlarmType, type CreatedSessionKind, type CreatedSessionRecord, type RunRecord } from "./domain.js";
 
 export interface StoreState {
   version: number;
   alarms: Alarm[];
 }
 
-export interface BudgetState {
+/**
+ * state.json contents: the per-UTC-day delivery budget plus the bookkeeping
+ * for sessions this plugin created itself (new-mode products, fork children).
+ */
+export interface HostState {
   date: string;
   delivered: number;
+  /** Newest last; bounded by MAX_CREATED_SESSIONS (excess ids age out harmlessly — at worst an ancient wake-only session becomes capturable again). */
+  createdSessions: CreatedSessionRecord[];
 }
+
+/** Keeps state.json bounded across long-lived repeating new/fork alarms. */
+export const MAX_CREATED_SESSIONS = 1024;
 
 const STORE_VERSION = 2;
 const STORE_FILE = "alarms.json";
@@ -146,12 +155,24 @@ function normalizeV1(value: unknown): Alarm | undefined {
   };
 }
 
+/** Tolerant read of the createdSessions array: invalid entries drop, order kept. */
+function parseCreatedSessions(value: unknown): CreatedSessionRecord[] {
+  if (!Array.isArray(value)) return [];
+  const records: CreatedSessionRecord[] = [];
+  for (const entry of value) {
+    if (isRecord(entry) && typeof entry["sessionId"] === "string" && (entry["kind"] === "new" || entry["kind"] === "fork") && typeof entry["createdAt"] === "string") {
+      records.push({ sessionId: entry["sessionId"], kind: entry["kind"], createdAt: entry["createdAt"] });
+    }
+  }
+  return records.slice(-MAX_CREATED_SESSIONS);
+}
+
 export class ProactiveStore {
   readonly dataDir: string;
   /** Set when alarms.json could not be fully trusted on load; mutating tools reject. */
   corrupt = false;
   private state: StoreState;
-  private budget: BudgetState;
+  private host: HostState;
   private changeListeners = new Set<() => void>();
   /** Subscribe to every store mutation (alarms/budget/runs); returns the disposer. */
   onChange(listener: () => void): () => void {
@@ -165,10 +186,10 @@ export class ProactiveStore {
     for (const listener of this.changeListeners) listener();
   }
 
-  constructor(dataDir: string, initial?: StoreState, initialBudget?: BudgetState) {
+  constructor(dataDir: string, initial?: StoreState, initialHost?: HostState) {
     this.dataDir = dataDir;
     this.state = initial ?? { version: STORE_VERSION, alarms: [] };
-    this.budget = initialBudget ?? { date: "1970-01-01", delivered: 0 };
+    this.host = initialHost ?? { date: "1970-01-01", delivered: 0, createdSessions: [] };
   }
 
   /** Load from disk; corrupt files degrade to an empty in-memory store (never throw). */
@@ -204,10 +225,10 @@ export class ProactiveStore {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") corrupt = true;
     }
     try {
-      const rawBudget = await readFile(dataDir + "/" + STATE_FILE, "utf8");
-      const parsed: unknown = JSON.parse(rawBudget);
+      const rawHost = await readFile(dataDir + "/" + STATE_FILE, "utf8");
+      const parsed: unknown = JSON.parse(rawHost);
       if (isRecord(parsed) && typeof parsed["date"] === "string" && typeof parsed["delivered"] === "number" && Number.isInteger(parsed["delivered"])) {
-        store.budget = { date: parsed["date"], delivered: parsed["delivered"] };
+        store.host = { date: parsed["date"], delivered: parsed["delivered"], createdSessions: parseCreatedSessions(parsed["createdSessions"]) };
       }
     } catch {
       /* missing/state.json corrupt are both acceptable; budget restarts from zero */
@@ -260,21 +281,43 @@ export class ProactiveStore {
 
   /** Budget for one UTC day; a new day resets the counter. */
   budgetFor(utcDate: string): number {
-    if (this.budget.date !== utcDate) return 0;
-    return this.budget.delivered;
+    if (this.host.date !== utcDate) return 0;
+    return this.host.delivered;
   }
 
   /** Add one (or zero/negative log) chat-text delivery unit for a UTC day and persist the counter. */
   async spendBudget(utcDate: string, delta: number): Promise<number> {
-    if (this.budget.date !== utcDate) this.budget = { date: utcDate, delivered: 0 };
-    this.budget.delivered = Math.max(0, this.budget.delivered + delta);
+    if (this.host.date !== utcDate) this.host = { date: utcDate, delivered: 0, createdSessions: this.host.createdSessions };
+    this.host.delivered = Math.max(0, this.host.delivered + delta);
+    await this.persistHost();
+    this.emitChange();
+    return this.host.delivered;
+  }
+
+  /** Creation kind of a plugin-created session; undefined for user sessions. */
+  createdSessionKind(sessionId: string): CreatedSessionKind | undefined {
+    return this.host.createdSessions.find((record) => record.sessionId === sessionId)?.kind;
+  }
+
+  /**
+   * Bookkeep one session this plugin created, then persist state.json. The
+   * in-memory book updates even when the write fails (this process keeps the
+   * exclusion; a restart loses it — the caller warns).
+   */
+  async recordCreatedSession(sessionId: string, kind: CreatedSessionKind): Promise<void> {
+    if (this.createdSessionKind(sessionId) !== undefined) return;
+    const createdSessions = [...this.host.createdSessions, { sessionId, kind, createdAt: new Date().toISOString() }];
+    this.host = { ...this.host, createdSessions: createdSessions.slice(-MAX_CREATED_SESSIONS) };
+    await this.persistHost();
+  }
+
+  /** Atomic state.json write shared by every HostState mutation. */
+  private async persistHost(): Promise<void> {
     await mkdir(this.dataDir, { recursive: true });
     const target = this.dataDir + "/" + STATE_FILE;
     const tmp = target + ".tmp." + process.pid + "." + Math.random().toString(36).slice(2);
-    await writeFile(tmp, JSON.stringify(this.budget, null, 2) + "\n", "utf8");
+    await writeFile(tmp, JSON.stringify(this.host, null, 2) + "\n", "utf8");
     await rename(tmp, target);
-    this.emitChange();
-    return this.budget.delivered;
   }
 
   /** Latest run records from runs.jsonl, oldest-to-newest within the window. */

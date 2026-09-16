@@ -210,6 +210,7 @@ function presetDeps(live: readonly LiveFake[], opts: {
   coldFails?: boolean;
   archived?: readonly string[];
   cache?: { rows: Map<string, { blank: boolean; lastPromptAt: number | null }> };
+  created?: (sessionId: string) => "new" | "fork" | undefined;
 } = {}): PresetWakeDeps {
   const deps: PresetWakeDeps = {
     liveSessions: () => live.map((entry) => ({
@@ -238,6 +239,7 @@ function presetDeps(live: readonly LiveFake[], opts: {
       } as never
     } : {}),
     ...(opts.archived !== undefined ? { archivedSessionIds: () => opts.archived! } : {}),
+    ...(opts.created !== undefined ? { createdSessionKind: opts.created } : {}),
     log: () => undefined
   };
   return deps;
@@ -293,8 +295,46 @@ test("resolvePresetWakeTarget: cold-only match, exclusions, and recency", async 
   assert.deepEqual(target, { kind: "session", sessionId: "s-seeded" }, "seeded headers carry no cache row -> conservatively visible and newest");
 });
 
+test("resolvePresetWakeTarget: plugin-created products are excluded unless adopted", async () => {
+  // The capture bug this fixes: a target_mode-new product is createdAt-top-
+  // ranked and runs the preset, so a preset alarm would wake inside the
+  // plugin's own echo. Bookkeeping drops it; the ADOPTED product (user typed
+  // in) stays eligible; a fork child is never eligible (its human history is
+  // inherited, lastPromptAt is no proof of adoption).
+  const deps = presetDeps([
+    { id: "plugin-fresh", createdAt: 900, agentPreset: "dev", events: [
+      { type: "turn/start", seq: 0, data: { turn: 1 }, time: 900 },
+      { type: "user/message", seq: 1, time: 950, data: { content: "wake", id: "m1", role: "user", source: { kind: "plugin", name: "dsh-proactive", summary: "s" } } }
+    ] },
+    { id: "plugin-adopted", createdAt: 800, agentPreset: "dev", events: [
+      { type: "turn/start", seq: 0, data: { turn: 1 }, time: 800 },
+      { type: "user/message", seq: 1, time: 850, data: { content: "hi", id: "m2", role: "user", source: { kind: "user", rpcId: "r1" } } }
+    ] },
+    { id: "fork-child", createdAt: 700, agentPreset: "dev", events: [
+      { type: "turn/start", seq: 0, data: { turn: 1 }, time: 700 },
+      { type: "user/message", seq: 1, time: 999, data: { content: "inherited", id: "m3", role: "user", source: { kind: "user", rpcId: "r2" } } }
+    ] },
+    { id: "human-session", createdAt: 100, agentPreset: "dev", events: [
+      { type: "turn/start", seq: 0, data: { turn: 1 }, time: 100 },
+      { type: "user/message", seq: 1, time: 500, data: { content: "hi", id: "m4", role: "user", source: { kind: "user", rpcId: "r3" } } }
+    ] }
+  ], {
+    created: (id) => (id === "human-session" ? undefined : id === "fork-child" ? "fork" : "new")
+  });
+  const target = await resolvePresetWakeTarget(deps, "dev");
+  // plugin-fresh excluded (plugin notice moved no lastPromptAt); fork-child
+  // excluded (fork kind); plugin-adopted eligible at 850 beats human-session
+  // at 500.
+  assert.deepEqual(target, { kind: "session", sessionId: "plugin-adopted" });
+});
+
+test("resolvePresetWakeTarget: only plugin-created preset sessions -> none", async () => {
+  const deps = presetDeps([{ id: "plugin-fresh", createdAt: 900, agentPreset: "dev" }], { created: () => "new" });
+  assert.deepEqual(await resolvePresetWakeTarget(deps, "dev"), { kind: "none" });
+});
+
 test("resolvePresetWakeTarget: none vs failed cold listing", async () => {
-  // No candidates anywhere -> none (resume creates; fork fails).
+  // No candidates anywhere -> none (resume skips the fire; fork fails).
   const empty = await resolvePresetWakeTarget(presetDeps([]), "dev");
   assert.deepEqual(empty, { kind: "none" });
   // Cold listing failed AND no live candidates -> closed error (retry path).
@@ -393,17 +433,18 @@ test("wake: preset-source resume lands in the resolved session", async () => {
   }
 });
 
-test("wake: preset-source resume with no session creates one composed on the preset", async () => {
+test("wake: preset-source resume with no eligible session SKIPS the fire (no create)", async () => {
   const h = await wakeHarness({ presetResolve: async () => ({ kind: "none" }) });
   try {
     const fire = await h.driver.fire(v3Alarm({ mode: "resume", sourceType: "preset", presetId: "dev" }));
-    assert.equal(fire.outcome, "ok");
-    assert.equal(h.resumed(), 0, "nothing to resume — the arm must create");
-    const created = h.created();
-    assert.ok(created !== undefined);
-    assert.deepEqual(created.meta, { agentPreset: "dev" });
-    assert.equal(created.seed, undefined, "resume-create is fresh, never seeded");
-    if (fire.outcome === "ok") assert.equal(fire.sessionId, created.sessionId);
+    assert.equal(fire.outcome, "skipped", "nothing eligible — the arm must skip, never create");
+    if (fire.outcome === "skipped") {
+      assert.ok(fire.skipReason.includes("target_mode new"), "the reason must point at target_mode new");
+      assert.ok(fire.skipReason.includes("dev"), "the reason must name the preset");
+    }
+    assert.equal(h.resumed(), 0);
+    assert.equal(h.created(), undefined, "the skip path must not create a session");
+    assert.equal(h.rec.messages.length, 0);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
@@ -447,6 +488,9 @@ test("wake: new mode with workspace resolves cwd, creates, attaches BEFORE deliv
     assert.equal(created.meta?.cwd, "/repos/alpha");
     assert.equal(created.meta?.agentPreset, "standard");
     assert.ok(created.sessionId.startsWith("session-"));
+    // Bookkeeping: the created session is recorded so workspace/preset
+    // resolvers never capture the plugin's own product.
+    assert.equal(h.store.createdSessionKind(created.sessionId), "new");
     assert.deepEqual(trace, ["attach:" + created.sessionId], "attach must complete before the wake is delivered");
     if (fire.outcome === "ok") assert.equal(fire.sessionId, created.sessionId);
   } finally {

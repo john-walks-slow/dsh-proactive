@@ -119,8 +119,10 @@ export type PanelResult = { ok: true; snapshot: PanelSnapshot } | { ok: false; e
  * targetSource) is orthogonal to targetSource (session/workspace/preset):
  *  - new: fresh session per fire, optional workspace/preset/model config;
  *  - resume/fork + session: the named session id;
- *  - resume/fork + workspace: the workspace's most active session at fire time;
- *  - resume/fork + preset: the preset's most active session at fire time.
+ *  - resume/fork + workspace: the workspace's most active session at fire
+ *    time (plugin-created sessions never captured; nothing eligible = skip);
+ *  - resume/fork + preset: the preset's most active session at fire time
+ *    (same capture and skip rules).
  */
 export interface PanelCreateForm {
   prompt: string;
