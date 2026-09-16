@@ -29,8 +29,6 @@ export interface ProactiveConfig {
   quietHours: QuietHours;
   /** Host-wide cap on proactive wake-up turns per rolling hour. */
   maxWakeupsPerHour: number;
-  /** Cap on concurrently in-flight wake turns per session. */
-  maxConcurrentPerSession: number;
   /** How boot-time overdue alarms are treated. */
   bootOverduePolicy: BootOverduePolicy;
   /** Successive attempt budget when a wake turn cannot run (busy/transient). */
@@ -44,20 +42,22 @@ export interface ProactiveConfig {
    * domain.ts so the browser client bundle shares it.
    */
   defaultPrompt: string;
+  /** Master gate for silent-wake tombstone compaction (per-alarm `compaction` still fine-tunes). */
+  silentWakeCompaction: boolean;
   /** Absolute directory for alarms.json / runs.jsonl / state.json / config.json. */
   dataDir: string;
 }
 
 export const DEFAULT_CONFIG: ProactiveConfig = {
   enabled: true,
-  maxDeliveriesPerDay: 20,
+  maxDeliveriesPerDay: 50,
   quietHours: { start: "23:00", end: "08:00", timeZone: "Asia/Shanghai" },
-  maxWakeupsPerHour: 4,
-  maxConcurrentPerSession: 1,
+  maxWakeupsPerHour: 60,
   bootOverduePolicy: "fire",
   maxRetriesPerFire: 3,
   maxPromptLength: 4000,
   defaultPrompt: DEFAULT_WAKE_PROMPT,
+  silentWakeCompaction: false,
   dataDir: "/root/.dsh/proactive"
 };
 
@@ -154,7 +154,6 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     maxDeliveriesPerDay: positiveInt(file["maxDeliveriesPerDay"], DEFAULT_CONFIG.maxDeliveriesPerDay, 50),
     quietHours: { start, end, timeZone: canonicalZone },
     maxWakeupsPerHour: positiveInt(file["maxWakeupsPerHour"], DEFAULT_CONFIG.maxWakeupsPerHour, 60),
-    maxConcurrentPerSession: Math.max(1, positiveInt(file["maxConcurrentPerSession"], DEFAULT_CONFIG.maxConcurrentPerSession, 4)),
     bootOverduePolicy: file["bootOverduePolicy"] === "notify-only" || file["bootOverduePolicy"] === "drop" ? file["bootOverduePolicy"] : "fire",
     maxRetriesPerFire: Math.max(0, positiveInt(file["maxRetriesPerFire"], DEFAULT_CONFIG.maxRetriesPerFire, 10)),
     maxPromptLength,
@@ -165,6 +164,7 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     defaultPrompt: typeof file["defaultPrompt"] === "string" && file["defaultPrompt"].trim().length > 0
       ? sliceCodePoints(file["defaultPrompt"].trim(), Math.min(maxPromptLength, MAX_PROMPT_LENGTH))
       : DEFAULT_CONFIG.defaultPrompt,
+    silentWakeCompaction: file["silentWakeCompaction"] === true,
     dataDir: dir
   };
   if (env["DSH_PROACTIVE_ENABLED"] === "0" || env["DSH_PROACTIVE_ENABLED"] === "false") config.enabled = false;

@@ -33,6 +33,13 @@ test("validateSettingsPatch rejects bad values with closed codes", () => {
   assert.equal(code(validateSettingsPatch({ quiet_hours: { start: "22:00", end: "07:00", time_zone: "Not/AZone" } })), "invalid_time_zone");
   assert.equal(code(validateSettingsPatch({ boot_overdue_policy: "explode" })), "invalid_trigger");
 });
+test("validateSettingsPatch accepts silent_wake_compaction and rejects non-booleans", () => {
+  const out = validateSettingsPatch({ silent_wake_compaction: false });
+  assert.ok(!("code" in out));
+  assert.deepEqual(out.patch, { silentWakeCompaction: false });
+  assert.equal(code(validateSettingsPatch({ silent_wake_compaction: 1 })), "invalid_trigger");
+});
+
 test("validateSettingsPatch accepts and trims default_prompt", () => {
   const out = validateSettingsPatch({ default_prompt: "  自定义预设  " });
   assert.ok(!("code" in out));

@@ -405,14 +405,13 @@ test("proactive_cancel restores the alarm when persistence fails", async () => {
   assert.equal(h.store.alarms.length, 1);
 });
 
-test("no_reply concludes the turn silently from any context", async () => {
+test("proactive_update_settings: silentWakeCompaction gate updates, persists, and appears in the settings view", async () => {
   const h = harness();
-  // Available outside a wake too: concludes without requiring isActiveWake.
-  assert.equal(h.concluded(), false);
-  const res = await h.run("no_reply", { reason: "nothing to add" });
-  assert.deepEqual(res, { accepted: true, silent: true });
-  assert.equal(h.concluded(), true);
-  assert.equal(code(await h.run("no_reply", { reason: "r".repeat(201) })), "invalid_trigger");
+  const out = await h.run("proactive_update_settings", { silent_wake_compaction: true }) as Record<string, unknown>;
+  assert.equal(out["silent_wake_compaction"], true);
+  assert.equal(h.config.silentWakeCompaction, true);
+  const file = JSON.parse(readFileSync(join(h.dir, "config.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(file["silentWakeCompaction"], true);
 });
 
 test("proactive_set: prompt is required on every alarm; wake dials are gone", async () => {
@@ -485,16 +484,16 @@ test("proactive_update_settings: partial update changes only the given field", a
     maxDeliveriesPerDay: h.config.maxDeliveriesPerDay,
     quietHours: h.config.quietHours
   });
-  const out = await h.run("proactive_update_settings", { max_deliveries_per_day: before + 2 }) as Record<string, unknown>;
-  assert.equal(out.max_deliveries_per_day, before + 2);
+  const out = await h.run("proactive_update_settings", { max_deliveries_per_day: before - 1 }) as Record<string, unknown>;
+  assert.equal(out.max_deliveries_per_day, before - 1);
   // Only the requested field changed in the live config; every other field is
   // bit-identical to the pre-update snapshot (not trivially self-referential).
-  assert.equal(h.config.maxDeliveriesPerDay, before + 2);
+  assert.equal(h.config.maxDeliveriesPerDay, before - 1);
   assert.deepEqual(h.config.enabled, snapshot.enabled);
   assert.deepEqual(h.config.quietHours, snapshot.quietHours);
   // Persisted to config.json (merged over the file, other keys intact).
   const file = JSON.parse(readFileSync(join(h.dir, "config.json"), "utf8")) as Record<string, unknown>;
-  assert.equal(file["maxDeliveriesPerDay"], before + 2);
+  assert.equal(file["maxDeliveriesPerDay"], before - 1);
   assert.ok(!("enabled" in file), "unrelated keys must not be persisted");
 });
 

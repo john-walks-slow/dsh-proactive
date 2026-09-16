@@ -75,6 +75,24 @@ test("resolveConfig honors env overrides", () => {
   }
 });
 
+test("silentWakeCompaction defaults to false and resolves only strict true", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-gates-"));
+  try {
+    assert.equal(DEFAULT_CONFIG.silentWakeCompaction, false);
+    const bare = resolveConfig(dir);
+    assert.equal(bare.silentWakeCompaction, false);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ silentWakeCompaction: true }));
+    const over = resolveConfig(dir);
+    assert.equal(over.silentWakeCompaction, true);
+    // Non-boolean file values are ignored (the gate is opt-in, `=== true` only).
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ silentWakeCompaction: 1 }));
+    const strict = resolveConfig(dir);
+    assert.equal(strict.silentWakeCompaction, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a leftover v1 heartbeatPrompt in config.json is ignored (dial deleted in v2)", () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-hb-"));
   try {

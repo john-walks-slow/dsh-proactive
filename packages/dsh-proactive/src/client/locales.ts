@@ -123,6 +123,8 @@ export interface ProactivePanelCopy {
   configSectionTitle: string;
   configSectionDesc: string;
   enabledToggle: string;
+  silentWakeCompactionToggle: string;
+  silentWakeCompactionHint: string;
   defaultPromptLabel: string;
   defaultPromptHint: string;
   saveConfig: string;
@@ -245,6 +247,8 @@ export const zh: ProactivePanelCopy = {
   configSectionTitle: "全局配置",
   configSectionDesc: "",
   enabledToggle: "启用主动唤醒",
+  silentWakeCompactionToggle: "静默唤醒墓碑压缩",
+  silentWakeCompactionHint: "关 = 静默唤醒在上下文里保留完整交换；开 = 折叠成一行墓碑（每个闹钟可再细化）",
   defaultPromptLabel: "默认唤醒指令",
   defaultPromptHint: "新建闹钟时预填这段文字；每个闹钟仍保存自己的指令",
   saveConfig: "保存配置",
@@ -365,6 +369,8 @@ export const en: ProactivePanelCopy = {
   configSectionTitle: "Global config",
   configSectionDesc: "",
   enabledToggle: "Enable proactive wakes",
+  silentWakeCompactionToggle: "Silent-wake tombstone compaction",
+  silentWakeCompactionHint: "Off = silent wakes keep the full exchange in context; on = collapse to a one-line tombstone (per-alarm still fine-tunes)",
   defaultPromptLabel: "Default wake-up instruction",
   defaultPromptHint: "Pre-filled into the new-alarm form; each alarm still stores its own prompt",
   saveConfig: "Save config",

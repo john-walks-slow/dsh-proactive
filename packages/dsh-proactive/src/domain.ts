@@ -34,7 +34,7 @@ export const MAX_JITTER_SECONDS = 86400;
  * (panel form fallback) share this one source of truth.
  */
 export const DEFAULT_WAKE_PROMPT =
-  "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。如果不希望发送消息，则用 no_reply 安静结束。";
+  "这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。如果不希望发送消息，就安静结束（不输出任何文本）。";
 
 /** dsh session ids are alphanumeric plus `._-`; anything else (slashes, traversals, spaces, UTF-8) is rejected. */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;

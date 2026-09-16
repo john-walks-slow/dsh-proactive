@@ -24,7 +24,6 @@ export interface MinimalEvent {
 export interface WakeAnalysis {
   decision: RunDecision;
   budgetDelta: number;
-  leaked: boolean;
   toolNames: string[];
   hasText: boolean;
   note?: string;
@@ -152,7 +151,6 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   const textParts: string[] = [];
   const reasoningParts: string[] = [];
   const toolNames: string[] = [];
-  let noReply = false;
   let noReplyReason: string | undefined;
   for (const event of turnSegment) {
     if (event.type === "assistant/message") {
@@ -167,10 +165,7 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     if (event.type === "tool/call") {
       const name = typeof event.data["name"] === "string" ? event.data["name"] : "";
       if (name.length > 0) toolNames.push(name);
-      if (name === NO_REPLY_TOOL) {
-        noReply = true;
-        if (noReplyReason === undefined) noReplyReason = extractNoReplyReason(event.data);
-      }
+      if (name === NO_REPLY_TOOL && noReplyReason === undefined) noReplyReason = extractNoReplyReason(event.data);
     }
   }
   const turnEnded = turnEndIndex >= 0;
@@ -178,23 +173,17 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
 
   let decision: RunDecision;
   let note: string | undefined;
-  const leaked = noReply && hasText;
-  if (noReply && !hasText) {
-    decision = "no_reply";
-  } else if (hasText) {
+  if (hasText) {
     decision = "reply";
-    if (noReply) note = "leak: no_reply called after visible text (charged 1)";
   } else if (!turnEnded || errorEnd) {
     decision = "failed";
     note = errorEnd ? "wake turn ended abnormally" : "wake turn did not settle cleanly";
   } else {
-    decision = "failed";
-    note = "wake turn produced no visible output without no_reply";
+    decision = "no_reply";
   }
   return {
     decision,
     budgetDelta: decision === "reply" ? 1 : 0,
-    leaked,
     toolNames,
     hasText,
     ...(reasoningParts.length > 0 ? { reasoningSummary: truncateSummary(reasoningParts.join("\n")) } : {}),

@@ -57,7 +57,7 @@ export interface PanelSnapshotDto {
    * running a pre-260907 build serves the v2 shape without it, and the client
    * falls back to the bundled repo default until the next host restart.
    */
-  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; defaultPrompt?: string };
+  config: { enabled: boolean; maxDeliveriesPerDay: number; quietHours: { start: string; end: string; timeZone: string }; defaultPrompt?: string; silentWakeCompaction?: boolean };
   /** Preset roster rows for the create form (v3; absent on older hosts). */
   presets?: readonly PresetInfo[];
   alarms: AlarmRowDto[];

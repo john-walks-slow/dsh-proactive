@@ -264,7 +264,7 @@ test("quiet hours defer quiet-respecting alarms; user-requested alarms are exemp
 test("daily budget gate skips quiet-respecting wakes at the cap", async (tctx) => {
   const h = await harness();
   tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
-  await h.store.spendBudget("2026-09-01", 20);
+  await h.store.spendBudget("2026-09-01", h.config.maxDeliveriesPerDay);
   h.store.addAlarm(alarm("c1", { respectQuietHours: true }));
   h.scheduler.start();
   await h.flush(() => h.store.getAlarm("c1")?.runCount === 1);

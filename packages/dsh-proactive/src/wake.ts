@@ -70,8 +70,6 @@ export { resolveSessionPresetOf };
 export interface WakeAnalysisResult {
   decision: RunDecision;
   budgetDelta: number;
-  /** True when no_reply was called after visible text was committed. */
-  leaked?: boolean;
   note?: string;
   /** The no_reply reason the model gave for staying silent. */
   noReplyReason?: string;
@@ -389,7 +387,9 @@ export class WakeDriver {
     // exchange on the model surface so hourly reminders never pollute the
     // session context (see compact.ts).
     if (analysis.decision === "no_reply" || analysis.decision === "failed") {
-      const compaction = alarm.compaction ?? DEFAULT_COMPACTION;
+      const compaction = this.deps.config.silentWakeCompaction
+        ? (alarm.compaction ?? DEFAULT_COMPACTION)
+        : "off";
       if (compaction !== "off") {
         this.compactWake(agent, startIndex, alarm, firedAt, compaction, analysis.noReplyReason);
       }
@@ -400,7 +400,6 @@ export class WakeDriver {
       analysis: {
         decision: analysis.decision,
         budgetDelta: analysis.budgetDelta,
-        ...(analysis.leaked ? { leaked: true } : {}),
         ...(analysis.note !== undefined ? { note: analysis.note } : {}),
         ...(analysis.reasoningSummary !== undefined ? { reasoningSummary: analysis.reasoningSummary } : {}),
         ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {}),

@@ -6,7 +6,6 @@
  *   proactive_list      view this session's active alarms (all=true: every session's)
  *   proactive_cancel    cancel one active alarm by exact id — any owner
  *   proactive_update    replace one active alarm's spec by exact id — any owner
- *   no_reply             conclude the current turn with deep silence
  *   proactive_update_settings  partially update host-level settings (only the given fields)
  *
  * The stores they touch are host-level (the plugin singleton), so they work
@@ -27,7 +26,6 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
   DEFAULT_WAKE_PROMPT,
   MAX_JITTER_SECONDS,
-  MAX_NO_REPLY_REASON_LENGTH,
   inputError,
   internalError,
   isToolError,
@@ -132,11 +130,11 @@ const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
       }
     },
     max_wakeups_per_hour: { type: "integer", required: true },
-    max_concurrent_per_session: { type: "integer", required: true },
     boot_overdue_policy: { type: "string", required: true },
     max_retries_per_fire: { type: "integer", required: true },
     max_prompt_length: { type: "integer", required: true },
-    default_prompt: { type: "string", required: true }
+    default_prompt: { type: "string", required: true },
+    silent_wake_compaction: { type: "boolean", required: true }
   }
 };
 
@@ -207,12 +205,12 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
 };
 
-/** Build the six tool definitions bound to one agent + its host services. */
+/** Build the five tool definitions bound to one agent + its host services. */
 export function proactiveToolDefinitions(agent: Agent, services: ToolServices): ToolDefinition[] {
   return [
         defineTool({
           name: "proactive_set",
-          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, or a five-field cron expression (minute hour day-of-month month day-of-week; occurrences at least 300 seconds apart). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required. The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent with no_reply.",
+          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, or a five-field cron expression (minute hour day-of-month month day-of-week; occurrences at least 300 seconds apart). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required. The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent.",
           parameters: ALARM_SPEC_PARAMETERS,
           output: {
             schema: { oneOf: [ALARM_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -411,28 +409,6 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
         }),
 
         defineTool({
-          name: "no_reply",
-          description: "Conclude the current turn in complete silence: call it as the ONLY action with no chat text, so nothing is visible to the user. Available in any turn; during a dsh-proactive wake it also records a no_reply run entry with your reason. Any chat text already committed before this call still counts toward the daily budget.",
-          parameters: {
-            reason: { type: "string", description: "Short internal reason, at most " + MAX_NO_REPLY_REASON_LENGTH + " characters. Only recorded during a dsh-proactive wake." }
-          },
-          output: {
-            schema: { oneOf: [{ type: "object", additionalProperties: false, properties: { accepted: { type: "boolean", required: true, const: true }, silent: { type: "boolean", required: true, const: true } } }, ERROR_SCHEMA] },
-            render: renderValue
-          },
-          async execute(args, exec) {
-            if (exec.agent !== agent) return internalError();
-            const reason = typeof args["reason"] === "string" ? args["reason"] : "";
-            if (reason.length > MAX_NO_REPLY_REASON_LENGTH) {
-              return { code: "invalid_trigger", message: "reason must be at most " + MAX_NO_REPLY_REASON_LENGTH + " characters." } as ToolError;
-            }
-            exec.concludeTurn();
-            return { accepted: true, silent: true };
-          },
-          presentCall: (callArgs) => presentCard("Silent turn acknowledgment", String((callArgs as { reason?: unknown })["reason"] ?? ""))
-        }),
-
-        defineTool({
           name: "proactive_update_settings",
           description: "Partially update host-level dsh-proactive settings: only the fields you pass are changed, the rest keep their current values. The update is persisted to config.json and hot-applied to the running scheduler immediately. Supply at least one field.",
           parameters: {
@@ -449,11 +425,11 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
               description: "Quiet window; alarms that respect quiet hours defer inside it."
             },
             max_wakeups_per_hour: { type: "integer", description: "Host-wide cap on proactive wake turns per rolling hour; 1..60." },
-            max_concurrent_per_session: { type: "integer", description: "Concurrent in-flight wake turns per session; 1..4." },
             boot_overdue_policy: { type: "string", enum: ["fire", "notify-only", "drop"], description: "How boot-time overdue alarms are treated." },
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
             max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
-            default_prompt: { type: "string", description: "Default wake-up instruction pre-filled into the GUI create form; non-empty, at most 20000 characters. Purely a prefill — stored alarms always keep their own prompt." }
+            default_prompt: { type: "string", description: "Default wake-up instruction pre-filled into the GUI create form; non-empty, at most 20000 characters. Purely a prefill — stored alarms always keep their own prompt." },
+            silent_wake_compaction: { type: "boolean", description: "Master gate for silent-wake tombstone compaction (default false); per-alarm compaction still fine-tunes when enabled." }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -484,16 +460,16 @@ function settingsView(config: ProactiveConfig): JsonValue {
     max_deliveries_per_day: config.maxDeliveriesPerDay,
     quiet_hours: { start: config.quietHours.start, end: config.quietHours.end, time_zone: config.quietHours.timeZone },
     max_wakeups_per_hour: config.maxWakeupsPerHour,
-    max_concurrent_per_session: config.maxConcurrentPerSession,
     boot_overdue_policy: config.bootOverduePolicy,
     max_retries_per_fire: config.maxRetriesPerFire,
     max_prompt_length: config.maxPromptLength,
-    default_prompt: config.defaultPrompt
+    default_prompt: config.defaultPrompt,
+    silent_wake_compaction: config.silentWakeCompaction
   };
 }
 
 /**
- * Register the six tools on an agent's scoped context; returns disposable
+ * Register the five tools on an agent's scoped context; returns disposable
  * tools. The definitions themselves live in {@link proactiveToolDefinitions}
  * so they can be unit-tested without a cordis context.
  */

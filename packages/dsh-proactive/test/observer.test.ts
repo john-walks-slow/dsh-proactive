@@ -75,8 +75,7 @@ test("reasoning summary is truncated while reply stays short", () => {
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
-  assert.equal(analysis.decision, "reply"); // leaked
-  assert.equal(analysis.leaked, true);
+  assert.equal(analysis.decision, "reply");
   assert.equal(analysis.replySummary, "好的");
   assert.equal(analysis.reasoningSummary!.length, RUN_SUMMARY_MAX_LENGTH + 1);
   assert.ok(analysis.reasoningSummary!.endsWith("…"));
@@ -101,16 +100,14 @@ test("no_reply with no text is deep silence (free)", () => {
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.budgetDelta, 0);
-  assert.equal(analysis.leaked, false);
 });
 
-test("no_reply with stray text counts as leaked reply with a leak note", () => {
+test("no_reply after stray text is an ordinary reply without a leak note", () => {
   const events: MinimalEvent[] = [turnStart(), assistantText("wait, let me tell you something"), toolCall("no_reply"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "reply");
-  assert.equal(analysis.leaked, true);
   assert.equal(analysis.budgetDelta, 1);
-  assert.ok(analysis.note?.includes("leak"));
+  assert.equal(analysis.note, undefined);
 });
 
 test("visible chat reply costs one budget unit", () => {
@@ -137,11 +134,11 @@ for (const kind of ["error", "aborted", "max-tokens"] as const) {
   });
 }
 
-test("completed reason with no output is failed with a clear note", () => {
+test("completed reason with no output is a clean silent turn (no_reply)", () => {
   const events: MinimalEvent[] = [turnStart(), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
-  assert.equal(analysis.decision, "failed");
-  assert.ok(analysis.note?.includes("no visible output"));
+  assert.equal(analysis.decision, "no_reply");
+  assert.equal(analysis.budgetDelta, 0);
 });
 
 test("analysis skips earlier unrelated events from the slice", () => {

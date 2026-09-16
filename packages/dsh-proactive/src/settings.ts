@@ -17,11 +17,11 @@ export interface HotConfig {
   maxDeliveriesPerDay: number;
   quietHours: QuietHours;
   maxWakeupsPerHour: number;
-  maxConcurrentPerSession: number;
   bootOverduePolicy: BootOverduePolicy;
   maxRetriesPerFire: number;
   maxPromptLength: number;
   defaultPrompt: string;
+  silentWakeCompaction: boolean;
 }
 
 /**
@@ -35,11 +35,11 @@ export function hotSubset(config: ProactiveConfig): HotConfig {
     maxDeliveriesPerDay: config.maxDeliveriesPerDay,
     quietHours: { start: config.quietHours.start, end: config.quietHours.end, timeZone: config.quietHours.timeZone },
     maxWakeupsPerHour: config.maxWakeupsPerHour,
-    maxConcurrentPerSession: config.maxConcurrentPerSession,
     bootOverduePolicy: config.bootOverduePolicy,
     maxRetriesPerFire: config.maxRetriesPerFire,
     maxPromptLength: config.maxPromptLength,
-    defaultPrompt: config.defaultPrompt
+    defaultPrompt: config.defaultPrompt,
+    silentWakeCompaction: config.silentWakeCompaction
   };
 }
 
@@ -70,7 +70,6 @@ const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
  */
 const MAX_DELIVERIES_PER_DAY = 50;
 const MAX_WAKEUPS_PER_HOUR = 60;
-const MAX_CONCURRENT_PER_SESSION = 4;
 const MAX_RETRIES_PER_FIRE = 10;
 const MAX_SET_PROMPT_LENGTH = 20000;
 
@@ -92,8 +91,9 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
   }
   const allowed = new Set([
     "enabled", "max_deliveries_per_day", "quiet_hours",
-    "max_wakeups_per_hour", "max_concurrent_per_session", "boot_overdue_policy",
-    "max_retries_per_fire", "max_prompt_length", "default_prompt"
+    "max_wakeups_per_hour", "boot_overdue_policy",
+    "max_retries_per_fire", "max_prompt_length", "default_prompt",
+    "silent_wake_compaction"
   ]);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) {
@@ -137,13 +137,6 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
     }
     write("maxWakeupsPerHour", n);
   }
-  if ("max_concurrent_per_session" in raw) {
-    const n = raw["max_concurrent_per_session"];
-    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n > MAX_CONCURRENT_PER_SESSION) {
-      return { code: "invalid_trigger", message: "max_concurrent_per_session must be a safe integer 1.." + MAX_CONCURRENT_PER_SESSION + "." };
-    }
-    write("maxConcurrentPerSession", n);
-  }
   if ("boot_overdue_policy" in raw) {
     const v = raw["boot_overdue_policy"];
     if (v !== "fire" && v !== "notify-only" && v !== "drop") {
@@ -178,6 +171,10 @@ export function validateSettingsPatch(raw: unknown): { patch: Partial<HotConfig>
     }
     write("defaultPrompt", value.trim());
   }
+  if ("silent_wake_compaction" in raw) {
+    if (typeof raw["silent_wake_compaction"] !== "boolean") return { code: "invalid_trigger", message: "silent_wake_compaction must be a boolean." };
+    write("silentWakeCompaction", raw["silent_wake_compaction"]);
+  }
   return { patch };
 }
 
@@ -193,13 +190,13 @@ export const proactiveSettingsSchema = z.object({
   maxDeliveriesPerDay: z.number().min(0).max(1000).default(3),
   quietHours: quietHoursSchema,
   maxWakeupsPerHour: z.number().min(1).max(60).default(4),
-  maxConcurrentPerSession: z.number().min(1).max(16).default(1),
   bootOverduePolicy: z.union([z.const("fire"), z.const("notify-only"), z.const("drop")]).default("fire"),
   maxRetriesPerFire: z.number().min(0).max(16).default(3),
   // Schema ceiling mirrors the resolveConfig clamp (20000) so a settings-UI
   // value is never silently truncated on the next boot.
   maxPromptLength: z.number().min(100).max(MAX_SET_PROMPT_LENGTH).default(4000),
-  defaultPrompt: z.string().default(DEFAULT_WAKE_PROMPT)
+  defaultPrompt: z.string().default(DEFAULT_WAKE_PROMPT),
+  silentWakeCompaction: z.boolean().default(false)
 });
 
 export interface SettingsWire {

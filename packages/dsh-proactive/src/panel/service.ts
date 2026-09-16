@@ -79,7 +79,8 @@ export class ProactivePanelService {
         enabled: cfg.enabled,
         maxDeliveriesPerDay: cfg.maxDeliveriesPerDay,
         quietHours: { start: cfg.quietHours.start, end: cfg.quietHours.end, timeZone: cfg.quietHours.timeZone },
-        defaultPrompt: cfg.defaultPrompt
+        defaultPrompt: cfg.defaultPrompt,
+        silentWakeCompaction: cfg.silentWakeCompaction
       },
       presets: await this.presetRows(),
       alarms: alarmRows,

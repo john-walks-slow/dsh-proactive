@@ -40,7 +40,7 @@ export interface SchedulerDeps {
   store: ProactiveStore;
   config: ProactiveConfig;
   /** Runs one alarm through the agent world; returns ok + analysis + the session the wake actually ran in (fork/new children differ from the owner). */
-  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; analysis?: { decision: RunDecision; budgetDelta: number; leaked?: boolean; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
+  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
   now?: () => number;
   /** Uniform(0,1) source for jittered repeats; defaults to Math.random. */
   random?: () => number;
@@ -247,11 +247,7 @@ export class ProactiveScheduler {
     if (analysis.budgetDelta > 0) {
       await this.deps.store.spendBudget(utcDate, analysis.budgetDelta);
     }
-    if (analysis.leaked) {
-      // Plan R1: leaked silence must be visible — a warn + note on the run.
-      this.deps.log("warn", "leak: alarm " + alarm.id + " called no_reply after visible text (charged 1)");
-    }
-    const note = analysis.note ?? (analysis.leaked ? "leak: no_reply after visible text (charged 1)" : undefined);
+    const note = analysis.note;
     await this.recordRun(alarm, analysis.decision, analysis.budgetDelta, note, analysis.reasoningSummary, analysis.replySummary, analysis.noReplyReason, actualSessionId);
     this.advancePast(alarm, now, analysis.decision);
     return "advanced";

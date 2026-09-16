@@ -47,6 +47,7 @@ export interface ConfigView {
   maxDeliveriesPerDay: number;
   quietHours: { start: string; end: string; timeZone: string };
   defaultPrompt: string;
+  silentWakeCompaction: boolean;
 }
 
 /** One alarm row plus the owning session's display title (empty = unknown). */

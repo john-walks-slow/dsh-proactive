@@ -73,6 +73,7 @@ interface Harness {
 async function harness(opts: { live?: boolean; busy?: boolean; failWhenIdle?: boolean } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
+  cfg.silentWakeCompaction = true;
   const store = new ProactiveStore(dir);
   const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
   const fakeAgent = makeFakeAgent(rec, opts);
@@ -123,7 +124,7 @@ test("cold wake resumes the session, frames the message, and can be silent", asy
     assert.equal(h.rec.messages.length, 1);
     const text = extractText(h.rec.messages[0].message);
     assert.ok(text.startsWith("[dsh-proactive wake cold1 once cold]"), "v3 minimal header expected, got: " + text.slice(0, 60));
-    assert.ok(text.includes("no_reply(reason) as your ONLY action"));
+    assert.ok(text.includes("end the turn with no text at all"));
     assert.ok(text.includes("进水提醒"));
     assert.equal(h.driver.isActiveWake("s1"), false); // cleared after the wake
   } finally {
@@ -575,6 +576,7 @@ test("createWakeSelectionRef falls back header -> agentDefaultModel -> warn", ()
 test("silent wake collapses on the model surface after the turn settles", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
+  cfg.silentWakeCompaction = true;
   const store = new ProactiveStore(dir);
   const session = Session.create("s1" as never);
   const agent = {
@@ -625,6 +627,58 @@ test("silent wake collapses on the model surface after the turn settles", async 
     // The raw log keeps the full exchange for the human transcript.
     assert.ok(session.events.some((event) => event.type === "assistant/message"));
     assert.ok(session.events.some((event) => event.type === "tool/result"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("silent wake is NOT compacted when silentWakeCompaction is off (default)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  // Off by default: the gate must leave the whole silent exchange on the model
+  // surface even though the turn produced no visible output.
+  const store = new ProactiveStore(dir);
+  const session = Session.create("s1" as never);
+  const agent = {
+    session,
+    followup: (message: unknown) => {
+      session.append("turn/start", { turn: 1 });
+      session.append("user/message", message as never, { surfaceOp: "append" });
+      session.append("assistant/message", {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage({
+          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: JSON.stringify({ reason: "没事" }) }],
+          source: { provider: "cpa", model: "gemini-3-flash" }
+        })
+      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      session.append("tool/result", {
+        turn: 1,
+        step: 1,
+        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
+      }, { surfaceOp: "append" });
+      session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+    },
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const agents: AgentsFacade = {
+    get: () => agent,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => ({ provider: "cpa", model: "x" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("silentoff1"));
+    assert.equal(fire.outcome, "ok");
+    if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
+    const derived = session.surface.nodes
+      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .filter((message) => message !== null);
+    const texts = derived.map((m) => (m.content[0] as { text?: string }).text ?? "");
+    assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake silentoff1 ")), "framing must stay on the surface (no compaction)");
+    assert.ok(!texts.some((t) => t.startsWith("[dsh-proactive silent wake ")), "no tombstone may appear when the gate is off");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -733,6 +787,7 @@ test("raced user turn cannot make a visible wake reply compactable (P1 regressio
 test("raced user turn with text does not block compaction of a SILENT wake", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
+  cfg.silentWakeCompaction = true;
   const store = new ProactiveStore(dir);
   const session = Session.create("s1" as never);
   const agent = {

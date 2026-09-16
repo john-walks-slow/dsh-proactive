@@ -48,6 +48,7 @@ interface ConfigDraft {
   quietStart: string;
   quietEnd: string;
   defaultPrompt: string;
+  silentWakeCompaction: boolean;
 }
 
 function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
@@ -56,7 +57,8 @@ function configDraftFrom(snapshot: PanelSnapshotDto): ConfigDraft {
     maxDeliveriesPerDay: String(snapshot.config.maxDeliveriesPerDay),
     quietStart: snapshot.config.quietHours.start,
     quietEnd: snapshot.config.quietHours.end,
-    defaultPrompt: snapshot.config.defaultPrompt ?? ""
+    defaultPrompt: snapshot.config.defaultPrompt ?? "",
+    silentWakeCompaction: snapshot.config.silentWakeCompaction ?? false
   };
 }
 
@@ -188,7 +190,8 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
         quiet_hours: { start: draft.quietStart, end: draft.quietEnd, time_zone: snapshot.config.quietHours.timeZone },
         // Only offered (and sent) when the host advertises the field; an
         // older host would reject the unknown key.
-        ...(snapshot.config.defaultPrompt !== undefined ? { default_prompt: draft.defaultPrompt } : {})
+        ...(snapshot.config.defaultPrompt !== undefined ? { default_prompt: draft.defaultPrompt } : {}),
+        ...(snapshot.config.silentWakeCompaction !== undefined ? { silent_wake_compaction: draft.silentWakeCompaction } : {})
       }
     });
   }, [run, draft, snapshot]);
@@ -276,6 +279,20 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
                 <span className="dshp-switch-thumb" />
               </label>
             </div>
+            {snapshot.config.silentWakeCompaction !== undefined ? (
+              <div className="dshp-switch-row">
+                <div>
+                  <div className="dshp-switch-label">{copy.silentWakeCompactionToggle}</div>
+                  <div className="dshp-switch-desc">{copy.silentWakeCompactionHint}</div>
+                </div>
+                <label className="dshp-switch">
+                  <input type="checkbox" checked={(draft ?? configDraftFrom(snapshot)).silentWakeCompaction} disabled={busy}
+                    onChange={(e) => setDraft({ ...(draft ?? configDraftFrom(snapshot)), silentWakeCompaction: e.target.checked })} />
+                  <span className="dshp-switch-track" />
+                  <span className="dshp-switch-thumb" />
+                </label>
+              </div>
+            ) : null}
             <div className="dshp-field-row">
               <div className="dshp-field" style={{ flex: 1, minWidth: 120 }}>
                 <label className="dshp-field-label">{copy.budget}</label>
