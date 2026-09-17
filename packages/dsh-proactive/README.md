@@ -144,3 +144,22 @@ npm 发布：`prepare` 串起完整 `lib/` 产物（tsc + client bundle），`pr
 - fork/new 目标在 host 缺少会话持久化（headless profile）时降级为 failed 并如实记录，不会假装成功。
 - 安静时段/预算的判定基于 UTC 日 + 配置时区，不随用户时区自动迁移（重启后读取最新配置）。
 - `proactive_silence` 只在唤醒回合内可用；普通回合的静默靠宿主 no-reply 机制，不由本插件提供。
+
+## 发新版
+
+改动入库后一条命令完成测试、版本号、打包（`npm version` 会自动 commit 并打 tag）：
+
+```bash
+npm run release        # patch；较大更新改用：npm version minor 或 major
+```
+
+然后指纹发布并推送：
+
+```bash
+node ~/.agents/skills/npm-publish/scripts/publish-webauthn.cjs /tmp/dsh-proactive-<新版>.tgz
+git push --follow-tags
+```
+
+发布后 `npm view dsh-proactive version` 复验。批量发多个包时，在指纹页勾选“5 分钟内同 IP 不再挑战”，一次指纹即可连发。
+> （monorepo 子包，在 packages/dsh-proactive 目录执行）
+
