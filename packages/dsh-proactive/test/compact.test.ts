@@ -232,16 +232,16 @@ test("eraserless runs fall back to a tombstone", () => {
   assert.ok((derived[0].content[0] as { text: string }).text.startsWith(TOMBSTONE_MARKER));
 });
 
-test("tombstoneText: minimal compaction keeps the no_reply reason", () => {
+test("tombstoneText: minimal compaction keeps the silence reason", () => {
   const text = tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "minimal", "用户已离线，无需打扰");
   assert.ok(text.startsWith(TOMBSTONE_MARKER));
-  assert.ok(text.includes("no_reply: 用户已离线，无需打扰"));
+  assert.ok(text.includes("silence: 用户已离线，无需打扰"));
   assert.ok(text.endsWith("]"));
 });
 
 test("tombstoneText: minimal without a reason degrades to id+time only", () => {
   const text = tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "minimal", undefined);
-  assert.ok(!text.includes("no_reply:"));
+  assert.ok(!text.includes("silence:"));
   assert.equal(text, tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "aggressive", "ignored"));
 });
 
@@ -285,5 +285,5 @@ test("applyWakeCompaction with minimal compaction keeps the reason in the tombst
   assert.equal(derived.length, 2);
   const ts = (derived[0].content[0] as { text: string }).text;
   assert.ok(ts.startsWith(TOMBSTONE_MARKER));
-  assert.ok(ts.includes("no_reply: 没事发生，安静等待"));
+  assert.ok(ts.includes("silence: 没事发生，安静等待"));
 });

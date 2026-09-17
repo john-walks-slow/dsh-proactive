@@ -204,7 +204,7 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   target_provider: { type: "string", description: "LLM provider for the wake turn, for target_mode new only (e.g. 'deepseek'). Both target_provider and target_model must be given together to win outright; a partial pair only fills the missing side of the fallback chain." },
   target_model: { type: "string", description: "LLM model id for the wake turn, for target_mode new only. Must be a real model id on the chosen provider." },
   time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." },
-  compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the no_reply reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
+  compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the proactive_silence reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
 };
 
 /** Build the six tool definitions bound to one agent + its host services. */
@@ -460,7 +460,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
             max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
             default_prompt: { type: "string", description: "Default wake-up instruction pre-filled into the GUI create form; non-empty, at most 20000 characters. Purely a prefill — stored alarms always keep their own prompt." },
-            silent_wake_compaction: { type: "boolean", description: "Master gate for silent-wake tombstone compaction (default false); per-alarm compaction still fine-tunes when enabled." }
+            silent_wake_compaction: { type: "boolean", description: "Master gate for silent-wake tombstone compaction (default true); a per-alarm compaction of 'off' still keeps that alarm's full exchange on the model surface." }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
