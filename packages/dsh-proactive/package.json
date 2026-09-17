@@ -1,7 +1,7 @@
 {
   "name": "dsh-proactive",
   "version": "0.1.0",
-  "description": "Host-level proactive wake-ups for DSH agents: let the model schedule its own alarms, wake on cold sessions, and choose no_reply for fully silent follow-up turns.",
+  "description": "Host-level proactive wake-ups for DeepSeek Harness: let the model schedule its own alarms (once / interval / cron with random jitter), wake cold sessions on time, gate model-initiated follow-ups with quiet hours and a daily budget, and reclaim silent wake turns with tombstone compaction; ships a web panel for alarm and history management. dsh-proactive：为 DeepSeek Harness 提供 host 级主动唤醒——模型自订闹钟（单次/循环/cron+随机抖动），冷会话到点自动 resume，安静时段与每日投递预算约束自主跟进，静默唤醒折叠压缩不污染上下文，自带 Web 面板管理闹钟与唤醒历史。",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -27,7 +27,9 @@
     "build": "tsc -p tsconfig.build.json && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && node --test 'dist/test/*.test.js'"
+    "test": "tsc -p tsconfig.json && node --test 'dist/test/*.test.js'",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm test"
   },
   "dsh": {
     "bundle": {
@@ -49,7 +51,22 @@
     "proactive",
     "scheduler",
     "agent",
-    "reminder"
+    "reminder",
+    "alarm",
+    "cron",
+    "timer",
+    "heartbeat",
+    "wake-up",
+    "automation",
+    "主动唤醒",
+    "定时任务",
+    "定时提醒",
+    "闹钟",
+    "提醒",
+    "定时器",
+    "心跳",
+    "计划任务",
+    "自动化"
   ],
   "license": "MIT",
   "engines": {

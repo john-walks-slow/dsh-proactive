@@ -97,4 +97,4 @@
 - 遗留 `target_mode:"workspace"` 在 create/edit 入口端到端接受，归一化为 `resume + workspace` 来源存储；仅 pre-v3 **已存储**记录保留 mode 拼写
 - resume/fork 拒绝 `target_provider`/`target_model`（factory 强制）— 覆盖仅 new 模式
 - `presetLabel` 导出（host-api.ts）可能未使用 — 后续清理
-- 客户端 bundle `npm run build` 自动同步到 `/root/.dsh/profiles/web`（硬链接）；页面刷新即加载新客户端 bundle，host 侧改动需重启 dsh（线上重启需用户书面同意）
+- 客户端 bundle `npm run build` 自动同步到 `~/.dsh/profiles/web`（硬链接）；页面刷新即加载新客户端 bundle，host 侧改动需重启 dsh（线上重启需用户书面同意）

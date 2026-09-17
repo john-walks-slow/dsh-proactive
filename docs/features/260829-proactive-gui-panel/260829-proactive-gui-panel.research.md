@@ -12,7 +12,7 @@ v2 目标：给 Web GUI 加一个**闹钟管理面板**——可视查看 alarms
 
 ### 2.1 插件等于「双面」形态（host 半边 + 浏览器半边）
 
-实证样板：web profile 已安装的第三方插件 @linxin666/dsh-client-ui-task-board（/root/.dsh/profiles/web/node_modules/）完整展示了第三方 UI 插件的官方形态：
+实证样板：web profile 已安装的第三方插件 @linxin666/dsh-client-ui-task-board（~/.dsh/profiles/web/node_modules/）完整展示了第三方 UI 插件的官方形态：
 
 - package.json 声明 dsh.client = { inject: [...], platform: "web" } + exports["./client"]；dsh.bundle.patch 一行 insert 挂进 profile bundles（与我们的 cordis.patch.yml 同款）
 - node 半边（exports "."）跑在宿主进程；浏览器半边（exports "./client"，经 /plugins/<id>/client.js 提供）在 Web GUI 加载
@@ -37,7 +37,7 @@ v2 目标：给 Web GUI 加一个**闹钟管理面板**——可视查看 alarms
 - @deepseek-ai/dsh-settings：ctx.settings.register(ns, schema, {base?, applies?}) 完全开放；resolved = schema 默认 → 组合 base → 用户文档三层；乐观锁 revision；settings/updated（值变化）+ settings/document-updated（原始段变化）事件
 - wire 全自动：settings.describe/update/replace/mutate 已由 dsh-host-apiproxy 暴露；settings/document-updated 在 host到client 转发白名单（API_REMOTE_FORWARDED_EVENTS）内 → 前端设置 UI 自动出现并刷新该 namespace，**无需自建前端也能有配置表单**（通用设置面板渲染 schemastery schema）
 - host 侧还有 installSettingsSection(ctx, ns, schema, entry, hooks) 助手（task-board 用它接线：scope.watch → hooks.onChange 热更新）
-- 环境实证：/root/.dsh/settings.yaml 已存在（llm-pi-ai 等 namespace）—— web profile 已装配 file provider
+- 环境实证：~/.dsh/settings.yaml 已存在（llm-pi-ai 等 namespace）—— web profile 已装配 file provider
 
 ### 2.5 走不通的路（防走弯路）
 
@@ -57,7 +57,7 @@ v2 目标：给 Web GUI 加一个**闹钟管理面板**——可视查看 alarms
 
 ## 4. 参考文件索引
 
-- 样板：/root/.dsh/profiles/web/node_modules/@linxin666/dsh-client-ui-task-board/{package.json,cordis.patch.yml,src/client/index.ts,src/client/host-api.ts,src/host-routes.ts,src/http.ts}
+- 样板：~/.dsh/profiles/web/node_modules/@linxin666/dsh-client-ui-task-board/{package.json,cordis.patch.yml,src/client/index.ts,src/client/host-api.ts,src/host-routes.ts,src/http.ts}
 - slots 契约：@deepseek-ai/dsh-client-ui-settings/lib/types/client/contract/slots.d.ts
 - webserver：@deepseek-ai/dsh-host-webserver/lib/types/index.d.ts
 - settings：@deepseek-ai/dsh-settings/README.md + lib/types/index.d.ts（register/installSettingsSection）

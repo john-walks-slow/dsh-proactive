@@ -245,7 +245,7 @@ quiet_hours: <是否生效>
 
 ## 5. 实现方案
 
-### 5.1 仓库布局（本 workspace：`/root/projects/dsh-proactive`）
+### 5.1 仓库布局（本 workspace：`~/projects/dsh-proactive`）
 
 ```text
 dsh-proactive/

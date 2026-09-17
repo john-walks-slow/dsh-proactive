@@ -19,7 +19,7 @@
 
 ## 2. DSH 平台机制研究（本地代码勘察）
 
-> 勘察对象：`/usr/lib/node_modules/@deepseek-ai/dsh/`（CLI 与全部 core 包的安装副本）与运行中的 web profile（`/root/.dsh/profiles/web/`）。
+> 勘察对象：`/usr/lib/node_modules/@deepseek-ai/dsh/`（CLI 与全部 core 包的安装副本）与运行中的 web profile（`~/.dsh/profiles/web/`）。
 
 ### 2.1 插件体系
 

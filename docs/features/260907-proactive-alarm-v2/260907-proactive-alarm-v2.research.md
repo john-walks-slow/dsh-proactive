@@ -23,7 +23,7 @@
 | `src/panel/*` | HTTP 路由（state/action/events）+ 服务（snapshot/actions 共享 alarm-factory）+ 契约 | PanelAction create/edit args 同工具方言；`sessionId` 归属与作用域校验 |
 | `src/client/*` | settings.section 全局面板 + conversation.view 会话 tab | CreateForm：触发方式 after/every 二选、jitter ±比例 0-1、wakeReason 下拉；设置卡有心跳默认词输入框；表格按 sessionId/mode/wakeReason 过滤 |
 
-线上数据（`/root/.dsh/proactive/`）：alarms.json 现存 4 条（3 条 completed one-shot + 1 条 failed repeat，wakeReason 含 legacy "companion"）；**无任何闹钟使用 jitter**（旧 0..1 语义迁移负担≈0）；config.json 仅覆盖 maxDeliveriesPerDay=20。
+线上数据（`~/.dsh/proactive/`）：alarms.json 现存 4 条（3 条 completed one-shot + 1 条 failed repeat，wakeReason 含 legacy "companion"）；**无任何闹钟使用 jitter**（旧 0..1 语义迁移负担≈0）；config.json 仅覆盖 maxDeliveriesPerDay=20。
 
 git 注意：工作区有他人未提交的 session-tab client 改动（host-api/panel/sections/session-panel/locales/index），实施时用 commit-own-changes 只收自己的 hunk。
 

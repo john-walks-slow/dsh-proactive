@@ -54,7 +54,7 @@ and AgentOptions.model or supply both via the agent/request waterfall
 
 ## 上线（2026-09-06）
 
-- `lib/` 已同步至 web profile（`/root/.dsh/profiles/web/node_modules/dsh-proactive/lib`，25 个文件，修复内容在位），随后重启 dsh 生效。
+- `lib/` 已同步至 web profile（`~/.dsh/profiles/web/node_modules/dsh-proactive/lib`，25 个文件，修复内容在位），随后重启 dsh 生效。
 - 前置发现并处理：JK 闹钟 `alarm_mtfkvz2j3nqik0` 在 13:30:18Z（13:29:34 触发点后 44s）被置为 **paused**（面板 toggle，推测用户暂停）——这就是 13:09 后无更多运行记录的原因。已通过面板 API 恢复 **scheduled**，`nextDueAt` 由 lastRunAt 重算推进为 **`2026-09-06T14:39:03.815Z`**（约重启后 20 分钟内触发，即修复后的首个冷唤醒验证点）。
 - 若用户不需要该 heartbeat，可在面板再次暂停。
 
