@@ -7,6 +7,9 @@
 
 让 DeepSeek Harness（DSH）的模型**主动跟进**：给自己订 host 级闹钟，即使会话已冷却也会按时被唤醒；唤醒回合可以选择 `proactive_silence` 静默收尾——用户完全无感知。dsh-schedule 的提醒留在会话内、会话凉了就不触发；本插件把闹钟存在宿主侧（`$DSH_HOME/proactive/`），到点用 `ctx.agents.resume()` 把冷会话唤起来执行一轮，跑完即释放。
 
+
+![dsh-proactive in the DSH settings: global alarm view, wake config, quiet hours and tombstone compaction](assets/screenshot-1.png)
+
 ## 你会看到什么
 
 **模型在唤醒回合开头收到一条极简 framing 通知**（~0.4KB，GUI 中渲染为折叠 chip，非用户气泡）：

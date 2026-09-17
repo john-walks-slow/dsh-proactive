@@ -7,6 +7,9 @@
 
 Let the DeepSeek Harness (DSH) model **follow up proactively**: it schedules host-level alarms for itself and gets woken on time even when the session has gone cold; a wake turn can finish with `proactive_silence` — completely invisible to the user. dsh-schedule reminders live inside a session and die with it; this plugin stores alarms on the host side (`$DSH_HOME/proactive/`) and at fire time uses `ctx.agents.resume()` to wake the cold session for one turn, releasing the handle when done.
 
+
+![dsh-proactive in the DSH settings: global alarm view, wake config, quiet hours and tombstone compaction](assets/screenshot-1.png)
+
 ## What you will see
 
 **The model receives a deliberately tiny framing notice at the start of every wake turn** (~0.4KB, rendered in the GUI as a collapsed chip, not a user bubble):
