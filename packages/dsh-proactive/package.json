@@ -87,5 +87,15 @@
     "react-dom": "^18.3.1",
     "schemastery": "^3.18.0",
     "typescript": "^5.9.3"
+  },
+  "author": "johnnren",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/john-walks-slow/dsh-proactive.git",
+    "directory": "packages/dsh-proactive"
+  },
+  "homepage": "https://github.com/john-walks-slow/dsh-proactive/tree/main/packages/dsh-proactive#readme",
+  "bugs": {
+    "url": "https://github.com/john-walks-slow/dsh-proactive/issues"
   }
 }
