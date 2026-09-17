@@ -11,10 +11,10 @@
 - `src/store.ts` — alarms.json（原子写）/runs.jsonl/state.json 持久化；corrupt 降级
 - `src/scheduler.ts` — 串行 drive 循环：门控（安静/budget/hourly/boot 策略）、重试、单定时器重臂
 - `src/wake.ts` — WakeDriver：live/cold 双路径、冷 resume 装 `installModelSelection`（`createWakeSelectionRef`：会话 request header → agentDefaultModel → warn）、runMaintenance+followup、whenIdle、dispose、inflight 守卫；静默/无输出回合结束后触发 compactWake
-- `src/framing.ts` — 唤醒报文 v3（极简：身份头/now/非用户标记/alarm prompt 原文/一条 no_reply 规则，~0.4KB 开销）；notice-form 用户消息；导出 FRAMING_MARKER
-- `src/compact.ts` — 静默唤醒的 surface 压缩：planWakeCompaction（owned run 划分，region=framing 至其后第一个 turn/end）+ applyWakeCompaction（按 alarm.compaction 三态渲染 tombstone：minimal 含 `no_reply: <reason>`，aggressive 只 id+time；+ 空 content assistant/message 擦除器）；off 在 wake.ts 驱动层短路不进入；非本插件注入的 surface 节点（snapshot/mnemon/用户消息）打断 run 并保留
-- `src/observer.ts` — 从会话日志切片判定 no_reply/reply/failed 与预算增量；leaked 标记；extractNoReplyReason 从 tool/call arguments(JSON) 提取 reason → WakeAnalysis.noReplyReason（无条件进 run history）；isFramingNotice 按 plugin source + FRAMING_MARKER 双重锚定（防 tombstone 误锚）
-- `src/tools.ts` — proactive_set/list/cancel/update/no_reply（list 的 all=true、update、cancel 均按精确 id **跨会话**——工具=模型代用户行事，与 GUI 设置页同权；update 与 set 共享 ALARM_SPEC_PARAMETERS 同一方言、全量替换、保留 id/owner/历史，时区链跟随 owner 会话；no_reply 需 inflight 且【只调它不写文本】）
+- `src/framing.ts` — 唤醒报文 v3（极简：身份头/now/非用户标记/alarm prompt 原文/一条静默双工具规则，~0.5KB 开销）；notice-form 用户消息；导出 FRAMING_MARKER
+- `src/compact.ts` — 静默唤醒的 surface 压缩：planWakeCompaction（owned run 划分，region=framing 至其后第一个 turn/end）+ applyWakeCompaction（按 alarm.compaction 三态渲染 tombstone：minimal 含 `silence: <reason>`，aggressive 只 id+time；+ 空 content assistant/message 擦除器）；off 在 wake.ts 驱动层短路不进入；非本插件注入的 surface 节点（snapshot/mnemon/用户消息）打断 run 并保留
+- `src/observer.ts` — 从会话日志切片判定 no_reply/reply/failed 与预算增量；`compactable` **显式 opt-in**（仅 proactive_silence 工具调用标记可回收）；extractSilenceReason 从 tool/call arguments(JSON) 提取 reason → WakeAnalysis.noReplyReason（无条件进 run history）；isFramingNotice 按 plugin source + FRAMING_MARKER 双重锚定（防 tombstone 误锚）；**不探测任何其他插件的工具名**（零耦合）
+- `src/tools.ts` — proactive_set/list/cancel/update/proactive_silence（list 的 all=true、update、cancel 均按精确 id **跨会话**——工具=模型代用户行事，与 GUI 设置页同权；update 与 set 共享 ALARM_SPEC_PARAMETERS 同一方言、全量替换、保留 id/owner/历史，时区链跟随 owner 会话；proactive_silence 永远注册、需 inflight 守卫且【只作收尾不写文本】，reason 记 run history + 墓碑）
 - `src/workspace.ts` — 工作区目标类型：resolveWorkspaceArg（id/path/会话 cwd 三臂归一为 id）、listMetadataOf/updatedAtOf（侧边栏折叠/排序键）、pickWorkspaceTarget（可见会话 → 空白 New Session 槽 → **none**）、`createdSessionEligible`（plugin 自建会话豁免判定）、resolveWorkspaceWakeTarget / resolvePresetWakeTarget（live 折叠 + cold 投影缓存行，archived/subagent/**plugin-created 记账**剔除，无候选 → none）、WorkspaceWakePort（attach 先于投递；cwdOf 保留 missing-dir 守卫）、liveEventsOf/live 折叠的跨版本日志读
 - `src/index.ts` — 装配；agent/created 时对 roots 注册工具（resume 出的会话同样覆盖）
 - `src/panel/` — 面板 host 半边：contract（面板↔client 线协议，与工具同一 create 方言）、service（快照/闭动作）、routes（/api/dsh-proactive/* + SSE）
@@ -23,12 +23,12 @@
 ## 核心设计
 
 - 状态在 host 侧（store 单例），工具通过闭包访问；与 dsh-schedule 的会话内提醒互补
-- 静默 = framing 规则引导 + `exec.concludeTurn()` 机械结束（agent-loop 不再请求下一次补全）+ 不产出文本；GUI 对无文本 assistant 消息不渲染。文本先行的泄漏由 observer 标记并按可见文本计费，不阻断
-- 预算：唤醒回合写了可见聊天文本 1 单位/UTC 日，上限 `maxDeliveriesPerDay`；no_reply 免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
+- 静默 = framing 规则引导 + `exec.concludeTurn()` 机械结束（agent-loop 不再请求下一次补全）+ 不产出文本；GUI 对无文本 assistant 消息不渲染。文本先行再静默=普通 reply 计费（leak 概念已删）
+- 预算：唤醒回合写了可见聊天文本 1 单位/UTC 日，上限 `maxDeliveriesPerDay`；静默免费；预算耗尽跳过主动唤醒、用户委托 alarm 仍触发
 - 安静时段（IANA 时区、跨午夜）：非 alarm 唤醒每 5 分钟延迟重评估；重复闹钟错过不补跑，推进到下一个锚点
 - 循环模式（260916 更新）：推进改用漂移语义（`nextDriftingOccurrence`），下次唤醒时刻基于本次真实唤醒时刻（`wakeEpoch`，记录于 `lastRunAt`）加上间隔与随机抖动，允许时间漂移，确保每次唤醒之间至少保持设定的周期间隔；极端超时自动安全重锚，杜绝惊群
 - 唤醒回合判定依据**已提交的会话日志**（startIndex 之后的事件切片），不信任运行期假设
-- 静默唤醒压缩（per-alarm `compaction` 三态，默认 `minimal`）：observer 判 no_reply/failed 后，`off` 在驱动层短路不压缩；`minimal`/`aggressive` 用平台 surfaceOp replace 把唤醒交换折叠——minimal tombstone 含 `no_reply: <reason>`（~200-400B），aggressive 只 id+time（~70B），两者都用空 content assistant/message 擦除器（deriveEventMessage→null）；reply 回合绝不压缩；非本插件注入的 surface 节点（runtime-context snapshot 等）打断 run 并保留——shadow snapshot 会使 RuntimeContextProjection.retained 置空、下回合强制重发全量快照；GUI 人类 transcript 用 append-origin 事件，不受替换影响。no_reply reason 无条件提取进 run history（runs.jsonl/面板 RunView），与上下文压缩正交
+- 静默唤醒压缩（260917 定案：**显式 opt-in**）：只有回合内调用了 `proactive_silence` 才压缩（`WakeAnalysis.compactable`）；隐式静默（无工具无文本）、其他工具的静默（如 dsh-im `no_reply`）、reply、failed 一律**保留完整交换**——模型没断言"可回收"就什么都不擦。`silentWakeCompaction`（默认 true）是总闸，per-alarm `compaction` 三态（默认 `minimal`）细化：`off` 短路；`minimal` tombstone 含 `silence: <reason>`（~200-400B，reason 来自 proactive_silence 参数）；`aggressive` 只 id+time（~70B）；两者都用空 content assistant/message 擦除器（deriveEventMessage→null）。非本插件注入的 surface 节点（runtime-context snapshot 等）打断 run 并保留——shadow snapshot 会使 RuntimeContextProjection.retained 置空、下回合强制重发全量快照；GUI 人类 transcript 用 append-origin 事件，不受替换影响。proactive_silence reason 无条件提取进 run history（runs.jsonl/面板 RunView），与上下文压缩正交
 - 面板表单（两面板同一方言）：目标会话=会话 ID 文本输入（默认当前会话，设置页经 GlobalStandardProps `useSessions` 读 GUI 选中会话）；输入框下方实时显示该 ID 的会话标题（`knownSessions: ReadonlyMap<id,title>` 来自 state 快照的 session.list，精确命中即显示）；不在列表的 ID 为**软提示且 500ms settle 去抖**（负面反馈不能逐键闪现，正面标题即时）；owner 非表单字段——会话页钉死本会话（host scope 规则），设置页按目标派生（resume/fork=目标会话，new=当前会话→host-panel 伪会话）；prompt 预填 `config.defaultPrompt`（常量在 domain.ts，快照缺该字段的旧 host 由 client 回退同值，配置编辑项也仅在字段存在时渲染/提交）
 - `use-locale.ts`：面板文案 hook 的 active locale **每次 snapshot 读取时从 live 服务解析**，不在 bind 时缓存——页面可在持久化偏好（zh）到达前先以回退（en）启动，bind 时缓存会把这个窗口内挂载的面板困在错误语言直到下次切换（曾导致刷新后面板 en、tab 标签 zh 的分裂）
 - 工具作用域（260910）：模型工具=代用户行事，按精确 id **跨会话** actuate（list all=true / update / cancel），与 GUI 设置页同权；GUI 会话页 tab 限 owner（上下文可见性）。update 是**全量替换**方言（与 set 共享 ALARM_SPEC_PARAMETERS；省略字段回退方言默认而非旧值），保留 id/owner/createdAt/run 历史，paused 编辑后回 scheduled，in-flight/终态闭式 invalid_action；时区默认链跟随 **owner** 会话的 events（ToolServices.sessionEvents），workspace 目的无显式参数时沿用已解析 id（不重查存在性——fire 时自有闭式兜底）。AlarmView 带 timeZone 供 list→update 方言往返无损
