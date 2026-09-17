@@ -8,7 +8,7 @@
 让 DeepSeek Harness（DSH）的模型**主动跟进**：模型给自己设定 host 级闹钟，到点由宿主唤醒目标会话执行一轮——即使会话早已冷却、页面早已关闭也会按时触发；无事可做的唤醒回合可以静默收尾并自动折叠，用户完全无感知。
 
 
-![dsh-proactive in the DSH settings: global alarm view, wake config, quiet hours and tombstone compaction](assets/screenshot-1.png)
+![dsh-proactive in the DSH settings: new-alarm creation form with schedule types, jitter and quiet-hours, plus global wake config](assets/screenshot-1.png)
 
 ## 你会看到什么
 

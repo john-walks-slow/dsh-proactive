@@ -8,7 +8,7 @@
 Let the DeepSeek Harness (DSH) model **follow up proactively**: the model schedules its own host-level alarms, and when one is due the host wakes the target session to run a turn — even if the session went cold long ago and the page was closed. Turns with nothing worth reporting can end silently and get folded away, invisible to the user.
 
 
-![dsh-proactive in the DSH settings: global alarm view, wake config, quiet hours and tombstone compaction](assets/screenshot-1.png)
+![dsh-proactive in the DSH settings: new-alarm creation form with schedule types, jitter and quiet-hours, plus global wake config](assets/screenshot-1.png)
 
 ## What you will see
 
