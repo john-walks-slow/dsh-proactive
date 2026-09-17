@@ -401,11 +401,11 @@ export class WakeDriver {
     if (!claimed) return { outcome: "busy" };
     await agent.whenIdle();
     const analysis = analyzeWakeTurn(sessionLogOf(agent.session) as unknown as MinimalEvent[], startIndex);
-    // Collapse the wake exchange off the model surface when the observer
-    // marked the turn compactable: a proactive_silence reclaim, an implicit
-    // no-text turn, or a failed/abnormal turn. A "no_reply" tool silence
-    // (keep-work-in-context) is NOT compacted (see observer.ts compactable).
-    // The silentWakeCompaction gate still has to be on for any compaction.
+    // Collapse the wake exchange off the model surface ONLY when the model
+    // explicitly asserted the turn is reclaimable via proactive_silence (see
+    // observer.ts compactable). Implicit silences, other tools' silences,
+    // replies, and failed turns all keep their exchange in context. The
+    // silentWakeCompaction gate still has to be on for any compaction.
     if (analysis.compactable) {
       const compaction = this.deps.config.silentWakeCompaction
         ? (alarm.compaction ?? DEFAULT_COMPACTION)

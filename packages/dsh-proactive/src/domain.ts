@@ -19,7 +19,7 @@ export const PROACTIVE_PLUGIN = "dsh-proactive";
 export const MIN_EVERY_SECONDS = 300;
 export const MAX_PROMPT_LENGTH = 4000;
 export const MAX_NO_REPLY_REASON_LENGTH = 200;
-/** Default compaction policy for a new alarm (minimal: keep the no_reply reason in the tombstone). */
+/** Default compaction policy for a new alarm (minimal: keep the proactive_silence reason in the tombstone). */
 export const DEFAULT_COMPACTION: AlarmCompaction = "minimal";
 /** All valid compaction values (validation + schema enum share this source). */
 export const COMPACTION_MODES: readonly string[] = ["off", "minimal", "aggressive"];

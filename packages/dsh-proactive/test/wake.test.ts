@@ -687,9 +687,9 @@ test("silent wake is NOT compacted when silentWakeCompaction is off", async () =
 });
 
 test("a host 'no_reply' silence keeps the work in context (NOT compacted, even with the gate on)", async () => {
-  // Convention: a tool/call named "no_reply" means "stayed silent, keep work
-  // in context" (e.g. dsh-im's no_reply). Even with silentWakeCompaction on,
-  // such a turn is NOT reclaimed — the model's work stays on the surface.
+  // Compaction is explicit opt-in: only proactive_silence reclaims. A
+  // "no_reply" tool silence (e.g. dsh-im's) keeps the exchange on the surface
+  // even with silentWakeCompaction on.
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
   cfg.silentWakeCompaction = true;
@@ -739,6 +739,46 @@ test("a host 'no_reply' silence keeps the work in context (NOT compacted, even w
       .map((m) => (m.content[0] as { text?: string }).text ?? "");
     assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake keepwork1 ")), "framing must stay (no compaction)");
     assert.ok(!texts.some((t) => t.startsWith("[dsh-proactive silent wake ")), "no tombstone may appear for a no_reply silence");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an implicit silence (no tool, no text) is NOT compacted — reclaim needs an explicit proactive_silence", async () => {
+  // The model just ended the turn with no output and no tool call. Even with
+  // silentWakeCompaction on, nothing is erased without the model's explicit
+  // reclaim assertion.
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  cfg.silentWakeCompaction = true;
+  const store = new ProactiveStore(dir);
+  const session = Session.create("s1" as never);
+  const agent = {
+    session,
+    followup: (message: unknown) => {
+      session.append("turn/start", { turn: 1 });
+      session.append("user/message", message as never, { surfaceOp: "append" });
+      session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+    },
+    runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
+    whenIdle: async () => undefined
+  } as unknown as Agent;
+  const agents: AgentsFacade = {
+    get: () => agent,
+    resume: async () => { throw new Error("unused"); },
+    create: async () => { throw new Error("unused"); }
+  };
+  const driver = new WakeDriver({ agents, modelSelection: () => ({ provider: "cpa", model: "x" }), store, config: cfg, log: () => undefined });
+  try {
+    const fire = await driver.fire(alarm("implicit1"));
+    assert.equal(fire.outcome, "ok");
+    if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
+    const texts = session.surface.nodes
+      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .filter((message) => message !== null)
+      .map((m) => (m.content[0] as { text?: string }).text ?? "");
+    assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake implicit1 ")), "framing must stay (no compaction)");
+    assert.ok(!texts.some((t) => t.startsWith("[dsh-proactive silent wake ")), "no tombstone may appear for an implicit silence");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

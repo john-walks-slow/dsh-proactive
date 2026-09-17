@@ -114,5 +114,6 @@
   "homepage": "https://github.com/john-walks-slow/dsh-proactive/tree/main/packages/dsh-proactive#readme",
   "bugs": {
     "url": "https://github.com/john-walks-slow/dsh-proactive/issues"
-  }
+  },
+  "dependencies": {}
 }

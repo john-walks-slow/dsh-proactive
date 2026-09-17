@@ -8,10 +8,10 @@
  * and the final assistant message. The slice is anchored to the wake framing
  * notice (user/message with source.kind=plugin) so a pending pre-wake turn is
  * never misattributed. A settled turn with no visible chat text is
- * "no_reply" (deep silence); a proactive_silence call (or an implicit
- * no-text turn) is compactable, while a "no_reply" tool call (conventionally
- * a host no-reply tool) keeps the work in context. Visible chat text is
- * charged one budget unit.
+ * "no_reply" (deep silence); compaction is explicit opt-in — ONLY a
+ * proactive_silence call marks the turn compactable (reclaimable). Everything
+ * else (implicit silence, any other tool's silence, failed turns) keeps the
+ * exchange on the model surface. Visible chat text is charged one budget unit.
  */
 
 import { isRecord, type RunDecision } from "./domain.js";
@@ -37,11 +37,12 @@ export interface WakeAnalysis {
   noReplyReason?: string;
   /**
    * Whether the settled wake turn should be compacted off the model surface
-   * (subject to the silentWakeCompaction gate in the driver). Reply turns are
-   * never compacted; a silence signaled by proactive_silence (or an implicit
-   * no-text turn) is compactable; a silence signaled by a "no_reply" tool call
-   * (conventionally a host no-reply tool, e.g. dsh-im's) keeps the work in
-   * context and is NOT compacted.
+   * (subject to the silentWakeCompaction gate in the driver). Compaction is
+   * EXPLICIT OPT-IN: only a silence signaled by the proactive_silence tool
+   * call reclaims the turn. Everything else — an implicit no-text turn, a
+   * "no_reply" tool call (e.g. dsh-im's), a visible reply, or a failed/aborted
+   * turn — keeps the exchange on the model surface. Nothing is erased unless
+   * the model asserted the turn is reclaimable.
    */
   compactable: boolean;
 }
@@ -49,17 +50,11 @@ export interface WakeAnalysis {
 /**
  * The proactive wake's own silence tool: calling it reclaims the turn
  * (collapses the wake exchange off the model surface via compaction) and
- * records an optional reason in the run history.
+ * records an optional reason in the run history. This is the ONLY thing that
+ * triggers compaction — the observer deliberately knows nothing about any
+ * other plugin's tools (no name matching, no coupling).
  */
 const PROACTIVE_SILENCE_TOOL = "proactive_silence";
-/**
- * Convention only (no hard coupling): a tool/call named "no_reply" is treated
- * as a host-level "stayed silent, but keep the work in context" signal — i.e.
- * the turn did work but produced no user-facing text and should NOT be
- * compacted. dsh-im registers such a tool; if no host plugin does, this string
- * simply never appears in a wake slice and the convention is inert.
- */
-const NO_REPLY_TOOL = "no_reply";
 
 /** Per-field summary cap for the run history (reasoning + reply are stored truncated). */
 export const RUN_SUMMARY_MAX_LENGTH = 200;
@@ -177,7 +172,6 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   const toolNames: string[] = [];
   let noReplyReason: string | undefined;
   let proactiveSilence = false;
-  let noReplyTool = false;
   for (const event of turnSegment) {
     if (event.type === "assistant/message") {
       const texts = extractTextBlocks(event.data);
@@ -194,11 +188,6 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
       if (name === PROACTIVE_SILENCE_TOOL) {
         proactiveSilence = true;
         if (noReplyReason === undefined) noReplyReason = extractSilenceReason(event.data);
-      } else if (name === NO_REPLY_TOOL) {
-        // Convention: a "no_reply" tool call means "stayed silent, keep work
-        // in context" — NOT the reclaim/compact path. (No hard coupling: this
-        // is a name match against the session log, not an import.)
-        noReplyTool = true;
       }
     }
   }
@@ -213,16 +202,18 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     // Reply turns are never compacted (the user already saw the text).
   } else if (!turnEnded || errorEnd) {
     decision = "failed";
-    // A failed/abnormal wake is compacted off the surface (past behavior).
-    compactable = true;
+    // Failed/abnormal turns keep their partial exchange on the surface:
+    // erasure requires the model's explicit reclaim assertion, which a failed
+    // turn never made. Failures are rare, visible in the run history, and the
+    // partial content may help the next attempt self-correct.
     note = errorEnd ? "wake turn ended abnormally" : "wake turn did not settle cleanly";
   } else {
     decision = "no_reply";
-    // Compact (reclaim) unless the silence was signaled by a "no_reply" tool
-    // AND proactive_silence was not also called. An explicit proactive_silence
-    // wins (the model asked to reclaim even if it also called no_reply); an
-    // implicit no-text turn (neither tool) is also reclaimable.
-    compactable = !noReplyTool || proactiveSilence;
+    // EXPLICIT OPT-IN ONLY: the model must call proactive_silence to reclaim
+    // the turn. An implicit no-text turn (the model just ended with no output,
+    // or stayed silent after work via some other tool) keeps its exchange in
+    // context — nothing is erased without the model's assertion.
+    compactable = proactiveSilence;
   }
   return {
     decision,

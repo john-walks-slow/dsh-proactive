@@ -105,8 +105,9 @@ test("proactive_silence with no text is deep silence (free, compactable)", () =>
 });
 
 test("a host 'no_reply' silence keeps the work in context (not compactable)", () => {
-  // Convention: a tool/call named "no_reply" (e.g. dsh-im's) signals "stayed
-  // silent, keep work" — the opposite of proactive_silence's reclaim.
+  // Compaction is explicit opt-in: only proactive_silence reclaims. A
+  // "no_reply" tool call (e.g. dsh-im's) — like any non-proactive_silence
+  // silence — keeps the exchange on the model surface.
   const events: MinimalEvent[] = [turnStart(), toolCall("no_reply"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
@@ -138,29 +139,31 @@ test("visible chat reply costs one budget unit", () => {
   assert.equal(analysis.budgetDelta, 1);
 });
 
-test("unsettled turn is failed", () => {
+test("unsettled turn is failed (and not compactable — no explicit reclaim)", () => {
   const events: MinimalEvent[] = [turnStart(), toolCall("proactive_list")];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "failed");
   assert.equal(analysis.budgetDelta, 0);
+  assert.equal(analysis.compactable, false);
 });
 
 for (const kind of ["error", "aborted", "max-tokens"] as const) {
-  test("turn/end reason kind " + kind + " is failed", () => {
+  test("turn/end reason kind " + kind + " is failed (not compactable)", () => {
     const events: MinimalEvent[] = [turnStart(), turnEnd(kind, { error: { code: "X", message: "boom" } })];
     const analysis = analyzeWakeTurn(events, 0);
     assert.equal(analysis.decision, "failed");
     assert.equal(analysis.budgetDelta, 0);
+    assert.equal(analysis.compactable, false);
     assert.ok(analysis.note?.includes("abnormally"));
   });
 }
 
-test("completed reason with no output is a clean silent turn (no_reply, compactable)", () => {
+test("completed reason with no output is a clean silent turn (implicit, NOT compactable)", () => {
   const events: MinimalEvent[] = [turnStart(), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.budgetDelta, 0);
-  assert.equal(analysis.compactable, true); // implicit silence is reclaimable
+  assert.equal(analysis.compactable, false); // implicit silence needs an explicit proactive_silence to reclaim
 });
 
 test("analysis skips earlier unrelated events from the slice", () => {

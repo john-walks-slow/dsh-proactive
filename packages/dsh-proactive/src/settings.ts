@@ -6,7 +6,7 @@
  * quietHours/budget policies change without a restart.
  */
 
-import z from "schemastery";
+import z from "@deepseek-ai/schemastery";
 import type { Context } from "@deepseek-ai/cordis";
 import { type ProactiveConfig, type BootOverduePolicy, type QuietHours } from "./config.js";
 import { canonicalizeTimeZone, DEFAULT_WAKE_PROMPT, isRecord, MAX_PROMPT_LENGTH, type ToolError } from "./domain.js";
