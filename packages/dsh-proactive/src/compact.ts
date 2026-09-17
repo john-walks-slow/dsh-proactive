@@ -1,6 +1,6 @@
 /**
  * Post-settle wake-slice compaction: after a wake turn ends with nothing
- * user-visible (deep silence via proactive_silence, or a turn that produced
+ * user-visible (deep silence via proactive_reclaim, or a turn that produced
  * no output),
  * rewrite the model-visible surface so the whole exchange — framing notice,
  * assistant reasoning/tool-call, tool result — collapses to a ~70-byte
@@ -75,7 +75,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * The tombstone text that replaces the framing run. Under `minimal` compaction
- * the proactive_silence reason is appended so later turns can see why the wake
+ * the proactive_reclaim reason is appended so later turns can see why the wake
  * stayed silent; `aggressive` (and a reason-less `minimal`) keep only id + time.
  */
 export function tombstoneText(alarm: Alarm, firedAt: Date, compaction: AlarmCompaction, reason?: string): string {

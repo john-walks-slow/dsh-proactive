@@ -9,7 +9,7 @@
  * notice (user/message with source.kind=plugin) so a pending pre-wake turn is
  * never misattributed. A settled turn with no visible chat text is
  * "no_reply" (deep silence); compaction is explicit opt-in — ONLY a
- * proactive_silence call marks the turn compactable (reclaimable). Everything
+ * proactive_reclaim call marks the turn compactable (reclaimable). Everything
  * else (implicit silence, any other tool's silence, failed turns) keeps the
  * exchange on the model surface. Visible chat text is charged one budget unit.
  */
@@ -33,12 +33,12 @@ export interface WakeAnalysis {
   reasoningSummary?: string;
   /** Truncated visible-reply summary of the turn, for the run history. */
   replySummary?: string;
-  /** The proactive_silence reason the model gave for staying silent, for the run history. */
+  /** The proactive_reclaim reason the model gave for staying silent, for the run history. */
   noReplyReason?: string;
   /**
    * Whether the settled wake turn should be compacted off the model surface
    * (subject to the silentWakeCompaction gate in the driver). Compaction is
-   * EXPLICIT OPT-IN: only a silence signaled by the proactive_silence tool
+   * EXPLICIT OPT-IN: only a silence signaled by the proactive_reclaim tool
    * call reclaims the turn. Everything else — an implicit no-text turn, a
    * "no_reply" tool call (e.g. dsh-im's), a visible reply, or a failed/aborted
    * turn — keeps the exchange on the model surface. Nothing is erased unless
@@ -54,7 +54,7 @@ export interface WakeAnalysis {
  * triggers compaction — the observer deliberately knows nothing about any
  * other plugin's tools (no name matching, no coupling).
  */
-const PROACTIVE_SILENCE_TOOL = "proactive_silence";
+const PROACTIVE_RECLAIM_TOOL = "proactive_reclaim";
 
 /** Per-field summary cap for the run history (reasoning + reply are stored truncated). */
 export const RUN_SUMMARY_MAX_LENGTH = 200;
@@ -107,7 +107,7 @@ export function extractReasoningBlocks(data: Record<string, unknown>): string[] 
   return [];
 }
 
-/** The proactive_silence tool's reason argument from one tool/call event's JSON arguments field, truncated. */
+/** The proactive_reclaim tool's reason argument from one tool/call event's JSON arguments field, truncated. */
 function extractSilenceReason(data: Record<string, unknown>): string | undefined {
   const raw = data["arguments"];
   if (typeof raw !== "string" || raw.length === 0) return undefined;
@@ -185,7 +185,7 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     if (event.type === "tool/call") {
       const name = typeof event.data["name"] === "string" ? event.data["name"] : "";
       if (name.length > 0) toolNames.push(name);
-      if (name === PROACTIVE_SILENCE_TOOL) {
+      if (name === PROACTIVE_RECLAIM_TOOL) {
         proactiveSilence = true;
         if (noReplyReason === undefined) noReplyReason = extractSilenceReason(event.data);
       }
@@ -209,7 +209,7 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     note = errorEnd ? "wake turn ended abnormally" : "wake turn did not settle cleanly";
   } else {
     decision = "no_reply";
-    // EXPLICIT OPT-IN ONLY: the model must call proactive_silence to reclaim
+    // EXPLICIT OPT-IN ONLY: the model must call proactive_reclaim to reclaim
     // the turn. An implicit no-text turn (the model just ended with no output,
     // or stayed silent after work via some other tool) keeps its exchange in
     // context — nothing is erased without the model's assertion.

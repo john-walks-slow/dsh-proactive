@@ -402,7 +402,7 @@ export class WakeDriver {
     await agent.whenIdle();
     const analysis = analyzeWakeTurn(sessionLogOf(agent.session) as unknown as MinimalEvent[], startIndex);
     // Collapse the wake exchange off the model surface ONLY when the model
-    // explicitly asserted the turn is reclaimable via proactive_silence (see
+    // explicitly asserted the turn is reclaimable via proactive_reclaim (see
     // observer.ts compactable). Implicit silences, other tools' silences,
     // replies, and failed turns all keep their exchange in context. The
     // silentWakeCompaction gate still has to be on for any compaction.

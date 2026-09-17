@@ -541,23 +541,23 @@ test("validateCreateArgs rejects an invalid compaction value", () => {
   assert.equal(bad.code, "invalid_trigger");
 });
 
-test("proactive_silence concludes the turn during an active wake and records a reason", async () => {
+test("proactive_reclaim concludes the turn during an active wake and records a reason", async () => {
   const h = harness();
   h.activeWakes.add("s1"); // the wake driver marks the session inflight
   assert.equal(h.concluded(), false);
-  const res = await h.run("proactive_silence", { reason: "nothing to do" });
+  const res = await h.run("proactive_reclaim", { reason: "nothing to do" });
   assert.deepEqual(res, { accepted: true, silent: true });
   assert.equal(h.concluded(), true);
   // reason over the cap is a closed invalid_trigger
-  assert.equal(code(await h.run("proactive_silence", { reason: "r".repeat(201) })), "invalid_trigger");
+  assert.equal(code(await h.run("proactive_reclaim", { reason: "r".repeat(201) })), "invalid_trigger");
   h.cleanup();
 });
 
-test("proactive_silence is closed outside an active wake (no hard fallback)", async () => {
+test("proactive_reclaim is closed outside an active wake (no hard fallback)", async () => {
   const h = harness();
   // No active wake for s1 — the inflight guard surfaces a closed error so the
   // model can self-correct (e.g. end with no text, or use a no-reply tool).
-  const res = await h.run("proactive_silence", { reason: "x" }) as { code?: string; message?: string };
+  const res = await h.run("proactive_reclaim", { reason: "x" }) as { code?: string; message?: string };
   assert.equal(res.code, "invalid_action");
   assert.ok(String(res.message).includes("only available during an active dsh-proactive wake"));
   assert.equal(h.concluded(), false); // did NOT conclude the turn

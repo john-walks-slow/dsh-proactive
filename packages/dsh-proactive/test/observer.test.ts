@@ -71,7 +71,7 @@ test("reasoning summary is truncated while reply stays short", () => {
   const events: MinimalEvent[] = [
     turnStart(),
     assistantBlocks([{ type: "reasoning", text: longReasoning }, { type: "text", text: "好的" }]),
-    toolCall("proactive_silence"),
+    toolCall("proactive_reclaim"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -81,11 +81,11 @@ test("reasoning summary is truncated while reply stays short", () => {
   assert.ok(analysis.reasoningSummary!.endsWith("…"));
 });
 
-test("proactive_silence turns with reasoning still expose the thinking summary", () => {
+test("proactive_reclaim turns with reasoning still expose the thinking summary", () => {
   const events: MinimalEvent[] = [
     turnStart(),
     assistantBlocks([{ type: "reasoning", text: "这个提醒昨天已经处理过，静默收尾。" }]),
-    toolCall("proactive_silence"),
+    toolCall("proactive_reclaim"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -96,8 +96,8 @@ test("proactive_silence turns with reasoning still expose the thinking summary",
   assert.equal(analysis.replySummary, undefined);
 });
 
-test("proactive_silence with no text is deep silence (free, compactable)", () => {
-  const events: MinimalEvent[] = [turnStart(), toolCall("proactive_silence"), turnEnd()];
+test("proactive_reclaim with no text is deep silence (free, compactable)", () => {
+  const events: MinimalEvent[] = [turnStart(), toolCall("proactive_reclaim"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.budgetDelta, 0);
@@ -105,8 +105,8 @@ test("proactive_silence with no text is deep silence (free, compactable)", () =>
 });
 
 test("a host 'no_reply' silence keeps the work in context (not compactable)", () => {
-  // Compaction is explicit opt-in: only proactive_silence reclaims. A
-  // "no_reply" tool call (e.g. dsh-im's) — like any non-proactive_silence
+  // Compaction is explicit opt-in: only proactive_reclaim reclaims. A
+  // "no_reply" tool call (e.g. dsh-im's) — like any non-proactive_reclaim
   // silence — keeps the exchange on the model surface.
   const events: MinimalEvent[] = [turnStart(), toolCall("no_reply"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
@@ -115,16 +115,16 @@ test("a host 'no_reply' silence keeps the work in context (not compactable)", ()
   assert.equal(analysis.compactable, false);
 });
 
-test("calling both proactive_silence and no_reply reclaims (compactable)", () => {
-  // If the model called both, proactive_silence wins — the turn is reclaimed.
-  const events: MinimalEvent[] = [turnStart(), toolCall("no_reply"), toolCall("proactive_silence"), turnEnd()];
+test("calling both proactive_reclaim and no_reply reclaims (compactable)", () => {
+  // If the model called both, proactive_reclaim wins — the turn is reclaimed.
+  const events: MinimalEvent[] = [turnStart(), toolCall("no_reply"), toolCall("proactive_reclaim"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.compactable, true);
 });
 
-test("proactive_silence after stray text is an ordinary reply without a leak note", () => {
-  const events: MinimalEvent[] = [turnStart(), assistantText("wait, let me tell you something"), toolCall("proactive_silence"), turnEnd()];
+test("proactive_reclaim after stray text is an ordinary reply without a leak note", () => {
+  const events: MinimalEvent[] = [turnStart(), assistantText("wait, let me tell you something"), toolCall("proactive_reclaim"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "reply");
   assert.equal(analysis.budgetDelta, 1);
@@ -163,7 +163,7 @@ test("completed reason with no output is a clean silent turn (implicit, NOT comp
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.budgetDelta, 0);
-  assert.equal(analysis.compactable, false); // implicit silence needs an explicit proactive_silence to reclaim
+  assert.equal(analysis.compactable, false); // implicit silence needs an explicit proactive_reclaim to reclaim
 });
 
 test("analysis skips earlier unrelated events from the slice", () => {
@@ -183,7 +183,7 @@ test("slice anchors on the framing notice, ignoring a pending pre-wake turn", ()
     turnEnd(),
     turnStart(1),
     framing,
-    toolCall("proactive_silence"),
+    toolCall("proactive_reclaim"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -196,7 +196,7 @@ test("compaction tombstones are never mistaken for a fresh framing notice", () =
     tombstone,
     turnStart(1),
     framing,
-    toolCall("proactive_silence"),
+    toolCall("proactive_reclaim"),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -229,7 +229,7 @@ test("raced user turn with text after a SILENT wake is NOT judged (no mischarge,
   const events: MinimalEvent[] = [
     turnStart(1),
     framing,
-    toolCall("proactive_silence"),
+    toolCall("proactive_reclaim"),
     turnEnd(),
     turnStart(2),
     assistantText("这是竞态用户回合的回复，不属于唤醒"),
@@ -240,10 +240,10 @@ test("raced user turn with text after a SILENT wake is NOT judged (no mischarge,
   assert.equal(analysis.budgetDelta, 0);
 });
 
-test("proactive_silence reason is extracted from the tool/call arguments", () => {
+test("proactive_reclaim reason is extracted from the tool/call arguments", () => {
   const events: MinimalEvent[] = [
     turnStart(),
-    toolCallWithArgs("proactive_silence", { reason: "用户已离线，无需打扰" }),
+    toolCallWithArgs("proactive_reclaim", { reason: "用户已离线，无需打扰" }),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -251,11 +251,11 @@ test("proactive_silence reason is extracted from the tool/call arguments", () =>
   assert.equal(analysis.noReplyReason, "用户已离线，无需打扰");
 });
 
-test("proactive_silence reason is truncated to the run-history limit", () => {
+test("proactive_reclaim reason is truncated to the run-history limit", () => {
   const longReason = "理由".repeat(RUN_SUMMARY_MAX_LENGTH + 40);
   const events: MinimalEvent[] = [
     turnStart(),
-    toolCallWithArgs("proactive_silence", { reason: longReason }),
+    toolCallWithArgs("proactive_reclaim", { reason: longReason }),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);
@@ -264,17 +264,17 @@ test("proactive_silence reason is truncated to the run-history limit", () => {
   assert.ok(analysis.noReplyReason!.endsWith("…"));
 });
 
-test("proactive_silence without a reason argument yields undefined noReplyReason", () => {
-  const events: MinimalEvent[] = [turnStart(), toolCall("proactive_silence"), turnEnd()];
+test("proactive_reclaim without a reason argument yields undefined noReplyReason", () => {
+  const events: MinimalEvent[] = [turnStart(), toolCall("proactive_reclaim"), turnEnd()];
   const analysis = analyzeWakeTurn(events, 0);
   assert.equal(analysis.decision, "no_reply");
   assert.equal(analysis.noReplyReason, undefined);
 });
 
-test("malformed proactive_silence arguments JSON yields undefined noReplyReason", () => {
+test("malformed proactive_reclaim arguments JSON yields undefined noReplyReason", () => {
   const events: MinimalEvent[] = [
     turnStart(),
-    ev("tool/call", { turn: 1, step: 1, callId: "c1", name: "proactive_silence", arguments: "{not json" }),
+    ev("tool/call", { turn: 1, step: 1, callId: "c1", name: "proactive_reclaim", arguments: "{not json" }),
     turnEnd()
   ];
   const analysis = analyzeWakeTurn(events, 0);

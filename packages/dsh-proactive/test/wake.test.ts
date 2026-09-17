@@ -47,7 +47,7 @@ function makeFakeAgent(rec: FakeRecording, opts: { busy?: boolean; failWhenIdle?
       rec.messages.push({ message });
       rec.activeDuringFollowup = true; // driver must still count this wake as active
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => {
@@ -124,7 +124,7 @@ test("cold wake resumes the session, frames the message, and can be silent", asy
     assert.equal(h.rec.messages.length, 1);
     const text = extractText(h.rec.messages[0].message);
     assert.ok(text.startsWith("[dsh-proactive wake cold1 once cold]"), "v3 minimal header expected, got: " + text.slice(0, 60));
-    assert.ok(text.includes("proactive_silence(reason) as your ONLY action"));
+    assert.ok(text.includes("proactive_reclaim(reason) as your ONLY action"));
     assert.ok(text.includes("进水提醒"));
     assert.equal(h.driver.isActiveWake("s1"), false); // cleared after the wake
   } finally {
@@ -540,7 +540,7 @@ function makeWakeAgent(header: EpochHeader) {
     session: { id: "s1", events, requestHeader: () => header },
     followup: () => {
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
@@ -591,11 +591,11 @@ test("silent wake collapses on the model surface after the turn settles", async 
         turn: 1,
         step: 1,
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_silence", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
       }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
@@ -650,11 +650,11 @@ test("silent wake is NOT compacted when silentWakeCompaction is off", async () =
         turn: 1,
         step: 1,
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_silence", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
       }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
@@ -687,7 +687,7 @@ test("silent wake is NOT compacted when silentWakeCompaction is off", async () =
 });
 
 test("a host 'no_reply' silence keeps the work in context (NOT compacted, even with the gate on)", async () => {
-  // Compaction is explicit opt-in: only proactive_silence reclaims. A
+  // Compaction is explicit opt-in: only proactive_reclaim reclaims. A
   // "no_reply" tool silence (e.g. dsh-im's) keeps the exchange on the surface
   // even with silentWakeCompaction on.
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
@@ -744,7 +744,7 @@ test("a host 'no_reply' silence keeps the work in context (NOT compacted, even w
   }
 });
 
-test("an implicit silence (no tool, no text) is NOT compacted — reclaim needs an explicit proactive_silence", async () => {
+test("an implicit silence (no tool, no text) is NOT compacted — reclaim needs an explicit proactive_reclaim", async () => {
   // The model just ended the turn with no output and no tool call. Even with
   // silentWakeCompaction on, nothing is erased without the model's explicit
   // reclaim assertion.
@@ -903,11 +903,11 @@ test("raced user turn with text does not block compaction of a SILENT wake", asy
         turn: 1,
         step: 1,
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_silence", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
       }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_silence", arguments: "{}" });
+      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,

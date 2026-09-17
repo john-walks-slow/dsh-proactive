@@ -6,7 +6,7 @@
  *   proactive_list      view this session's active alarms (all=true: every session's)
  *   proactive_cancel    cancel one active alarm by exact id — any owner
  *   proactive_update    replace one active alarm's spec by exact id — any owner
- *   proactive_silence    conclude a dsh-proactive wake in deep silence (reclaim the turn)
+ *   proactive_reclaim    nothing to do this wake turn: end it and let the host reclaim the exchange
  *   proactive_update_settings  partially update host-level settings (only the given fields)
  *
  * The stores they touch are host-level (the plugin singleton), so they work
@@ -204,7 +204,7 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   target_provider: { type: "string", description: "LLM provider for the wake turn, for target_mode new only (e.g. 'deepseek'). Both target_provider and target_model must be given together to win outright; a partial pair only fills the missing side of the fallback chain." },
   target_model: { type: "string", description: "LLM model id for the wake turn, for target_mode new only. Must be a real model id on the chosen provider." },
   time_zone: { type: "string", description: "IANA Area/Location used for at/cron/quiet-hours alignment (default UTC)." },
-  compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the proactive_silence reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
+  compaction: { type: "string", enum: ["off", "minimal", "aggressive"], description: "Per-alarm silent-wake surface compaction. off = keep the full wake exchange on the model surface; minimal (default) = tombstone keeps the proactive_reclaim reason, erases assistant reasoning and tool results; aggressive = tombstone with id+time only. Default minimal." }
 };
 
 /** Build the six tool definitions bound to one agent + its host services. */
@@ -411,8 +411,8 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
         }),
 
         defineTool({
-          name: "proactive_silence",
-          description: "Conclude the current dsh-proactive wake in deep silence: call it as your ONLY action with no chat text when there is nothing to do this turn — the whole wake exchange is collapsed off the model surface (reclaimed). Only available during an active dsh-proactive wake. If you did work but no user-facing message is needed, end the turn with no chat text instead (a no-reply tool, if one is available on this host, may also work); proactive_silence is for when the entire wake turn should be reclaimed. Any chat text already committed before this call still counts toward the daily budget.",
+          name: "proactive_reclaim",
+          description: "Nothing to do this dsh-proactive wake turn? Call proactive_reclaim as your ONLY action with no chat text — the host reclaims the entire wake exchange, collapsing it off the model surface. Only available during an active dsh-proactive wake. If you did work but no user-facing message is needed, end the turn with no chat text instead, or use a no-reply tool if one is available on this host — that keeps your work in context. Any chat text already committed before this call still counts toward the daily budget.",
           parameters: {
             reason: { type: "string", description: "Short internal reason, at most " + MAX_NO_REPLY_REASON_LENGTH + " characters. Recorded in the run history and the compaction tombstone." }
           },
@@ -427,7 +427,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             // so the model can end with no text, or use a no-reply tool if
             // one is available — no hard coupling to any other plugin.
             if (!services.driver.isActiveWake(agent.session.id)) {
-              return { code: "invalid_action", message: "proactive_silence is only available during an active dsh-proactive wake. To stay silent in an ordinary turn, produce no chat text, or use a no-reply tool if one is available." } as ToolError;
+              return { code: "invalid_action", message: "proactive_reclaim is only available during an active dsh-proactive wake. To stay silent in an ordinary turn, produce no chat text, or use a no-reply tool if one is available." } as ToolError;
             }
             const reason = typeof args["reason"] === "string" ? args["reason"] : "";
             if (reason.length > MAX_NO_REPLY_REASON_LENGTH) {
@@ -436,7 +436,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             exec.concludeTurn();
             return { accepted: true, silent: true };
           },
-          presentCall: (callArgs) => presentCard("Silent wake acknowledgment", String((callArgs as { reason?: unknown })["reason"] ?? ""))
+          presentCall: (callArgs) => presentCard("Wake reclaimed (silent)", String((callArgs as { reason?: unknown })["reason"] ?? ""))
         }),
 
         defineTool({
