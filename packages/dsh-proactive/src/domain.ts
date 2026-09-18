@@ -25,6 +25,8 @@ export const DEFAULT_COMPACTION: AlarmCompaction = "minimal";
 export const COMPACTION_MODES: readonly string[] = ["off", "minimal", "aggressive"];
 /** Upper bound for the per-occurrence random delay (24h). */
 export const MAX_JITTER_SECONDS = 86400;
+/** Hard ceiling for min_idle_seconds: one day. */
+export const MAX_MIN_IDLE_SECONDS = 86400;
 
 /**
  * The repo default wake-up instruction: pre-filled into the GUI create form
@@ -187,6 +189,8 @@ export interface Alarm {
   lastRunAt: string | null;
   /** Per-alarm silent-wake surface compaction policy; absent = DEFAULT_COMPACTION (legacy records). */
   compaction?: AlarmCompaction;
+  /** Resume targets only: deliver the wake only after the destination session has been idle at least this many seconds; absent/0 = off. */
+  minIdleSeconds?: number;
   /** Present only for alarms synced from a declared-schedule file; the file is their source of truth. */
   declared?: DeclaredSource;
 }
@@ -235,6 +239,8 @@ export type AlarmView = {
   deliveryMode: "host";
   /** Per-alarm silent-wake surface compaction policy. */
   compaction: AlarmCompaction;
+  /** Resume targets only: minimum destination idle span in seconds before delivery; present only when > 0. */
+  minIdleSeconds?: number;
   /** Unified per-occurrence random delay in seconds; present only when > 0. */
   jitterSeconds?: number;
   everySeconds?: number;
@@ -521,6 +527,14 @@ export function validateJitterSeconds(raw: unknown): number {
   return raw;
 }
 
+/** Validate the min-idle knob: integer seconds 0..MAX_MIN_IDLE_SECONDS (0 = off). */
+export function validateMinIdleSeconds(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0 || raw > MAX_MIN_IDLE_SECONDS) {
+    throw new ProactiveInputError("invalid_trigger", "min_idle_seconds must be an integer in 0..{max}.".replace("{max}", String(MAX_MIN_IDLE_SECONDS)));
+  }
+  return raw;
+}
+
 /** One random delay in milliseconds for jitter_seconds; 0 when the knob is absent/zero. */
 export function jitterDelay(jitterSeconds: number | undefined, random: RandomSource = Math.random): number {
   if (jitterSeconds === undefined || jitterSeconds <= 0) return 0;
@@ -591,6 +605,7 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
     state: overdue ? "overdue" : alarm.status,
     deliveryMode: "host",
     compaction: alarm.compaction ?? DEFAULT_COMPACTION,
+    ...(alarm.minIdleSeconds !== undefined && alarm.minIdleSeconds > 0 ? { minIdleSeconds: alarm.minIdleSeconds } : {}),
     ...(alarm.type === "every" && "everySeconds" in alarm.trigger
       ? { everySeconds: alarm.trigger["everySeconds"], ...(typeof alarm.trigger["jitterSeconds"] === "number" && alarm.trigger["jitterSeconds"] > 0 ? { jitterSeconds: alarm.trigger["jitterSeconds"] } : {}) }
       : {}),

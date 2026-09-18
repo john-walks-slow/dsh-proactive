@@ -197,6 +197,11 @@ test("toAlarmView v2: every carries interval + jitter, new targets carry no targ
   const bare: Alarm = { ...every, trigger: { everySeconds: 3600, anchor: "2026-09-01T00:00:00.000Z" } };
   assert.equal(toAlarmView(bare, nowMs).jitterSeconds, undefined);
 
+  // minIdleSeconds surfaces only when > 0 (absent/0 = off, legacy records).
+  assert.equal(toAlarmView(v2Alarm(), nowMs).minIdleSeconds, undefined);
+  assert.equal(toAlarmView(v2Alarm({ minIdleSeconds: 0 }), nowMs).minIdleSeconds, undefined);
+  assert.equal(toAlarmView(v2Alarm({ minIdleSeconds: 600 }), nowMs).minIdleSeconds, 600);
+
   const forkView = toAlarmView(v2Alarm({ target: { mode: "fork", sessionId: "sParent" } }), nowMs);
   assert.equal(forkView.targetMode, "fork");
   assert.equal(forkView.targetSessionId, "sParent");

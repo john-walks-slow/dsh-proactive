@@ -45,6 +45,7 @@ export interface AlarmRowDto {
   deliveryMode: string;
   compaction: "off" | "minimal" | "aggressive";
   jitterSeconds?: number;
+  minIdleSeconds?: number;
   everySeconds?: number;
   cron?: string;
   at?: string;

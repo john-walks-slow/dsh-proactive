@@ -47,6 +47,7 @@ export interface AlarmRow {
   state: string;
   compaction: "off" | "minimal" | "aggressive";
   jitterSeconds?: number;
+  minIdleSeconds?: number;
   everySeconds?: number;
   cron?: string;
   at?: string;
@@ -576,6 +577,16 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
             </label>
           </label>
         </div>
+        <div className="dshp-field">
+          <label className="dshp-field-label">{copy.minIdleSeconds}</label>
+          <input className="dshp-input" type="number" min={0} max={86400} step={1} value={form.minIdleSeconds ?? 0}
+            placeholder={copy.minIdlePlaceholder}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              setForm({ ...form, minIdleSeconds: Number.isFinite(value) ? Math.max(0, Math.min(86400, Math.floor(value))) : 0 });
+            }} />
+          <div className="dshp-cell-dim">{copy.minIdleHint}</div>
+        </div>
         <div className="dshp-field-row">
           <div className="dshp-field" style={{ flex: 1, minWidth: 150 }}>
             <label className="dshp-field-label">{copy.target}</label>
@@ -747,6 +758,7 @@ export function formFromAlarm(alarm: AlarmRow): PanelCreateForm {
     kind: alarm.type === "every" ? "every" : alarm.type === "cron" ? "cron" : "once",
     respectQuietHours: alarm.respectQuietHours,
     compaction: alarm.compaction,
+    ...(alarm.minIdleSeconds !== undefined && alarm.minIdleSeconds > 0 ? { minIdleSeconds: alarm.minIdleSeconds } : {}),
     targetMode: mode,
     ...(mode !== "new" ? { targetSource: source } : {}),
     ...(mode !== "new" && source === "session" && alarm.targetSessionId !== undefined && alarm.targetSessionId !== "" ? { targetSessionId: alarm.targetSessionId } : {}),

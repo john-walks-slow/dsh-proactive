@@ -101,6 +101,9 @@ export interface ProactivePanelCopy {
   jitterSeconds: string;
   jitterPlaceholder: string;
   jitterEveryHint: string;
+  minIdleSeconds: string;
+  minIdlePlaceholder: string;
+  minIdleHint: string;
   respectQuietHours: string;
   quietHint: string;
   targetSessionId: string;
@@ -226,8 +229,11 @@ export const zh: ProactivePanelCopy = {
   jitterSeconds: "随机抖动（秒）",
   jitterPlaceholder: "0 = 准时触发",
   jitterEveryHint: "建议 ≤ 间隔秒数",
+  minIdleSeconds: "唤醒前会话需静默（秒）",
+  minIdlePlaceholder: "0 = 到点即唤醒",
+  minIdleHint: "仅 resume 目标：目标会话最近一次活动（含上次唤醒）距今不足该秒数时顺延唤醒；有效下限 60 秒（每分钟最多复查一次），<60 效果同 60；冷会话视为已静默；fork/new 忽略",
   respectQuietHours: "遵从免打扰时段",
-  quietHint: "不勾选 = 你明确要求：免打扰时段也照常触发，且不受每日预算限制",
+  quietHint: "不勾选 = 你明确要求：免打扰时段也照常触发，且不受每日预算限制；勾选 = 安静时段内的触发会被跳过，推进到窗外下一个触发点",
   targetSessionId: "目标会话 ID",
   forkSourceSessionId: "分支源会话 ID",
   targetSessionPlaceholder: "如 session-…（默认当前会话）",
@@ -348,8 +354,11 @@ export const en: ProactivePanelCopy = {
   jitterSeconds: "Jitter seconds",
   jitterPlaceholder: "0 = exact",
   jitterEveryHint: "should be ≤ interval",
+  minIdleSeconds: "Min destination idle (seconds)",
+  minIdlePlaceholder: "0 = wake on schedule",
+  minIdleHint: "Resume targets only: the wake defers while the destination's latest activity (including earlier wakes) is closer than this; effective floor 60s (re-checked at most once a minute, so <60 behaves as 60); cold sessions count as idle; ignored for fork/new",
   respectQuietHours: "Respect quiet hours",
-  quietHint: "Unchecked = your explicit request: fires even in quiet hours, exempt from the daily budget",
+  quietHint: "Unchecked = your explicit request: fires even in quiet hours, exempt from the daily budget; checked = occurrences inside quiet hours are skipped and repeating alarms advance past the window",
   targetSessionId: "Target session ID",
   forkSourceSessionId: "Fork source session ID",
   targetSessionPlaceholder: "e.g. session-… (defaults to the current session)",

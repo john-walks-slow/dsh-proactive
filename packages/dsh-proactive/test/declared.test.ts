@@ -390,3 +390,49 @@ test("tools: a regular alarm is unaffected by the declared guard", async () => {
     cleanup();
   }
 });
+
+test("sync: min_idle_seconds flows from file defaults and entries into the alarm", async () => {
+  const { scheduleFile, cleanup } = scratch();
+  try {
+    writeFileSync(scheduleFile, JSON.stringify({
+      version: 1,
+      min_idle_seconds: 300,
+      entries: [
+        { id: "entry-wins", every_seconds: 3600, prompt: "loop", min_idle_seconds: 600, target: { workspace_id: "ws-yu" } },
+        { id: "default", every_seconds: 3600, prompt: "loop", target: { workspace_id: "ws-yu" } }
+      ]
+    }), "utf8");
+    const store = new SyncStore();
+    const deps = makeDeps(scheduleFile, store);
+    const summary = await syncDeclaredSchedules(deps);
+    assert.equal(summary.created, 2);
+    const byEntry = new Map(store.alarms.map((alarm) => [alarm.declared?.entry, alarm]));
+    assert.equal(byEntry.get("entry-wins")?.minIdleSeconds, 600); // entry override wins
+    assert.equal(byEntry.get("default")?.minIdleSeconds, 300); // file-level default
+  } finally {
+    cleanup();
+  }
+});
+
+test("sync: unchanged hash never rewrites a deferred nextDueAt (min-idle defer survives polling)", async () => {
+  const { scheduleFile, cleanup } = scratch();
+  try {
+    writeFileSync(scheduleFile, JSON.stringify({
+      version: 1,
+      entries: [{ id: "e", every_seconds: 3600, prompt: "loop", min_idle_seconds: 600, target: { workspace_id: "ws-yu" } }]
+    }), "utf8");
+    const store = new SyncStore();
+    const deps = makeDeps(scheduleFile, store);
+    const first = await syncDeclaredSchedules(deps);
+    assert.equal(first.created, 1);
+    // Simulate the scheduler's min-idle deferral sliding nextDueAt forward.
+    const deferred = new Date(NOW + 7 * 60_000).toISOString();
+    store.alarms[0].nextDueAt = deferred;
+    const second = await syncDeclaredSchedules(deps);
+    assert.equal(second.created + second.updated + second.removed, 0);
+    assert.equal(second.mutated, false);
+    assert.equal(store.alarms[0].nextDueAt, deferred, "the sync must not clobber deferral state");
+  } finally {
+    cleanup();
+  }
+});

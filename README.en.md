@@ -13,13 +13,14 @@ Let the DeepSeek Harness (DSH) model **follow up proactively**: the model schedu
 ## What you will see
 
 - **Scheduled reminders**: when an alarm fires, the session wakes and the model produces a normal chat reply per the alarm's instruction, delivered through DSH's regular delivery rules (sessions connected to an IM private chat get it delivered there; web sessions show it inline).
-- **Silent heartbeats**: when nothing is worth bothering the user, the model calls `proactive_silence` and ends silently — no visible message is produced, and the whole wake exchange is folded into a small tombstone on the model surface (`[dsh-proactive silent wake <id> <time>]`) so it never pollutes long context.
+- **Silent heartbeats**: when nothing is worth bothering the user, the model calls `proactive_reclaim` and ends silently — no visible message is produced, and the whole wake exchange is folded into a small tombstone on the model surface (`[dsh-proactive silent wake <id> <time>]`) so it never pollutes long context.
 - **Web management panel**: a "Proactive wake-ups" section appears in settings (global config plus an alarm table across all sessions), and every session page gains a "Proactive wake-ups" tab (this session's alarms and wake history), refreshed live via SSE.
 
 ## Alarm model
 
 - **Three types**: `once` / `every` (recurring interval) / `cron` (five-field expression), all with optional `jitter_seconds` random delay.
-- **One switch**: `respect_quiet_hours` — `false` (default) means a user-delegated reminder: it fires inside quiet hours and does not count against the daily budget; `true` means model-initiated follow-up: it respects quiet hours and the daily delivery budget.
+- **One switch**: `respect_quiet_hours` — `false` (default) means a user-delegated reminder: it fires inside quiet hours and does not count against the daily budget; `true` means model-initiated follow-up: occurrences due inside the quiet window are skipped, not postponed, and the daily delivery budget applies.
+- **One idle gate**: `min_idle_seconds` — resume targets can require the destination session to be idle for N seconds before the wake lands (activity defers it; cold sessions count as idle).
 - **Three targets**: `resume` (existing session, default) / `fork` (branch from the source session) / `new` (fresh empty session).
 
 ## Install
@@ -44,7 +45,7 @@ Full configuration, the GUI panel, the tool list, and behavior details live in [
 ## Permissions & compatibility
 
 - **Scheduled wake-ups**: the plugin runs a scheduler on the host side (single re-armed timer) and wakes the target session for one turn when an alarm is due; alarms are restored from `$DSH_HOME/proactive/` after a service restart.
-- **Notification channels**: no push service, no external integrations — visible replies from wake turns go through DSH's normal message delivery; `proactive_silence` turns deliver nothing.
+- **Notification channels**: no push service, no external integrations — visible replies from wake turns go through DSH's normal message delivery; `proactive_reclaim` turns deliver nothing.
 - **Network requests**: the plugin itself makes no external network requests; the panel's HTTP/SSE routes (`/api/dsh-proactive/*`) are served only by the local dsh webserver; wake turns call the LLM gateway the user has already configured, through dsh as usual.
 - **File writes**: only `$DSH_HOME/proactive/` (alarms.json / runs.jsonl / state.json / config.json).
 

@@ -73,7 +73,7 @@ function harness(extra: Partial<ToolServices> = {}) {
 }
 
 const code = (v: unknown): string | undefined => (v as { code?: string })["code"];
-const asView = (v: unknown) => v as { id?: string; type?: string; targetMode?: string; targetSessionId?: string; respectQuietHours?: boolean; state?: string; everySeconds?: number; cron?: string; at?: string; nextDueAt?: string; jitterSeconds?: number; compaction?: string; prompt?: string; timeZone?: string; targetWorkspaceId?: string };
+const asView = (v: unknown) => v as { id?: string; type?: string; targetMode?: string; targetSessionId?: string; respectQuietHours?: boolean; state?: string; everySeconds?: number; cron?: string; at?: string; nextDueAt?: string; jitterSeconds?: number; minIdleSeconds?: number; compaction?: string; prompt?: string; timeZone?: string; targetWorkspaceId?: string };
 
 function v2Fixture(id: string, owner: string, status: Alarm["status"] = "scheduled"): Alarm {
   return {
@@ -223,6 +223,22 @@ test("proactive_set respect_quiet_hours defaults to false and persists", async (
   // non-boolean is gated by the tool schema, not the domain validator
   await assert.rejects(h.run("proactive_set", { prompt: "x", after_seconds: 5, respect_quiet_hours: "yes" }),
     (err: unknown) => (err as { code?: string })["code"] === "INVALID_ARGS");
+});
+
+test("proactive_set min_idle_seconds round-trips; out-of-range is closed-gated", async () => {
+  const h = harness();
+  const view = asView(await h.run("proactive_set", { prompt: "x", after_seconds: 5, min_idle_seconds: 600 }));
+  assert.equal(view.minIdleSeconds, 600);
+  assert.equal(code(await h.run("proactive_set", { prompt: "x", after_seconds: 5, min_idle_seconds: -1 })), "invalid_trigger");
+  assert.equal(code(await h.run("proactive_set", { prompt: "x", after_seconds: 5, min_idle_seconds: 86401 })), "invalid_trigger");
+  // non-integer is gated by the tool schema
+  await assert.rejects(h.run("proactive_set", { prompt: "x", after_seconds: 5, min_idle_seconds: "soon" }),
+    (err: unknown) => (err as { code?: string })["code"] === "INVALID_ARGS");
+  // full-replace update dialect: 0 turns the gate off (absent from the view)
+  const off = asView(await h.run("proactive_update", { id: view.id, prompt: "x", after_seconds: 5, min_idle_seconds: 0 }));
+  assert.equal(off.minIdleSeconds, undefined);
+  const edited = asView(await h.run("proactive_update", { id: view.id, prompt: "x", after_seconds: 5, min_idle_seconds: 60 }));
+  assert.equal(edited.minIdleSeconds, 60);
 });
 
 test("proactive_set creates once/every/cron alarms end to end", async () => {

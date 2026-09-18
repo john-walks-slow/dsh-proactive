@@ -61,9 +61,10 @@ async function rmSyncSafe(dir: string, maxAttempts = 20): Promise<void> {
 }
 
 interface Outcome {
-  outcome: "ok" | "busy" | "failed" | "skipped";
+  outcome: "ok" | "busy" | "failed" | "skipped" | "defer";
   sessionId?: string;
   skipReason?: string;
+  deferUntilMs?: number;
   analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string };
 }
 
@@ -318,19 +319,89 @@ test("visible reply outcome spends budget", async (tctx) => {
   assert.equal(h.store.budgetFor("2026-09-01"), 1);
 });
 
-test("quiet hours defer quiet-respecting alarms; user-requested alarms are exempt", async (tctx) => {
+test("quiet hours drop quiet-respecting once alarms; user-requested alarms are exempt", async (tctx) => {
   const h = await harness({ quietHours: { start: "00:00", end: "23:59", timeZone: "UTC" } });
   tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
   h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
   h.store.addAlarm(alarm("q1", { respectQuietHours: true }));
   h.store.addAlarm(alarm("q2", { respectQuietHours: false }));
   h.scheduler.start();
-  await h.flush(() => h.fired.length >= 1);
-  // quiet-respecting deferred, user-requested fired
+  await h.flush(() => h.fired.length >= 1 && h.store.getAlarm("q1")?.runCount === 1);
+  // the model-initiated alarm is dropped (no late re-delivery), the user-requested one fired
   assert.equal(h.fired.length, 1);
   assert.equal(h.fired[0]?.id, "q2");
-  assert.ok(Date.parse(h.store.getAlarm("q1")!.nextDueAt) > BASE_NOW);
-  assert.equal(h.store.getAlarm("q1")?.runCount, 0); // deferral records no run
+  assert.equal(h.store.getAlarm("q1")?.status, "completed");
+  assert.equal(h.store.getAlarm("q1")?.runCount, 1);
+  const runs = readFileSync(join(h.dir, "runs.jsonl"), "utf8");
+  assert.match(runs, /quiet hours: once alarm due inside the quiet window is dropped/);
+});
+
+test("quiet hours fast-forward a repeating alarm to the first anchor outside the window", async (tctx) => {
+  const h = await harness({ quietHours: { start: "09:00", end: "17:00", timeZone: "UTC" } });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  // BASE_NOW is 09:00Z (window start): occurrences 09:30..16:30 are inside,
+  // 17:00 is the first one outside (the window end is exclusive).
+  h.store.addAlarm(everyAlarm("ff1", 1800, "2026-09-01T08:00:00.000Z", undefined, { respectQuietHours: true, nextDueAt: "2026-09-01T09:00:00.000Z" }));
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("ff1")?.runCount === 1);
+  assert.equal(h.fired.length, 0, "no wake ran");
+  const row = h.store.getAlarm("ff1")!;
+  assert.equal(row.status, "scheduled");
+  assert.equal(row.nextDueAt, "2026-09-01T17:00:00.000Z");
+  assert.equal(row.runCount, 1, "the dropped occurrence is consumed");
+  assert.equal(row.lastRunAt, "2026-09-01T09:00:00.000Z"); // the dropped instant
+  const rows = await h.store.listRecentRuns(10);
+  assert.equal(rows.length, 1, "one skipped run per window entry, not per occurrence");
+  assert.match(rows[0]!.note ?? "", /quiet hours: skipped 15 occurrences/);
+});
+
+test("quiet hours fast-forward a cron alarm across the window", async (tctx) => {
+  const h = await harness({ quietHours: { start: "09:00", end: "17:00", timeZone: "UTC" } });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.store.addAlarm(alarm("ff2", {
+    type: "cron",
+    trigger: { expr: "*/15 * * * *" },
+    respectQuietHours: true,
+    nextDueAt: "2026-09-01T09:00:00.000Z"
+  }));
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("ff2")?.runCount === 1);
+  const row = h.store.getAlarm("ff2")!;
+  assert.equal(row.status, "scheduled");
+  assert.equal(row.nextDueAt, "2026-09-01T17:00:00.000Z"); // 09:15..16:45 are inside (31 occurrences)
+  assert.equal(row.runCount, 1, "the dropped occurrence is consumed");
+  const rows = await h.store.listRecentRuns(10);
+  assert.match(rows[0]!.note ?? "", /skipped 31 occurrences/);
+});
+
+test("an occurrence exactly at the quiet window end fires normally", async (tctx) => {
+  const h = await harness({ quietHours: { start: "08:00", end: "09:00", timeZone: "UTC" } });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
+  h.store.addAlarm(alarm("edge1", { respectQuietHours: true, nextDueAt: "2026-09-01T09:00:00.000Z" }));
+  h.scheduler.start();
+  await h.flush(() => h.fired.length >= 1);
+  assert.equal(h.fired[0]?.id, "edge1"); // 09:00 is outside (end exclusive)
+  assert.equal(h.store.getAlarm("edge1")?.status, "completed");
+});
+
+test("defer outcome re-arms at the driver's absolute time without recording", async (tctx) => {
+  const h = await harness();
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.outcomes.push({ outcome: "defer", deferUntilMs: BASE_NOW + 120_000 });
+  h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
+  h.store.addAlarm(alarm("d1"));
+  h.scheduler.start();
+  await h.flush(() => Date.parse(h.store.getAlarm("d1")!.nextDueAt) === BASE_NOW + 120_000);
+  assert.equal(h.fired.length, 1);
+  assert.equal(h.store.getAlarm("d1")?.status, "scheduled");
+  assert.equal(h.store.getAlarm("d1")?.runCount, 0, "deferral records no run");
+  assert.equal((await h.store.listRecentRuns(10)).length, 0);
+  // after the defer elapses, the wake runs and completes normally
+  h.clock.t = BASE_NOW + 121_000;
+  h.scheduler.requestDrive();
+  await h.flush(() => h.store.getAlarm("d1")?.status === "completed");
+  assert.equal(h.store.getAlarm("d1")?.runCount, 1);
 });
 
 test("daily budget gate skips quiet-respecting wakes at the cap", async (tctx) => {

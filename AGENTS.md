@@ -9,6 +9,7 @@
 - `packages/dsh-proactive/` — 插件源码（cordis 4 函数插件；TypeScript + node:test）
 - `docs/features/260829-dsh-proactive/` — 特性文档（research/plan/summary/validation/review）
 - `docs/features/260918-declared-schedules/` — 声明式闹钟文件（scheduleFiles glob → 条目幂等同步；world master `.life/wake_schedule.json` 对接，见 plan.md）
+- `docs/features/260918-quiet-drop-min-idle/` — 安静时段直跳 + `min_idle_seconds` 静默门（respect=true 窗内 occurrence 丢弃快进；defer-until-idle，见 plan.md）
 - 参考实现（只读）：`/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/` 下的 dsh-schedule、dsh-tools、dsh-agent、dsh-llm、dsh-session 等
 
 ## 开发与调试

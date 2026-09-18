@@ -3,8 +3,10 @@
  *
  * One serialized drive loop owns all firing decisions:
  *   - due detection (nextDueAt <= now), boot overdue policy, quiet-hours
- *     gating, hourly wake cap, and daily budget gating for alarms that
- *     respect quiet hours;
+ *     gating (respect=true occurrences inside the window are DROPPED: once
+ *     alarms complete, repeating alarms fast-forward to the first anchor
+ *     outside the window), hourly wake cap, and daily budget gating for
+ *     alarms that respect quiet hours;
  *   - one alarm at a time through the WakeDriver, then advances its state
  *     from the analyzed outcome: once -> completed, every/cron -> next due;
  *   - bounded retries for busy/failed fires, coalesced re-arming.
@@ -14,11 +16,11 @@
  * scheduling an explicit deferral for busy/deferred outcomes.
  *
  * v2 (260907-proactive-alarm-v2): the alarm/heartbeat wake_reason split is
- * gone; `respectQuietHours` is a per-alarm switch. true = defer inside quiet
- * hours and gate by the daily budget; false = user-requested, quiet hours and
- * budget exempt. Formal gating order: quiet(+respect) -> hourly cap -> budget
- * (+respect) -> fire. every/cron jitter is pre-drawn into nextDueAt so this
- * loop never waits.
+ * gone; `respectQuietHours` is a per-alarm switch. true = occurrences inside
+ * quiet hours are skipped (no late re-delivery) and gated by the daily
+ * budget; false = user-requested, quiet hours and budget exempt. Formal
+ * gating order: quiet(+respect) -> hourly cap -> budget (+respect) -> fire.
+ * every/cron jitter is pre-drawn into nextDueAt so this loop never waits.
  */
 
 import type { Alarm, RunDecision } from "./domain.js";
@@ -31,10 +33,12 @@ import type { ProactiveStore } from "./store.js";
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const BUSY_RETRY_MS = 30_000;
 const QUIET_DEFER_MS = 5 * 60_000;
+/** Bound for the quiet-window fast-forward walk (pure math per iteration). */
+const QUIET_SKIP_MAX_ITERATIONS = 4096;
 
 /** Wake-driver outcomes the scheduler translates into alarm transitions. */
-export type WakeOutcome = "ok" | "busy" | "failed" | "skipped";
-export type FireResult = "completed" | "advanced" | "skipped" | "retry" | "failed";
+export type WakeOutcome = "ok" | "busy" | "failed" | "skipped" | "defer";
+export type FireResult = "completed" | "advanced" | "skipped" | "deferred" | "retry" | "failed";
 
 export interface SchedulerDeps {
   store: ProactiveStore;
@@ -43,7 +47,7 @@ export interface SchedulerDeps {
    * Runs one alarm through the agent world; returns ok + analysis + the session the wake actually ran in (fork/new children differ from the owner).
    * "skipped" = no eligible destination (nothing was woken): the reason rides along for the run record.
    */
-  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; skipReason?: string; analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
+  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; skipReason?: string; deferUntilMs?: number; analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
   now?: () => number;
   /** Uniform(0,1) source for jittered repeats; defaults to Math.random. */
   random?: () => number;
@@ -187,9 +191,7 @@ export class ProactiveScheduler {
   private async fireOne(alarm: Alarm, now: number): Promise<FireResult> {
     const quiet = isInQuietHours(now, this.config);
     if (quiet && alarm.respectQuietHours) {
-      // Defer to the (rare) end of quiet hours by re-probing in 5 minutes.
-      this.deflect(alarm, QUIET_DEFER_MS);
-      return "skipped";
+      return await this.skipPastQuiet(alarm, now);
     }
     if (this.hourlyCapHit(now)) {
       this.deflect(alarm, QUIET_DEFER_MS);
@@ -223,6 +225,10 @@ export class ProactiveScheduler {
         return "skipped";
       }
       return "retry";
+    }
+    if (result.outcome === "defer") {
+      this.deferWakeTo(alarm, result.deferUntilMs ?? this.now() + 1000);
+      return "deferred";
     }
     if (result.outcome === "failed") {
       this.bumpRetry(alarm);
@@ -360,6 +366,97 @@ export class ProactiveScheduler {
     };
     this.deps.store.replaceAlarm(updated);
     void this.deps.store.persist().catch(() => undefined);
+  }
+
+  /**
+   * Quiet-hours gate for alarms that respect it: the occurrence is dropped,
+   * not postponed — respect=true alarms are model-initiated, so a late
+   * re-delivery at window end would only pile up there. once -> completed
+   * with one skipped run; every/cron -> fast-forward to the first anchor
+   * outside the window (one skipped run per window entry), so a frequent
+   * alarm never spins the drive loop all night.
+   */
+  private async skipPastQuiet(alarm: Alarm, now: number): Promise<FireResult> {
+    if (alarm.type === "once") {
+      await this.recordSkip(alarm, "quiet hours: once alarm due inside the quiet window is dropped");
+      this.advancePast(alarm, now, "skipped");
+      return "skipped";
+    }
+    const next = this.nextAwakeOccurrence(alarm, now);
+    if (next === undefined) {
+      // Corrupt trigger: fail closed like advance() does instead of looping.
+      this.deps.log("warn", "alarm " + alarm.id + " has a corrupt " + alarm.type + " trigger; marking failed at the quiet-hours gate");
+      this.terminate(alarm, "failed", "corrupt trigger at the quiet-hours gate");
+      return "failed";
+    }
+    await this.recordSkip(alarm, "quiet hours: skipped " + next.skipped + " occurrence" + (next.skipped === 1 ? "" : "s") + " inside the quiet window");
+    const stamp = new Date(next.due).toISOString();
+    const trigger = isRecord(alarm.trigger) && "anchor" in alarm.trigger ? { ...alarm.trigger, anchor: stamp } : alarm.trigger;
+    // Consume the dropped occurrence like every other skip path does
+    // (advancePast): runCount +1, lastRunAt = the dropped instant.
+    this.deps.store.replaceAlarm({
+      ...alarm,
+      trigger,
+      status: "scheduled",
+      nextDueAt: stamp,
+      runCount: alarm.runCount + 1,
+      lastRunAt: new Date(now).toISOString(),
+      updatedAt: new Date(this.now()).toISOString()
+    });
+    void this.deps.store.persist().catch(() => undefined);
+    return "skipped";
+  }
+
+  /**
+   * First occurrence of a repeating alarm strictly after `from` that lies
+   * outside the quiet window, with the number of in-window occurrences
+   * consumed; undefined when the trigger is corrupt. Pure schedule math (no
+   * store writes), bounded so a pathological interval can never spin —
+   * hitting the bound returns the last in-window instant and the next drive
+   * pass continues skipping from there. Jitter keeps the same drift
+   * semantics as advance() (each candidate redraws; cron candidates drift
+   * off the minute grid the same way).
+   */
+  private nextAwakeOccurrence(alarm: Alarm, from: number): { due: number; skipped: number } | undefined {
+    const random = this.deps.random ?? Math.random;
+    const trigger = alarm.trigger;
+    if (!isRecord(trigger)) return undefined;
+    const jitterSeconds = typeof trigger["jitterSeconds"] === "number" && Number.isFinite(trigger["jitterSeconds"]) && trigger["jitterSeconds"] > 0 ? trigger["jitterSeconds"] : undefined;
+    let cursor = from;
+    let skipped = 0;
+    if (alarm.type === "every") {
+      const everySeconds = trigger["everySeconds"];
+      if (typeof everySeconds !== "number" || !Number.isSafeInteger(everySeconds)) return undefined;
+      while (skipped < QUIET_SKIP_MAX_ITERATIONS) {
+        cursor = nextDriftingOccurrence(cursor, everySeconds, this.now(), jitterSeconds, random);
+        if (!isInQuietHours(cursor, this.config)) return { due: cursor, skipped };
+        skipped += 1;
+      }
+      return { due: cursor, skipped };
+    }
+    const expr = trigger["expr"];
+    if (typeof expr !== "string") return undefined;
+    while (skipped < QUIET_SKIP_MAX_ITERATIONS) {
+      let base: number;
+      try {
+        base = nextCronOccurrence(expr, alarm.timeZone, cursor);
+      } catch {
+        return undefined;
+      }
+      cursor = base + (jitterSeconds === undefined ? 0 : Math.floor(random() * jitterSeconds * 1000));
+      if (!isInQuietHours(cursor, this.config)) return { due: cursor, skipped };
+      skipped += 1;
+    }
+    return { due: cursor, skipped };
+  }
+
+  /** Defer one due alarm to an absolute time without recording (min-idle gate). */
+  private deferWakeTo(alarm: Alarm, atMs: number): void {
+    const at = Math.max(atMs, this.now() + 1000);
+    const iso = new Date(at).toISOString();
+    this.deps.store.replaceAlarm({ ...alarm, status: "scheduled", nextDueAt: iso, updatedAt: new Date(this.now()).toISOString() });
+    void this.deps.store.persist().catch(() => undefined);
+    this.deps.log("info", "wake " + alarm.id + " deferred to " + iso + " (destination not idle long enough)");
   }
 
   private deferRetry(alarm: Alarm, delayMs: number): void {

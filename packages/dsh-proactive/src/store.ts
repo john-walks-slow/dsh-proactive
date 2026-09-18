@@ -111,6 +111,10 @@ function alarmIsValid(value: unknown): value is Alarm {
   // a present value must be a known mode so a typo never silently degrades.
   const compaction = value["compaction"];
   if (compaction !== undefined && (typeof compaction !== "string" || !COMPACTION_MODES.includes(compaction))) return false;
+  // minIdleSeconds is optional: absent/0 = off (legacy records); a present
+  // value must be a safe integer within the dialect's ceiling.
+  const minIdleSeconds = value["minIdleSeconds"];
+  if (minIdleSeconds !== undefined && (typeof minIdleSeconds !== "number" || !Number.isSafeInteger(minIdleSeconds) || minIdleSeconds < 0 || minIdleSeconds > 86400)) return false;
   // declared provenance is optional; a present value must carry the full
   // triple (file / entry / hash) so a partial record can never be mistaken
   // for a synced one.

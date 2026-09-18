@@ -40,11 +40,11 @@ export const MAX_MATCHED_FILES = 64;
 const MAX_WALKED_ENTRIES = 20_000;
 const MAX_WALK_DEPTH = 16;
 /** Keys a schedule file may carry at the top level (besides version/entries). */
-const FILE_DEFAULT_KEYS = ["time_zone", "respect_quiet_hours", "jitter_seconds", "compaction", "target"] as const;
+const FILE_DEFAULT_KEYS = ["time_zone", "respect_quiet_hours", "jitter_seconds", "compaction", "min_idle_seconds", "target"] as const;
 /** Keys one entry may carry (selectors + prompt + knobs + nested target). */
 const ENTRY_KEYS = [
   "id", "prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds",
-  "time_zone", "respect_quiet_hours", "compaction", "target"
+  "time_zone", "respect_quiet_hours", "compaction", "min_idle_seconds", "target"
 ] as const;
 /** Keys allowed inside a nested `target` object (mirrors the flat target_* dialect). */
 const TARGET_KEYS = ["mode", "workspace_path", "workspace_id", "session_id", "preset_id", "provider", "model"] as const;
@@ -277,7 +277,7 @@ export function parseScheduleFile(file: string, text: string): ParsedSchedule {
     if (bad) continue;
     // File-level scalar defaults first; the entry's own values win below.
     const args: Record<string, unknown> = {};
-    for (const key of ["time_zone", "respect_quiet_hours", "jitter_seconds", "compaction"]) {
+    for (const key of ["time_zone", "respect_quiet_hours", "jitter_seconds", "compaction", "min_idle_seconds"]) {
       if (rawDefaults[key] !== undefined) args[key] = rawDefaults[key];
     }
     let needsWorkspaceDefault = true;
@@ -295,7 +295,7 @@ export function parseScheduleFile(file: string, text: string): ParsedSchedule {
       Object.assign(args, fileTarget);
       needsWorkspaceDefault = false;
     }
-    for (const key of ["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "compaction"]) {
+    for (const key of ["prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds", "time_zone", "respect_quiet_hours", "compaction", "min_idle_seconds"]) {
       if (raw[key] !== undefined) args[key] = raw[key];
     }
     entries.push({ id: entryId, args, needsWorkspaceDefault });

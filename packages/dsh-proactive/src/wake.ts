@@ -65,6 +65,9 @@ import { isInQuietHours } from "./config.js";
 import { applyWakeCompaction, planWakeCompaction, type CompactEvent, type CompactSession } from "./compact.js";
 import { resolveSessionPresetOf, type PresetWakeDestination, type PresetWakePort, type WorkspaceWakeDestination, type WorkspaceWakePort } from "./workspace.js";
 
+/** Minimum spacing between min-idle re-checks, so a burst of activity cannot spin the scheduler. */
+const MIN_IDLE_RECHECK_MS = 60_000;
+
 // The session preset fold lives in workspace.ts (shared with the
 // preset-source session ranking); re-exported here so existing importers of
 // wake.js keep working.
@@ -87,7 +90,9 @@ export type WakeFireResult =
   | { outcome: "busy" }
   | { outcome: "failed"; error: string; sessionId?: string }
   /** Nothing to wake (workspace/preset source resolved to no eligible session): the scheduler records a skip and advances — no retry, no budget. */
-  | { outcome: "skipped"; skipReason: string };
+  | { outcome: "skipped"; skipReason: string }
+  /** min_idle gate not satisfied yet: the scheduler re-arms at deferUntilMs with no record, no retry count, and no budget cost. */
+  | { outcome: "defer"; deferUntilMs: number };
 
 /**
  * The live Session log surface across host lines: 0.1.1-rc.2 exposes `.events`,
@@ -101,6 +106,23 @@ export function sessionLogOf(session: unknown): readonly unknown[] {
   if (Array.isArray(probe.events)) return probe.events;
   if (typeof probe.snapshotEvents === "function") return probe.snapshotEvents();
   return [];
+}
+
+/**
+ * The newest event timestamp in a session log, or undefined when the log is
+ * empty or carries no parseable times. SessionEvent.time lives at the event
+ * top level (never inside data) and is an ISO string.
+ */
+export function lastEventEpoch(events: readonly unknown[]): number | undefined {
+  let latest: number | undefined;
+  for (const event of events) {
+    const time = (event as { time?: unknown }).time;
+    if (typeof time !== "string") continue;
+    const epoch = Date.parse(time);
+    if (!Number.isFinite(epoch)) continue;
+    if (latest === undefined || epoch > latest) latest = epoch;
+  }
+  return latest;
 }
 
 /** Narrow facade over the pieces of AgentRegistry / agents we actually use. */
@@ -377,6 +399,27 @@ export class WakeDriver {
     return { agent: handle.agent, handle, presence: "cold" };
   }
 
+  /**
+   * min_idle_seconds gate for resume destinations: the wake is delivered only
+   * after the destination session has been quiet for the configured span. The
+   * clock reads the LIVE agent's session log tail — any event resets it,
+   * including earlier wake turns, so a self-monitoring alarm enforces its own
+   * spacing. A cold session is idle by definition (nothing is running).
+   * Returns null when the wake may proceed.
+   */
+  private idleGate(alarm: Alarm, sessionId: string): WakeFireResult | null {
+    const minIdleSeconds = alarm.minIdleSeconds ?? 0;
+    if (minIdleSeconds <= 0) return null;
+    const live = this.deps.agents.get(sessionId);
+    if (live === undefined) return null;
+    const last = lastEventEpoch(sessionLogOf(live.session));
+    if (last === undefined) return null;
+    const now = this.deps.now?.() ?? Date.now();
+    const idleAt = last + minIdleSeconds * 1000;
+    if (now >= idleAt) return null;
+    return { outcome: "defer", deferUntilMs: Math.max(idleAt, now + MIN_IDLE_RECHECK_MS) };
+  }
+
   /** Deliver the framed wake to `agent` and analyze the settled turn. */
   private async drive(alarm: Alarm, agent: Agent, actualSessionId: string, presence: UserPresence): Promise<WakeFireResult> {
     const now = this.deps.now?.() ?? Date.now();
@@ -515,6 +558,8 @@ export class WakeDriver {
             return { outcome: "failed", error: "resume target has no session id (corrupt alarm record); cancel or edit this alarm" };
           }
           if (this.inflightBySession.has(sessionId)) return { outcome: "busy" };
+          const idle = this.idleGate(alarm, sessionId);
+          if (idle !== null) return idle;
           this.inflightBySession.add(sessionId);
           guardSessionId = sessionId;
           actualSessionId = sessionId;
@@ -548,6 +593,8 @@ export class WakeDriver {
           }
           if (destination.kind === "session") {
             if (this.inflightBySession.has(destination.sessionId)) return { outcome: "busy" };
+            const idle = this.idleGate(alarm, destination.sessionId);
+            if (idle !== null) return idle;
             this.inflightBySession.add(destination.sessionId);
             guardSessionId = destination.sessionId;
             actualSessionId = destination.sessionId;
@@ -591,6 +638,8 @@ export class WakeDriver {
         }
         if (destination.kind === "session") {
           if (this.inflightBySession.has(destination.sessionId)) return { outcome: "busy" };
+          const idle = this.idleGate(alarm, destination.sessionId);
+          if (idle !== null) return idle;
           this.inflightBySession.add(destination.sessionId);
           guardSessionId = destination.sessionId;
           actualSessionId = destination.sessionId;

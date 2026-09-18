@@ -27,6 +27,7 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
   DEFAULT_WAKE_PROMPT,
   MAX_JITTER_SECONDS,
+  MAX_MIN_IDLE_SECONDS,
   MAX_NO_REPLY_REASON_LENGTH,
   inputError,
   internalError,
@@ -198,7 +199,8 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; occurrences align to creation time and missed ones are skipped." },
   cron: { type: "string", description: "Five-field numeric cron expression, e.g. '0 9 * * 1-5' (minute hour day-of-month month day-of-week; 0 and 7 = Sunday; dom/dow OR rule; no names, '?' or seconds)." },
   jitter_seconds: { type: "integer", description: "Unified per-occurrence random delay in seconds, 0.." + MAX_JITTER_SECONDS + " (0 = exact timing). Each fire is delayed by a uniform random amount drawn from (0, jitter_seconds]; absent/0 = no jitter." },
-  respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: defers inside the quiet window and is skipped when the daily budget is exhausted." },
+  min_idle_seconds: { type: "integer", description: "Resume targets only: deliver the wake only after the destination session has been idle at least this many seconds, 0.." + MAX_MIN_IDLE_SECONDS + " (0 = off, default). Any session event resets the clock — including earlier wake turns — so a self-monitoring alarm enforces its own spacing; a cold session counts as idle; fork/new targets ignore it. While the destination is not idle enough, the wake is deferred silently (no run record, no retry/budget cost) and re-checked at most once a minute." },
+  respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: occurrences due inside the quiet window are skipped, not postponed (once alarms complete; repeating alarms advance to the next occurrence outside the window), and the daily budget applies." },
   target_mode: { type: "string", enum: ["resume", "fork", "new", "workspace"], description: "Where the wake lands. resume (default): wake the target session itself. fork: copy the source session's completed history into a new child session and wake it there (fails when the source has no completed turn). new: wake in a brand-new empty session every fire. workspace: legacy spelling of resume with target_source workspace (still accepted). For resume/fork the source conversation is picked by target_source." },
   target_source: { type: "string", enum: ["session", "workspace", "preset"], description: "How resume/fork name their source conversation. session (default): the exact target_session_id. workspace: the workspace's most recently active session at fire time (its blank New-Session slot when only blanks exist); sessions created by proactive's own wakes are never captured, and when nothing is eligible the fire is skipped — use target_mode new to ensure a session. preset: the most recently active session running the preset (same capture and skip rules; fork fails when nothing is eligible). Inferred when omitted: target_workspace_id alone implies workspace, target_preset_id alone implies preset, otherwise session. Must be omitted when target_mode is new or workspace." },
   target_session_id: { type: "string", description: "The source session id, for target_source session. For resume this is the wake destination; for fork the parent to branch from. Default is this session. Must be omitted for any other source." },
@@ -463,7 +465,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
                 end: { type: "string", required: true, description: "HH:MM wall-clock in time_zone; window end exclusive." },
                 time_zone: { type: "string", required: true, description: "IANA Area/Location." }
               },
-              description: "Quiet window; alarms that respect quiet hours defer inside it."
+              description: "Quiet window; alarms that respect quiet hours skip occurrences inside it (repeating alarms advance to the next occurrence outside)."
             },
             max_wakeups_per_hour: { type: "integer", description: "Host-wide cap on proactive wake turns per rolling hour; 1..60." },
             boot_overdue_policy: { type: "string", enum: ["fire", "notify-only", "drop"], description: "How boot-time overdue alarms are treated." },

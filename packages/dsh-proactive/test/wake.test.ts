@@ -7,13 +7,13 @@ import { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import { Session, deriveEventMessage, type EpochHeader } from "@deepseek-ai/dsh-session";
 import { CallId, ReasoningEffortId, createAssistantMessage, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
-import { WakeDriver, createWakeSelectionRef, selectionFromHeader, completedTurnCut, sessionLogOf, type AgentHandleLike, type AgentPresetsPort, type AgentsFacade, type CreateFacadeOptions, type WakeFireResult } from "../src/wake.js";
+import { WakeDriver, createWakeSelectionRef, selectionFromHeader, completedTurnCut, sessionLogOf, lastEventEpoch, type AgentHandleLike, type AgentPresetsPort, type AgentsFacade, type CreateFacadeOptions, type WakeFireResult } from "../src/wake.js";
 import type { WorkspaceWakePort } from "../src/workspace.js";
 import { ProactiveStore } from "../src/store.js";
 import { resolveConfig } from "../src/config.js";
 import type { Alarm } from "../src/domain.js";
 
-function alarm(id = "a1", target: Alarm["target"] = { mode: "resume", sessionId: "s1" }): Alarm {
+function alarm(id = "a1", target: Alarm["target"] = { mode: "resume", sessionId: "s1" }, overrides: Partial<Alarm> = {}): Alarm {
   return {
     id,
     ownerSessionId: "s1",
@@ -28,7 +28,8 @@ function alarm(id = "a1", target: Alarm["target"] = { mode: "resume", sessionId:
     createdAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:00:00.000Z",
     runCount: 0,
-    lastRunAt: null
+    lastRunAt: null,
+    ...overrides
   };
 }
 
@@ -39,8 +40,8 @@ interface FakeRecording {
   activeDuringFollowup: boolean | null;
 }
 
-function makeFakeAgent(rec: FakeRecording, opts: { busy?: boolean; failWhenIdle?: boolean } = {}) {
-  const events: Record<string, unknown>[] = [];
+function makeFakeAgent(rec: FakeRecording, opts: { busy?: boolean; failWhenIdle?: boolean; events?: Record<string, unknown>[] } = {}) {
+  const events: Record<string, unknown>[] = opts.events ?? [];
   const agent = {
     session: { id: "s1", events },
     followup: (message: unknown) => {
@@ -70,7 +71,7 @@ interface Harness {
   dir: string;
 }
 
-async function harness(opts: { live?: boolean; busy?: boolean; failWhenIdle?: boolean } = {}): Promise<Harness> {
+async function harness(opts: { live?: boolean; busy?: boolean; failWhenIdle?: boolean; events?: Record<string, unknown>[] } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
   const cfg = resolveConfig(dir);
   cfg.silentWakeCompaction = true;
@@ -106,6 +107,14 @@ test("sessionLogOf reads the log through both Session lines", () => {
   assert.deepEqual(sessionLogOf(old), [{ seq: 0 }, { seq: 1 }]);
   assert.deepEqual(sessionLogOf(modern), [{ seq: 0 }]);
   assert.deepEqual(sessionLogOf(bare), []); // session still being created
+});
+
+test("lastEventEpoch takes the newest top-level event time and ignores unparseable ones", () => {
+  assert.equal(lastEventEpoch([]), undefined);
+  assert.equal(lastEventEpoch([{ type: "turn/start" }, { type: "turn/end" }]), undefined); // no time fields
+  const t1 = "2026-09-01T09:00:00.000Z";
+  const t2 = "2026-09-01T10:30:00.000Z";
+  assert.equal(lastEventEpoch([{ type: "a", time: t1 }, { type: "b", time: t2 }, { type: "c", time: "not-a-date" }]), Date.parse(t2));
 });
 
 test("cold wake resumes the session, frames the message, and can be silent", async () => {
@@ -1081,5 +1090,50 @@ test("new mode with a workspace: failing attach never delivers the wake, the ses
     assert.equal(store.createdSessionKind(captured.sessionId), "new");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("min_idle_seconds defers a live destination that was active too recently", async () => {
+  const now = Date.now();
+  const h = await harness({
+    live: true,
+    events: [{ type: "turn/end", seq: 3, time: new Date(now - 60_000).toISOString(), data: {} }]
+  });
+  try {
+    const fire = await h.driver.fire(alarm("idle1", { mode: "resume", sessionId: "s1" }, { minIdleSeconds: 600 }));
+    assert.equal(fire.outcome, "defer");
+    if (fire.outcome === "defer") {
+      // idle gate = last event (now-60s) + 600s, floored at now + 60s
+      const expected = now - 60_000 + 600_000;
+      assert.ok(Math.abs(fire.deferUntilMs - expected) < 5000, "deferUntilMs " + fire.deferUntilMs + " ~ " + expected);
+    }
+    assert.equal(h.rec.messages.length, 0, "nothing delivered while the gate holds");
+    assert.equal(h.rec.resumed, false, "no resume either — the gate precedes acquisition");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("min_idle_seconds lets a quiet-enough live destination and a cold session through", async () => {
+  const now = Date.now();
+  const quiet = await harness({
+    live: true,
+    events: [{ type: "turn/end", seq: 3, time: new Date(now - 3_600_000).toISOString(), data: {} }]
+  });
+  try {
+    const fire = await quiet.driver.fire(alarm("idle2", { mode: "resume", sessionId: "s1" }, { minIdleSeconds: 600 }));
+    assert.equal(fire.outcome, "ok");
+    assert.equal(quiet.rec.messages.length, 1);
+  } finally {
+    rmSync(quiet.dir, { recursive: true, force: true });
+  }
+  // A cold session is idle by definition: the gate never blocks it.
+  const cold = await harness({});
+  try {
+    const fire = await cold.driver.fire(alarm("idle3", { mode: "resume", sessionId: "s1" }, { minIdleSeconds: 600 }));
+    assert.equal(fire.outcome, "ok");
+    assert.equal(cold.rec.resumed, true);
+  } finally {
+    rmSync(cold.dir, { recursive: true, force: true });
   }
 });

@@ -21,6 +21,7 @@ import {
   requireFuture,
   resolveAtInput,
   validateJitterSeconds,
+  validateMinIdleSeconds,
   validatePrompt,
   inputError,
   COMPACTION_MODES,
@@ -50,6 +51,8 @@ export interface CreateSpec {
   cron?: string;
   /** Unified per-occurrence random delay in seconds; absent/0 = exact timing. */
   jitterSeconds?: number;
+  /** Resume targets only: minimum destination idle span in seconds; absent/0 = off. */
+  minIdleSeconds?: number;
   timeZone?: string;
   respectQuietHours: boolean;
   compaction: AlarmCompaction;
@@ -74,10 +77,10 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     "prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds",
     "time_zone", "respect_quiet_hours", "target_mode", "target_source",
     "target_session_id", "target_workspace_id", "target_preset_id",
-    "target_provider", "target_model", "compaction"
+    "target_provider", "target_model", "compaction", "min_idle_seconds"
   ]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "the alarm spec accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_source, target_session_id, target_workspace_id, target_preset_id, target_provider, target_model, compaction." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "the alarm spec accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_source, target_session_id, target_workspace_id, target_preset_id, target_provider, target_model, compaction, min_idle_seconds." };
   }
   const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined) + Number(args["cron"] !== undefined);
   if (selectors !== 1) return { code: "invalid_trigger", message: "the alarm spec requires exactly one of at, after_seconds, every_seconds, or cron." };
@@ -96,6 +99,14 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     prompt = validatePrompt(args["prompt"]);
   } catch (error) {
     return inputError(error);
+  }
+  let minIdleSeconds: number | undefined;
+  if (args["min_idle_seconds"] !== undefined) {
+    try {
+      minIdleSeconds = validateMinIdleSeconds(args["min_idle_seconds"]);
+    } catch (error) {
+      return inputError(error);
+    }
   }
   let respectQuietHours = false;
   if (args["respect_quiet_hours"] !== undefined) {
@@ -254,7 +265,7 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     if (value > MAX_DELAY_SECONDS) {
       return { code: "invalid_trigger", message: "after_seconds must not exceed " + MAX_DELAY_SECONDS + "." };
     }
-    return { prompt, kind: "after", afterSeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "after", afterSeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(minIdleSeconds !== undefined && minIdleSeconds > 0 ? { minIdleSeconds } : {}), ...(timeZone !== undefined ? { timeZone } : {}) };
   }
   if (args["every_seconds"] !== undefined) {
     const value = args["every_seconds"];
@@ -272,7 +283,7 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     if (jitterSeconds !== undefined && jitterSeconds > value) {
       return { code: "invalid_trigger", message: "jitter_seconds must not exceed every_seconds (" + value + ")." };
     }
-    return { prompt, kind: "every", everySeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "every", everySeconds: value, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(minIdleSeconds !== undefined && minIdleSeconds > 0 ? { minIdleSeconds } : {}), ...(timeZone !== undefined ? { timeZone } : {}) };
   }
   if (args["cron"] !== undefined) {
     if (typeof args["cron"] !== "string") return { code: "invalid_trigger", message: "cron must be a five-field expression string." };
@@ -292,9 +303,9 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
     } catch (error) {
       return inputError(error);
     }
-    return { prompt, kind: "cron", cron: args["cron"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+    return { prompt, kind: "cron", cron: args["cron"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(minIdleSeconds !== undefined && minIdleSeconds > 0 ? { minIdleSeconds } : {}), ...(timeZone !== undefined ? { timeZone } : {}) };
   }
-  return { prompt, kind: "at", at: args["at"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(timeZone !== undefined ? { timeZone } : {}) };
+  return { prompt, kind: "at", at: args["at"], ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(minIdleSeconds !== undefined && minIdleSeconds > 0 ? { minIdleSeconds } : {}), ...(timeZone !== undefined ? { timeZone } : {}) };
 }
 
 /**
@@ -359,6 +370,7 @@ export function buildAlarm(ownerSessionId: string, spec: CreateSpec, nowStart: n
       prompt: spec.prompt,
       respectQuietHours: spec.respectQuietHours,
       compaction: spec.compaction,
+      ...(spec.minIdleSeconds !== undefined && spec.minIdleSeconds > 0 ? { minIdleSeconds: spec.minIdleSeconds } : {}),
       timeZone,
       status: "scheduled",
       nextDueAt: new Date(delayed).toISOString(),

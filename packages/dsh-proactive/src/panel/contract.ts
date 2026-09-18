@@ -139,6 +139,8 @@ export interface PanelCreateForm {
   cron?: string;
   /** Unified per-occurrence random delay in seconds; 0/absent = exact timing. */
   jitterSeconds?: number;
+  /** Resume targets only: minimum destination idle span in seconds; 0/absent = off. */
+  minIdleSeconds?: number;
   timeZone?: string;
   /** false (default) = user-requested, exempt from quiet hours + budget. */
   respectQuietHours?: boolean;
@@ -180,6 +182,7 @@ export function createArgsFromForm(form: PanelCreateForm): Record<string, unknow
   // Jitter is a first-class knob on all three types (v2: once/every/cron all
   // accept a per-occurrence random delay); stale zero values are simply dropped.
   if (form.jitterSeconds !== undefined && form.jitterSeconds > 0) args["jitter_seconds"] = form.jitterSeconds;
+  if (form.minIdleSeconds !== undefined && form.minIdleSeconds > 0) args["min_idle_seconds"] = form.minIdleSeconds;
   if (form.timeZone !== undefined && form.timeZone !== "") args["time_zone"] = form.timeZone;
   if (form.respectQuietHours !== undefined) args["respect_quiet_hours"] = form.respectQuietHours;
   if (form.compaction !== undefined) args["compaction"] = form.compaction;
