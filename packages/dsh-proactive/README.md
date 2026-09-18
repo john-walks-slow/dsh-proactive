@@ -71,17 +71,46 @@ dsh plugin --profile web add file:/absolute/path/to/dsh-proactive/packages/dsh-p
   "maxDeliveriesPerDay": 50,                   // 每 UTC 日可见聊天文本投递上限（静默回合不计）
   "quietHours": { "start": "23:00", "end": "08:00", "timeZone": "Asia/Shanghai" },
   "maxWakeupsPerHour": 60,                     // 全 host 每小时唤醒次数上限
-  "maxConcurrentPerSession": 1,                // 每会话并发在途唤醒数
   "bootOverduePolicy": "fire",                 // fire | notify-only | drop
   "maxRetriesPerFire": 3,                      // 单次唤醒的 busy/failed 重试上限
   "maxPromptLength": 4000,
-  "defaultPrompt": "这是一个 heartbeat reminder，…" // 新建闹钟表单的预填文案
+  "defaultPrompt": "这是一个 heartbeat reminder，…", // 新建闹钟表单的预填文案
+  "scheduleFiles": [],                         // 声明式闹钟文件 glob（见下节），空 = 功能关
+  "schedulePollSeconds": 60                    // 声明式文件轮询间隔（15..3600，重启生效）
 }
 ```
 
 环境变量覆盖：`DSH_PROACTIVE_ENABLED`、`DSH_PROACTIVE_MAX_DELIVERIES_PER_DAY`、`DSH_PROACTIVE_DATA_DIR`。
 
-配置有双编辑入口：`proactive_update_settings` 工具（写 `config.json`，原子持久化 + 热应用）与设置面板（热应用立即生效，重启后以 settings 层持久值为准）；两者交替编辑时以最终一次整表回写为准。
+配置有双编辑入口：`proactive_update_settings` 工具（写 `config.json`，原子持久化 + 热应用）与设置面板（热应用立即生效，重启后以 settings 层持久值为准）；两者交替编辑时以最终一次整表回写为准。`schedule_files` 只走工具/config.json（设置面板 schema 未含该字段）。
+
+## 声明式闹钟文件（declared schedules）
+
+闹钟也可以**由文件声明**：把 `config.scheduleFiles` 配置为 glob（如 `"/root/agents/*/.life/wake_schedule.json"`），插件启动时与每 `schedulePollSeconds` 轮询解析匹配的 JSON 文件，把其中的条目同步成 host 级闹钟——**文件是唯一真源**：重跑不重复（幂等 upsert）、重启自愈、条目删除/文件删除自动移除对应闹钟、过去的 `at` 静默跳过不补火。文件读取失败或 JSON 损坏时**保留**现有闹钟（瞬时故障不炸计划）。
+
+典型用法：world master（create-simulated-events skill）每日写 events.json 的同时，在工作区写 `.life/wake_schedule.json` 规划当天主动唤醒时刻——文件放在 living agent 工作区内时**无需写 target**（默认 = 文件所在 workspace）。
+
+```json
+{
+  "version": 1,
+  "time_zone": "Asia/Shanghai",
+  "target": { "workspace_path": "/root/agents/yu" },
+  "entries": [
+    {
+      "id": "evt-260918-002",
+      "at": "2026-09-18T14:20:00+08:00",
+      "prompt": "14:20，你如约来到旧书市集……",
+      "jitter_seconds": 120
+    }
+  ]
+}
+```
+
+- **条目字段 = `proactive_set` 方言的 JSON 投影**：`prompt` 必填；选择器四选一（`at` / `after_seconds` / `every_seconds` / `cron`）；可选 `jitter_seconds` / `time_zone` / `respect_quiet_hours` / `compaction`；顶层 `time_zone` / `respect_quiet_hours` / `jitter_seconds` / `compaction` / `target` 作为文件级默认，条目内显式字段覆盖。
+- **target**：嵌套对象 `{ mode?, workspace_path? | workspace_id? | session_id? | preset_id? | provider?, model? }`；条目级 `target` 整体覆盖文件级；两者都没有时默认 = 文件所在 workspace（需 workspace registry）。
+- **glob**：绝对路径，`*` 单层、`**` 跨层（`a/**/b` 含 `a/b`）、`?` 单字符；最多 64 个 pattern / 64 个命中文件 / 单文件 200 条 / 256 KiB。
+- **来源标记**：这类闹钟带 `declared` 来源（owner 为合成会话 `declared-schedule`，列表可见）；`proactive_update` / `proactive_cancel` 会拒绝修改它们并提示改源文件。
+- **启用**：改 `config.json` 的 `scheduleFiles`（重启生效）或让 agent 调 `proactive_update_settings { "schedule_files": [...] }`（一个轮询周期内生效）。
 
 ## GUI 管理面板
 
@@ -100,10 +129,10 @@ dsh plugin --profile web add file:/absolute/path/to/dsh-proactive/packages/dsh-p
 |---|---|
 | `proactive_set` | 建闹钟：`prompt`（必填）+ 恰好一个 `at`（带显式时区的 RFC3339 或 {date,time,time_zone}）/ `after_seconds` / `every_seconds`(≥300) / `cron`；可选 `jitter_seconds`、`time_zone`、`respect_quiet_hours`(默认 false)、`target_mode`(resume/fork/new) + `target_session_id` |
 | `proactive_list` | 列出本会话活跃闹钟；`all=true` 跨会话列出（与设置页同权） |
-| `proactive_update` | 按精确 id **跨会话**全量替换闹钟 spec（与 set 同一方言，保留 id/owner/历史） |
-| `proactive_cancel` | 按精确 id 跨会话取消 |
-| `proactive_update_settings` | 部分更新 host 级设置（只改传入字段），持久化 `config.json` 并热应用 |
-| `proactive_silence` | **仅唤醒回合内可用**：静默收尾当前唤醒（concludesTurn + 压缩回收整次唤醒交换）；普通回合想不说话，直接不产出文本或用宿主的 no-reply 工具 |
+| `proactive_update` | 按精确 id **跨会话**全量替换闹钟 spec（与 set 同一方言，保留 id/owner/历史）；declared 闹钟拒绝编辑 |
+| `proactive_cancel` | 按精确 id 跨会话取消；declared 闹钟拒绝取消（改源文件） |
+| `proactive_update_settings` | 部分更新 host 级设置（只改传入字段），持久化 `config.json` 并热应用；支持 `schedule_files` 声明式文件列表 |
+| `proactive_reclaim` | **仅唤醒回合内可用**：静默收尾当前唤醒（concludesTurn + 压缩回收整次唤醒交换）；普通回合想不说话，直接不产出文本或用宿主的 no-reply 工具 |
 
 ## 预算与安静时段
 

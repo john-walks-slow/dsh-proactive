@@ -37,7 +37,7 @@ import {
   type ToolError
 } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
-import { writeConfigFile } from "./config.js";
+import { writeConfigFile, MAX_SCHEDULE_FILES } from "./config.js";
 import { liveEventsOf, type LiveSessionLike } from "./workspace.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveScheduler } from "./scheduler.js";
@@ -111,7 +111,10 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     jitterSeconds: { type: "integer" },
     // The alarm's canonical zone, so a list -> update round-trip can re-supply
     // the full dialect without losing at/cron alignment.
-    timeZone: { type: "string" }
+    timeZone: { type: "string" },
+    // Present only for declared (file-sourced) alarms: they refuse update/cancel.
+    declaredFile: { type: "string" },
+    declaredEntry: { type: "string" }
   }
 };
 
@@ -136,7 +139,8 @@ const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
     max_retries_per_fire: { type: "integer", required: true },
     max_prompt_length: { type: "integer", required: true },
     default_prompt: { type: "string", required: true },
-    silent_wake_compaction: { type: "boolean", required: true }
+    silent_wake_compaction: { type: "boolean", required: true },
+    schedule_files: { type: "array", items: { type: "string" } }
   }
 };
 
@@ -295,6 +299,9 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             if (alarm === undefined || alarm.status === "completed" || alarm.status === "cancelled") {
               return { code: "not_found", message: "No active alarm with id " + id + "." } as ToolError;
             }
+            if (alarm.declared !== undefined) {
+              return { code: "invalid_action", message: "Alarm " + id + " is declared by schedule file " + alarm.declared.file + " (entry \"" + alarm.declared.entry + "\"); edit or remove the entry in that file instead — a cancellation would be undone by the next sync." } as ToolError;
+            }
             services.store.removeAlarm(id);
             try {
               await services.store.persist();
@@ -334,6 +341,9 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             }
             if (current.status === "in-flight" || current.status === "completed" || current.status === "cancelled" || current.status === "failed") {
               return { code: "invalid_action", message: "Alarm " + id + " cannot be edited in its current state." } as ToolError;
+            }
+            if (current.declared !== undefined) {
+              return { code: "invalid_action", message: "Alarm " + id + " is declared by schedule file " + current.declared.file + " (entry \"" + current.declared.entry + "\"); edit the entry in that file instead — an update here would be overwritten by the next sync." } as ToolError;
             }
             if (services.store.corrupt) return { code: "corrupt_store", message: "The alarm store is corrupt; fix or remove alarms.json." } as ToolError;
             // Strip the id: the create dialect validates an exact key set.
@@ -460,7 +470,12 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
             max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
             default_prompt: { type: "string", description: "Default wake-up instruction pre-filled into the GUI create form; non-empty, at most 20000 characters. Purely a prefill — stored alarms always keep their own prompt." },
-            silent_wake_compaction: { type: "boolean", description: "Master gate for silent-wake tombstone compaction (default true); a per-alarm compaction of 'off' still keeps that alarm's full exchange on the model surface." }
+            silent_wake_compaction: { type: "boolean", description: "Master gate for silent-wake tombstone compaction (default true); a per-alarm compaction of 'off' still keeps that alarm's full exchange on the model surface." },
+            schedule_files: {
+              type: "array",
+              items: { type: "string" },
+              description: "Declared-schedule source files: absolute glob paths (supports * within a segment, ** across segments, ? one character) whose JSON entries sync into host alarms idempotently; e.g. ['/root/agents/*/.life/wake_schedule.json']. Empty array = feature off. Takes effect within one poll cycle (schedule_poll_seconds, default 60)."
+            }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -468,15 +483,44 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
           },
           async execute(args, exec) {
             if (exec.agent !== agent) return internalError();
-            const shape = validateSettingsPatch(args);
-            if (isToolError(shape)) return shape;
+            // schedule_files is intentionally OUTSIDE HotConfig: the settings
+            // namespace schema does not declare it, so a settings watch would
+            // strip it and the hot-apply would clobber it back to undefined.
+            // It is validated here, persisted via config.json, and applied
+            // directly onto the live config the sync loop reads each tick.
+            const rawScheduleFiles = args["schedule_files"];
+            const rest: Record<string, unknown> = { ...args };
+            delete rest["schedule_files"];
+            let scheduleFiles: string[] | undefined;
+            if (rawScheduleFiles !== undefined) {
+              if (!Array.isArray(rawScheduleFiles)) {
+                return { code: "invalid_trigger", message: "schedule_files must be an array of absolute glob path strings." } as ToolError;
+              }
+              const seen: string[] = [];
+              for (const entry of rawScheduleFiles) {
+                if (typeof entry !== "string" || entry.length === 0 || entry.length > 512 || !entry.startsWith("/") || entry.includes("\0")) {
+                  return { code: "invalid_trigger", message: "schedule_files entries must be non-empty absolute paths of at most 512 characters." } as ToolError;
+                }
+                if (!seen.includes(entry)) seen.push(entry);
+                if (seen.length > MAX_SCHEDULE_FILES) {
+                  return { code: "invalid_trigger", message: "schedule_files accepts at most " + MAX_SCHEDULE_FILES + " patterns." } as ToolError;
+                }
+              }
+              scheduleFiles = seen;
+            }
+            const shape = validateSettingsPatch(rest);
+            if (isToolError(shape) && scheduleFiles === undefined) return shape;
+            const patch = isToolError(shape) ? {} : shape.patch;
             try {
-              await writeConfigFile(services.config.dataDir, shape.patch as unknown as Partial<ProactiveConfig>);
+              await writeConfigFile(services.config.dataDir, { ...patch, ...(scheduleFiles !== undefined ? { scheduleFiles } : {}) } as unknown as Partial<ProactiveConfig>);
             } catch {
               return { code: "persistence_uncertain", message: "Settings were not durably stored; please retry." } as ToolError;
             }
-            const next: HotConfig = { ...hotSubset(services.config), ...shape.patch };
-            applyHotConfig(services.config, next);
+            if (!isToolError(shape)) {
+              const next: HotConfig = { ...hotSubset(services.config), ...shape.patch };
+              applyHotConfig(services.config, next);
+            }
+            if (scheduleFiles !== undefined) services.config.scheduleFiles = scheduleFiles;
             return settingsView(services.config);
           },
           presentCall: (callArgs) => presentCard("Update proactive settings", Object.keys((callArgs as Record<string, unknown>) ?? {}).join(", "))
@@ -495,7 +539,8 @@ function settingsView(config: ProactiveConfig): JsonValue {
     max_retries_per_fire: config.maxRetriesPerFire,
     max_prompt_length: config.maxPromptLength,
     default_prompt: config.defaultPrompt,
-    silent_wake_compaction: config.silentWakeCompaction
+    silent_wake_compaction: config.silentWakeCompaction,
+    schedule_files: [...config.scheduleFiles]
   };
 }
 

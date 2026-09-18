@@ -44,6 +44,14 @@ export interface ProactiveConfig {
   defaultPrompt: string;
   /** Master gate for silent-wake tombstone compaction (per-alarm `compaction` still fine-tunes). */
   silentWakeCompaction: boolean;
+  /**
+   * Declared-schedule source files (glob patterns, absolute paths with * / ** / ?).
+   * Empty (default) = the feature is off. Files are parsed on boot and polled;
+   * entries sync into the store as declared alarms (see declared.ts).
+   */
+  scheduleFiles: string[];
+  /** Poll interval in seconds for declared-schedule files (15..3600). */
+  schedulePollSeconds: number;
   /** Absolute directory for alarms.json / runs.jsonl / state.json / config.json. */
   dataDir: string;
 }
@@ -58,6 +66,8 @@ export const DEFAULT_CONFIG: ProactiveConfig = {
   maxPromptLength: 4000,
   defaultPrompt: DEFAULT_WAKE_PROMPT,
   silentWakeCompaction: true,
+  scheduleFiles: [],
+  schedulePollSeconds: 60,
   dataDir: "/root/.dsh/proactive"
 };
 
@@ -120,6 +130,27 @@ function positiveInt(value: unknown, fallback: number, ceiling: number): number 
   return n;
 }
 
+export const MAX_SCHEDULE_FILES = 64;
+const MAX_SCHEDULE_PATTERN_LENGTH = 512;
+
+/**
+ * Tolerant parse of the declared-schedule glob list: non-empty absolute
+ * strings without NUL survive, duplicates drop, the list is capped. Invalid
+ * entries are dropped (not fatal) — a typo'd pattern just matches nothing.
+ */
+export function parseScheduleFiles(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > MAX_SCHEDULE_PATTERN_LENGTH) continue;
+    if (!entry.startsWith("/") || entry.includes("\0")) continue;
+    if (out.includes(entry)) continue;
+    out.push(entry);
+    if (out.length >= MAX_SCHEDULE_FILES) break;
+  }
+  return out;
+}
+
 /** Merge defaults, file overrides, and DSH_PROACTIVE_* environment overrides. */
 export function resolveConfig(dataDir?: string): ProactiveConfig {
   const dir = dataDir ?? (process.env["DSH_PROACTIVE_DATA_DIR"] ?? defaultDataDir());
@@ -168,6 +199,8 @@ export function resolveConfig(dataDir?: string): ProactiveConfig {
     // model surface). An explicit boolean in config.json wins; any non-boolean
     // value falls back to the default (on), not to false.
     silentWakeCompaction: typeof file["silentWakeCompaction"] === "boolean" ? file["silentWakeCompaction"] : DEFAULT_CONFIG.silentWakeCompaction,
+    scheduleFiles: parseScheduleFiles(file["scheduleFiles"]),
+    schedulePollSeconds: Math.max(15, Math.min(3600, positiveInt(file["schedulePollSeconds"], DEFAULT_CONFIG.schedulePollSeconds, 3600))),
     dataDir: dir
   };
   if (env["DSH_PROACTIVE_ENABLED"] === "0" || env["DSH_PROACTIVE_ENABLED"] === "false") config.enabled = false;

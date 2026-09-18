@@ -21,6 +21,7 @@ import { ProactiveStore } from "./store.js";
 import { ProactiveScheduler } from "./scheduler.js";
 import { WakeDriver, type AgentPresetsPort, type WakeDriverDeps } from "./wake.js";
 import { registerProactiveTools } from "./tools.js";
+import { startDeclaredScheduleSync } from "./declared.js";
 import { ProactivePanelService } from "./panel/service.js";
 import { installPanelRoutes } from "./panel/routes.js";
 import { wireSettings } from "./settings.js";
@@ -220,6 +221,19 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   if (routeDispose !== undefined) extraDisposers.push(routeDispose);
   const settingsWire = wireSettings(ctx, config);
   if (settingsWire.installed && settingsWire.dispose !== undefined) extraDisposers.push(settingsWire.dispose);
+
+  // Declared-schedule files (config.scheduleFiles): a declarative alarm
+  // source synced into the store on boot and polled on an interval; the file
+  // is the source of truth. Feature-off by default (empty list = no-op pass).
+  const declaredSync = startDeclaredScheduleSync({
+    config,
+    store,
+    now: () => Date.now(),
+    resolveWorkspace,
+    scheduler,
+    log: (level, message) => ctx.logger[level](message)
+  });
+  extraDisposers.push(declaredSync.dispose);
 
   scheduler.start();
   ctx.logger.info(

@@ -111,6 +111,16 @@ function alarmIsValid(value: unknown): value is Alarm {
   // a present value must be a known mode so a typo never silently degrades.
   const compaction = value["compaction"];
   if (compaction !== undefined && (typeof compaction !== "string" || !COMPACTION_MODES.includes(compaction))) return false;
+  // declared provenance is optional; a present value must carry the full
+  // triple (file / entry / hash) so a partial record can never be mistaken
+  // for a synced one.
+  const declared = value["declared"];
+  if (declared !== undefined) {
+    if (!isRecord(declared)) return false;
+    if (typeof declared["file"] !== "string" || declared["file"].length === 0) return false;
+    if (typeof declared["entry"] !== "string" || declared["entry"].length === 0) return false;
+    if (typeof declared["hash"] !== "string" || declared["hash"].length === 0) return false;
+  }
   return isTriggerForType(type, value["trigger"]);
 }
 

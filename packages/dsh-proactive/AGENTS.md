@@ -7,8 +7,9 @@
 ## 地图
 
 - `src/domain.ts` — 领域模型、校验、DST 正确的时区/本地时间解析（移植 dsh-schedule）、闭式错误码
-- `src/config.ts` — 默认配置 + config.json/环境变量覆盖 + 安静时段判定
-- `src/store.ts` — alarms.json（原子写）/runs.jsonl/state.json 持久化；corrupt 降级
+- `src/config.ts` — 默认配置 + config.json/环境变量覆盖 + 安静时段判定（`scheduleFiles`/`schedulePollSeconds` 声明式文件配置归此，parseScheduleFiles 容错钳制）
+- `src/declared.ts` — 声明式闹钟文件（260918）：config.scheduleFiles glob 展开（自实现 `*`/`**`/`?`，`**/` 匹配零层）→ schedule JSON 解析（文件级默认 + 条目覆盖 + 嵌套 target 拍平）→ 条目走 validateCreateArgs/buildAlarm **同一工厂**（无第二方言）→ 按 `decl_<sha256(file\0entry)>` 稳定 id + spec hash 幂等 diff 同步。declared 闹钟 owner=`declared-schedule`、带 `declared{file,entry,hash}`；tools 的 update/cancel 对其拒绝（文件=唯一真源）。失败语义：文件读坏/JSON 坏 → **保留**现有闹钟（transient 不炸计划）；条目存在但准备失败（target 解析失败/closed validation/过去 at）→ 保留既有同 id 闹钟（keptIds）；条目删除/文件删除/功能关 → 移除对应闹钟；in-flight 永不动。target 缺省 = 文件所在 workspace（dirname 经 resolveWorkspaceArg 反查）。**scheduleFiles 不进 HotConfig**——settings namespace schema 未声明该字段，watch 回写会剥掉它再 clobber 回 undefined；热更只能走 proactive_update_settings 的 `schedule_files` 直改 `config.scheduleFiles`（轮询每 tick 读 live config）
+- `src/store.ts` — alarms.json（原子写）/runs.jsonl/state.json 持久化；corrupt 降级；alarmIsValid 校验 `declared` 来源形态
 - `src/scheduler.ts` — 串行 drive 循环：门控（安静/budget/hourly/boot 策略）、重试、单定时器重臂
 - `src/wake.ts` — WakeDriver：live/cold 双路径、冷 resume 装 `installModelSelection`（`createWakeSelectionRef`：会话 request header → agentDefaultModel → warn）、runMaintenance+followup、whenIdle、dispose、inflight 守卫；静默/无输出回合结束后触发 compactWake
 - `src/framing.ts` — 唤醒报文 v3（极简：身份头/now/非用户标记/alarm prompt 原文/一条静默双工具规则，~0.5KB 开销）；notice-form 用户消息；导出 FRAMING_MARKER

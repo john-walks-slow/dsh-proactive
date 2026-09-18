@@ -155,6 +155,17 @@ export interface CronTrigger {
 
 export type AlarmTrigger = OnceTrigger | EveryTrigger | CronTrigger;
 
+/**
+ * Provenance of a file-declared alarm (declared.ts): the source schedule file,
+ * the entry id inside it, and a hash of the entry's normalized spec so the
+ * sync can distinguish "unchanged" (no-op) from "changed" (replace).
+ */
+export interface DeclaredSource {
+  file: string;
+  entry: string;
+  hash: string;
+}
+
 export interface Alarm {
   id: string;
   /** Creator session; scopes proactive_list/cancel and the panel ownership guard. */
@@ -176,6 +187,8 @@ export interface Alarm {
   lastRunAt: string | null;
   /** Per-alarm silent-wake surface compaction policy; absent = DEFAULT_COMPACTION (legacy records). */
   compaction?: AlarmCompaction;
+  /** Present only for alarms synced from a declared-schedule file; the file is their source of truth. */
+  declared?: DeclaredSource;
 }
 
 export interface RunRecord {
@@ -229,6 +242,9 @@ export type AlarmView = {
   at?: string;
   /** The alarm's canonical zone (drives at/cron alignment and wake framing). */
   timeZone?: string;
+  /** Present only for declared (file-sourced) alarms: the source file and entry id. */
+  declaredFile?: string;
+  declaredEntry?: string;
 }
 
 export type ProactiveErrorCode =
@@ -582,7 +598,8 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
       ? { cron: alarm.trigger["expr"], ...(typeof alarm.trigger["jitterSeconds"] === "number" && alarm.trigger["jitterSeconds"] > 0 ? { jitterSeconds: alarm.trigger["jitterSeconds"] } : {}) }
       : {}),
     ...(alarm.type === "once" && "at" in alarm.trigger ? { at: alarm.trigger["at"] } : {}),
-    ...(alarm.timeZone !== undefined ? { timeZone: alarm.timeZone } : {})
+    ...(alarm.timeZone !== undefined ? { timeZone: alarm.timeZone } : {}),
+    ...(alarm.declared !== undefined ? { declaredFile: alarm.declared.file, declaredEntry: alarm.declared.entry } : {})
   };
 }
 
