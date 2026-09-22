@@ -476,7 +476,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             schedule_files: {
               type: "array",
               items: { type: "string" },
-              description: "Declared-schedule source files: absolute glob paths (supports * within a segment, ** across segments, ? one character) whose JSON entries sync into host alarms idempotently; e.g. ['/root/agents/*/.life/wake_schedule.json']. Empty array = feature off. Takes effect within one poll cycle (schedule_poll_seconds, default 60)."
+              description: "Declared-schedule source files: absolute glob paths (supports * within a segment, ** across segments, ? one character) whose JSON entries sync into host alarms idempotently; e.g. ['/srv/agents/*/.life/wake_schedule.json']. Empty array = feature off. Takes effect within one poll cycle (schedule_poll_seconds, default 60)."
             }
           },
           output: {

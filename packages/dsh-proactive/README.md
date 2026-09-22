@@ -87,15 +87,15 @@ dsh plugin --profile web add file:/absolute/path/to/dsh-proactive/packages/dsh-p
 
 ## 声明式闹钟文件（declared schedules）
 
-闹钟也可以**由文件声明**：把 `config.scheduleFiles` 配置为 glob（如 `"/root/agents/*/.life/wake_schedule.json"`），插件启动时与每 `schedulePollSeconds` 轮询解析匹配的 JSON 文件，把其中的条目同步成 host 级闹钟——**文件是唯一真源**：重跑不重复（幂等 upsert）、重启自愈、条目删除/文件删除自动移除对应闹钟、过去的 `at` 静默跳过不补火。文件读取失败或 JSON 损坏时**保留**现有闹钟（瞬时故障不炸计划）。
+闹钟也可以**由文件声明**：把 `config.scheduleFiles` 配置为 glob（如 `"/srv/agents/*/.life/wake_schedule.json"`），插件启动时与每 `schedulePollSeconds` 轮询解析匹配的 JSON 文件，把其中的条目同步成 host 级闹钟——**文件是唯一真源**：重跑不重复（幂等 upsert）、重启自愈、条目删除/文件删除自动移除对应闹钟、过去的 `at` 静默跳过不补火。文件读取失败或 JSON 损坏时**保留**现有闹钟（瞬时故障不炸计划）。
 
-典型用法：world master（create-simulated-events skill）每日写 events.json 的同时，在工作区写 `.life/wake_schedule.json` 规划当天主动唤醒时刻——文件放在 living agent 工作区内时**无需写 target**（默认 = 文件所在 workspace）。
+典型用法：自动化世界演算任务每日写 events.json 的同时，在工作区写 `.life/wake_schedule.json` 规划当天主动唤醒时刻——文件放在 living agent 工作区内时**无需写 target**（默认 = 文件所在 workspace）。
 
 ```json
 {
   "version": 1,
   "time_zone": "Asia/Shanghai",
-  "target": { "workspace_path": "/root/agents/yu" },
+  "target": { "workspace_path": "/srv/agents/aoi" },
   "entries": [
     {
       "id": "evt-260918-002",
