@@ -1,6 +1,6 @@
 {
   "name": "dsh-proactive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Host-level proactive wake-ups for DeepSeek Harness: let the model schedule its own alarms (once / interval / cron with random jitter), wake cold sessions on time, gate model-initiated follow-ups with quiet hours and a daily budget, and reclaim silent wake turns with tombstone compaction; ships a web panel for alarm and history management. dsh-proactive：为 DeepSeek Harness 提供 host 级主动唤醒——模型自订闹钟（单次/循环/cron+随机抖动），冷会话到点自动 resume，安静时段与每日投递预算约束自主跟进，静默唤醒折叠压缩不污染上下文，自带 Web 面板管理闹钟与唤醒历史。",
   "type": "module",
   "main": "lib/index.js",
