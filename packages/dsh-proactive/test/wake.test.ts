@@ -368,6 +368,79 @@ test("new target creates an empty child session and wakes it there", async () =>
   }
 });
 
+test("new target without a workspace inherits the owner session's cwd", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
+  const childAgent = makeFakeAgent(rec);
+  let captured: CreateFacadeOptions | undefined;
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async () => { throw new Error("unused"); },
+    create: async (options) => {
+      captured = options;
+      return { agent: childAgent, dispose: async () => undefined };
+    }
+  };
+  const driver = new WakeDriver({
+    agents,
+    sessionPersistence: {
+      inspect: async () => ({ events: [] as never, meta: { version: 0, id: "s1" as never, createdAt: 0, cwd: "/root/agents/luna", agentPreset: "standard" } })
+    },
+    modelSelection: () => undefined,
+    store,
+    config: cfg,
+    log: () => undefined
+  });
+  try {
+    const fire = await driver.fire(alarm("newcwd", { mode: "new" }));
+    assert.equal(fire.outcome, "ok");
+    assert.ok(captured !== undefined);
+    assert.equal(captured.seed, undefined);
+    assert.equal(captured.meta?.cwd, "/root/agents/luna");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("new target stays workspace-less when the owner session has no readable cwd", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-wake-"));
+  const cfg = resolveConfig(dir);
+  const store = new ProactiveStore(dir);
+  const rec: FakeRecording = { messages: [], disposed: false, resumed: false, activeDuringFollowup: null };
+  const childAgent = makeFakeAgent(rec);
+  let captured: CreateFacadeOptions | undefined;
+  const agents: AgentsFacade = {
+    get: () => undefined as never,
+    resume: async () => { throw new Error("unused"); },
+    create: async (options) => {
+      captured = options;
+      return { agent: childAgent, dispose: async () => undefined };
+    }
+  };
+  const driver = new WakeDriver({
+    agents,
+    // Cold owner whose persisted header carries no cwd; inspect throwing is
+    // the same shape (parentLog folds it to undefined).
+    sessionPersistence: {
+      inspect: async () => ({ events: [] as never, meta: { version: 0, id: "s1" as never, createdAt: 0, agentPreset: "standard" } })
+    },
+    modelSelection: () => undefined,
+    store,
+    config: cfg,
+    log: () => undefined
+  });
+  try {
+    const fire = await driver.fire(alarm("newnocwd", { mode: "new" }));
+    assert.equal(fire.outcome, "ok");
+    assert.ok(captured !== undefined);
+    assert.equal(captured.meta?.cwd, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("selectionFromHeader mirrors the session's committed request config", () => {
   assert.equal(selectionFromHeader(undefined), undefined);
   const header: EpochHeader = {

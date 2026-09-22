@@ -491,7 +491,8 @@ export class WakeDriver {
 
       if (target.mode === "new") {
         // A fresh session per fire, optionally configured: workspace (cwd +
-        // attach), preset (composition), provider/model (wake selection).
+        // attach; without one the owner session's cwd is inherited), preset
+        // (composition), provider/model (wake selection).
         let cwd: string | undefined;
         if (target.workspaceId !== undefined) {
           const port = this.deps.workspaces;
@@ -512,6 +513,15 @@ export class WakeDriver {
             return { outcome: "failed", error: resolved.error };
           }
           cwd = resolved;
+        } else {
+          // Workspace-less fires inherit the owning session's cwd (the same
+          // parent-cwd inheritance fork applies): the fresh session runs in
+          // the context the alarm was authored in, and workspace-scoped host
+          // services never meet a cwd-less session. An unreadable or
+          // cwd-less owner keeps the legacy workspace-less behavior.
+          const owner = await this.parentLog(alarm.ownerSessionId);
+          const inherited = owner?.cwd?.trim();
+          cwd = inherited === undefined || inherited === "" ? undefined : inherited;
         }
         const override = target.provider !== undefined || target.model !== undefined
           ? { provider: target.provider, model: target.model }
