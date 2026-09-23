@@ -22,6 +22,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { defineTool, type ParameterSchemaSpec, type ToolCallView, type ToolDefinition, type ValueSchemaSpec } from "@deepseek-ai/dsh-tools";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
+import type { JsonValue } from "@deepseek-ai/dsh-util-values";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
   DEFAULT_WAKE_PROMPT,
@@ -530,7 +531,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
 }
 
 /** One read-only settings view the update tool returns (mirrors HotConfig in snake_case). */
-function settingsView(config: ProactiveConfig): Record<string, unknown> {
+function settingsView(config: ProactiveConfig): JsonValue {
   return {
     enabled: config.enabled,
     max_deliveries_per_day: config.maxDeliveriesPerDay,
