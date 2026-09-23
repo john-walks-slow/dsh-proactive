@@ -52,8 +52,8 @@ export interface CompactEvent {
  * fakes that only implement append.
  */
 export interface CompactSession {
-  append(type: "user/message", data: UserMessage, opts: SurfaceIntent): unknown;
-  append(type: "assistant/message", data: { turn: number; step: number; message: AssistantMessage }, opts: SurfaceIntent): unknown;
+  append(type: "user/message", data: UserMessage, opts: unknown): unknown;
+  append(type: "assistant/message", data: { turn: number; step: number; message: AssistantMessage }, opts: unknown): unknown;
 }
 
 /** One owned surface range to be collapsed, plus how to collapse it. */
@@ -152,8 +152,8 @@ export function applyWakeCompaction(
 ): boolean {
   let framingCollapsed = false;
   for (const run of plan.runs) {
-    const opts: SurfaceIntent = {
-      surfaceOp: { op: "replace", start: run.seqs[0], end: run.seqs[run.seqs.length - 1] },
+    const opts = {
+      surfaceOp: { op: "replace", startSeq: run.seqs[0], endSeq: run.seqs[run.seqs.length - 1] },
       sourceEventSeqs: [...run.seqs]
     };
     try {
@@ -161,12 +161,7 @@ export function applyWakeCompaction(
         session.append("user/message", createTombstoneMessage(alarm, firedAt, compaction, reason), opts);
         framingCollapsed = true;
       } else {
-        const eraser = eraserMessage(eraserProvenance(events, run.seqs));
-        if (eraser !== undefined) {
-          session.append("assistant/message", eraser, opts);
-        } else {
-          session.append("user/message", createTombstoneMessage(alarm, firedAt, compaction, reason), opts);
-        }
+        session.append("user/message", createExchangeNoticeMessage(alarm, firedAt), opts);
       }
     } catch (error) {
       log("warn", "wake compaction skipped for alarm " + alarm.id + " (range no longer on the surface): " + (error instanceof Error ? error.message : String(error)));
@@ -184,6 +179,19 @@ export function createTombstoneMessage(alarm: Alarm, firedAt: Date, compaction: 
       plugin: PROACTIVE_PLUGIN,
       form: "notice",
       summary: boundContextSummary(PROACTIVE_PLUGIN + " silent wake " + alarm.id)
+    }
+  });
+}
+
+/** Build the notice user message that replaces an assistant/tool exchange run. */
+export function createExchangeNoticeMessage(alarm: Alarm, firedAt: Date): UserMessage {
+  return createUserMessage({
+    content: [{ type: "text", text: "[dsh-proactive: silent wake " + alarm.id + " exchange folded]" }],
+    source: {
+      kind: "plugin",
+      plugin: PROACTIVE_PLUGIN,
+      form: "notice",
+      summary: boundContextSummary(PROACTIVE_PLUGIN + " fold " + alarm.id)
     }
   });
 }

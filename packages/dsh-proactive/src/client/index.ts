@@ -13,6 +13,7 @@
 import type { ClientContext } from "@deepseek-ai/dsh-client-runtime/client";
 import type {} from "@deepseek-ai/dsh-client-ui-settings/client";
 import type {} from "@deepseek-ai/dsh-client-locale/client";
+import type { LocaleRuntime } from "@deepseek-ai/dsh-client-locale/client";
 import type {} from "@deepseek-ai/dsh-client-ui-slots";
 import type {} from "@deepseek-ai/dsh-client-ui-conversation/client";
 import { ProactivePanel } from "./panel.js";
@@ -43,13 +44,14 @@ export function apply(ctx: ClientContext): void {
 
   // Register the locale dictionaries (the tab label and all copy follow the
   // active UI language), then subscribe the copy hook to the live service.
+  const locale = (ctx as unknown as { locale: LocaleRuntime }).locale;
   try {
-    ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-proactive: dictionaries");
-    bindProactiveLocale(ctx.locale);
+    ctx.effect(() => locale.register(NS, { zh, en }), "dsh-proactive: dictionaries");
+    bindProactiveLocale(locale);
   } catch (error) {
     console.error("[dsh-proactive] locale bind failed (falling back to zh)", error);
   }
-  const t = ctx.locale.bind(NS);
+  const t = locale.bind(NS);
 
   /**
    * The live workspace store, read defensively at panel-mount time: there is

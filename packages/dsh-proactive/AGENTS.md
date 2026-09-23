@@ -51,3 +51,4 @@
 - client 注册槽位（dsh 0.1.2-rc.1 起）：`ctx.slots.register` 前槽位必须已被父条目 children 表**声明**，设置页面板曾因直接 register 竞态整体消失——一律走 `ctx.slots.inject(<slot>, () => register(...))` 等声明
 - client 调 host RPC：typert 网关端点为两段式 `POST /api/<ns>/<method>`（dotted `session.list` 404）；body `{type:"client-request", rpcId, method, payload:{args}}`，args 的 key 取自方法描述符的 `wire` 字段（session/list 是 `_request`）；响应须检查 `result.ok === true` 再取 `result.value`
 - `useSyncExternalStore` 不能直接传 `store.subscribe`/`store.getSnapshot` 方法引用——dsh workspaces 模型内部用 `this`，裸引用丢 this 即崩；用 `bindSource`（workspaces-source.ts）包装
+- DSH 0.1.5+ 表层替换契约：`surfaceOp.replace` 必须是 `{ op: "replace", startSeq, endSeq }`；且 `assistant/message` 不能做 surface replacement（禁止携带 `sourceEventSeqs` 与 replace 强制要求冲突），折叠 assistant/tool exchange 须采用 user notice 形式
