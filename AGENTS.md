@@ -19,6 +19,22 @@
 - 安装到 web profile：bundles + `cordis.patch.yml` 一行 insert；重启 dsh 服务生效（重启会使本会话中断——安排验收时注意）
 - 数据落盘：`$DSH_HOME/proactive/`（alarms.json / runs.jsonl / state.json / config.json）
 
+## E2E（涉及真实 agent 路径的验证）
+
+在包目录（`packages/dsh-proactive`）用 dsh-e2e 起最小实例（dsh-base + dsh-web-app + 本插件，worktree 自动推断）：
+
+```bash
+cd packages/dsh-proactive
+dsh-e2e start --wait-ready     # 启动并等就绪（~20s，~300MB）
+dsh-e2e run <脚本.mjs>         # 跑 e2e（本 worktree 内自动串行）
+dsh-e2e stop                   # 停止并释放槽位
+```
+
+- 脚本内读 `DSH_E2E_PORT`（连接 URL）、`DSH_E2E_HOME`（本 home，数据落盘断言用：`$DSH_E2E_HOME/proactive/`）
+- 禁止硬编码端口与 `/root/.dsh-e2e` 旧路径（已废弃）
+- 闹钟/唤醒回合类验证天然要等真实时间：优先用短间隔闹钟 + turn/end 轮询会话日志的写法（参考 dsh-cd 的 cd-tool.mjs 模式：marker 唯一性定位会话 + zstd 解日志断言）
+- 线上整树回归（多插件交互）另走 restart-dsh skill 的临时实例，与本流程分开
+
 ## 规范
 
 - 所有相对导入用 `.js` 后缀（NodeNext）；不要用 enum/namespace（坦白说 type 与接口均可）
