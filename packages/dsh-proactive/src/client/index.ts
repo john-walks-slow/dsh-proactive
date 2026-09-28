@@ -31,7 +31,7 @@ declare module "@deepseek-ai/dsh-client-ui-slots" {
 }
 
 /** Required services (fiber inject waiting — the runtime must be up first). */
-export const inject = ["slots", "settingsScope", "remote", "connection", "locale"];
+export const inject = ["slots", "remote", "connection", "locale"];
 
 const NS = "dsh-proactive" as const;
 

@@ -37,7 +37,6 @@
  *  their own) and stay excluded unconditionally.
  */
 
-import * as agentPresetsModule from "@deepseek-ai/dsh-agent-presets";
 import { isRecord, isValidWorkspaceId, type CreatedSessionKind, type ToolError } from "./domain.js";
 
 /** Narrow read of one workspace registry record (dsh-workspace Workspace). */
@@ -101,18 +100,23 @@ export interface SessionHeaderLike {
 
 /**
  * The session's effective preset id, latest `agent-preset/selected` first,
- * header stamp second. Uses the upstream `resolveSessionPreset` when the
- * installed dsh-agent-presets exports it (0.1.1-rc.2 does); 0.1.2-rc.1
- * REMOVED the export, and a named import would then fail at ESM link time
- * and take the whole plugin tree down — the namespace import lets us fall
- * back to this identical local fold instead. Lives here (not wake.ts) so
- * the preset-source session ranking below shares one fold with the wake
- * composition path; wake.ts re-exports it for source compatibility.
+ * header stamp second, resolved by this local fold.
+ *
+ * The upstream plural package `@deepseek-ai/dsh-agent-presets` was pinned at
+ * 0.1.1-rc.2 (its `resolveSessionPreset` export), but that package's module
+ * graph imports `{ settingsNamespace }` from `@deepseek-ai/dsh-settings`, an
+ * export the 0.1.7 core renamed to `SettingsForms`. Under the profile's
+ * runtime interception the name routes to the core install, so even a
+ * namespace import fails ESM link-time and takes the whole plugin tree down.
+ * The singular successor (`dsh-agent-preset` / `-registry`, which the core
+ * ships) exposes preset composition as the `agentPresets` service and does
+ * not export `resolveSessionPreset` at all. This identical local fold is the
+ * only usable implementation on 0.1.7 — the historic upstream upgrade path
+ * (0.1.2-rc.1) is also dead because its `dsh-scope@^0.1.2` peer was never
+ * published. Keep this fold; never re-introduce a static import of the
+ * plural package at module scope.
  */
-const upstreamResolveSessionPreset = (agentPresetsModule as unknown as { resolveSessionPreset?: (session: { header: { agentPreset?: string }; events: readonly unknown[] }) => string | undefined }).resolveSessionPreset;
-
 export function resolveSessionPresetOf(session: { header: { agentPreset?: string }; events: readonly unknown[] }): string | undefined {
-  if (typeof upstreamResolveSessionPreset === "function") return upstreamResolveSessionPreset(session);
   for (let index = session.events.length - 1; index >= 0; index -= 1) {
     const event = session.events[index] as { type?: string; data?: { agentPreset?: string } } | null;
     if (event?.type === "agent-preset/selected") return event.data?.agentPreset;
