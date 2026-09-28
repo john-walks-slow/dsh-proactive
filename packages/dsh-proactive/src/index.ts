@@ -29,7 +29,7 @@ import { PROACTIVE_PLUGIN } from "./domain.js";
 import { createPresetWakePort, createWorkspaceWakePort, liveEventsOf, resolveWorkspaceArg, type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type WorkspaceRegistryFacade } from "./workspace.js";
 
 export const name = PROACTIVE_PLUGIN;
-export const inject = ["agents", "tools", "sessionPersistence"];
+export const inject = ["agents", "tools", "sessionPersistence", "workspaceRegistry"];
 
 interface ModelSelectionLike {
   provider?: unknown;

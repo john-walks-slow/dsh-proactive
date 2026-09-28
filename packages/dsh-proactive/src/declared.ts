@@ -330,6 +330,10 @@ async function prepareEntry(deps: DeclaredSyncDeps, parsed: ParsedSchedule, entr
     const resolved = await deps.resolveWorkspace(args, undefined);
     if (isToolError(resolved)) return parsed.file + " [" + entry.id + "]: " + resolved.message;
     Object.assign(args, resolved);
+    // resolveWorkspaceArg strips target_workspace_path in its return value,
+    // but Object.assign never deletes keys already present in args — drop it
+    // explicitly or validateCreateArgs rejects the residual foreign key.
+    delete args["target_workspace_path"];
   }
   return args;
 }
