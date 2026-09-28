@@ -15,6 +15,7 @@
 ## 开发与调试
 
 - 构建/检查/测试（在包目录）：`npm run check `/ `npm run build `/ `npm test`（tsc 编译到 dist 后 node --test）
+- 跨仓库命令显式传 workdir：session cwd 常是别的仓库，裸跑 `npm run build` 会 build 错仓库（260928 曾在 dsh-im-humanize 白跑两次）；build 后冒烟验证产物含预期改动（grep 修复串是否进 `lib/`）再起验证实例
 - 产物在 `lib/`；运行时依赖声明为 peerDependencies，开发镜像装 devDependencies
 - 安装到 web profile：bundles + `cordis.patch.yml` 一行 insert；重启 dsh 服务生效（重启会使本会话中断——安排验收时注意）
 - 数据落盘：`$DSH_HOME/proactive/`（alarms.json / runs.jsonl / state.json / config.json）
@@ -35,6 +36,8 @@ dsh-e2e stop                   # 停止并释放槽位
 - 禁止硬编码端口与 `/root/.dsh-e2e` 旧路径（已废弃）
 - 闹钟/唤醒回合类验证天然要等真实时间：优先用短间隔闹钟 + turn/end 轮询会话日志的写法（参考 dsh-cd 的 cd-tool.mjs 模式：marker 唯一性定位会话 + zstd 解日志断言）
 - 线上整树回归（多插件交互）另走 restart-dsh skill 的临时实例，与本流程分开
+- proactive 状态探针：`GET /api/dsh-proactive/state`（panel route；先 `GET /?token=<token>` 换 dsh-auth cookie，临时实例 token 在其启动 banner）。`/api/workspace/list`、`/api/proactive.alarms/list` 等臆造路径全是 404——不确定路由先 grep 插件源码，别猜
+- cordis logger 的 info/warn 不落盘 `/var/log/dsh.log`（只有 error 与启动 banner）——"没日志"不能证伪任何事，实锤用 panel API / 数据文件 / 进程内探针
 
 ## 规范
 
