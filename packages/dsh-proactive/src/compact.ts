@@ -34,6 +34,7 @@ import { boundContextSummary, createAssistantMessage, createUserMessage, type As
 import { isSurfaceEvent, type SurfaceIntent } from "@deepseek-ai/dsh-session";
 import { PROACTIVE_PLUGIN, type Alarm, type AlarmCompaction } from "./domain.js";
 import { isFramingNotice } from "./observer.js";
+import { proactiveNoticeSource } from "./framing.js";
 
 /** First token of every compaction tombstone; distinct from FRAMING_MARKER. */
 export const TOMBSTONE_MARKER = "[dsh-proactive silent wake ";
@@ -174,12 +175,7 @@ export function applyWakeCompaction(
 export function createTombstoneMessage(alarm: Alarm, firedAt: Date, compaction: AlarmCompaction, reason?: string): UserMessage {
   return createUserMessage({
     content: [{ type: "text", text: tombstoneText(alarm, firedAt, compaction, reason) }],
-    source: {
-      kind: "plugin",
-      plugin: PROACTIVE_PLUGIN,
-      form: "notice",
-      summary: boundContextSummary(PROACTIVE_PLUGIN + " silent wake " + alarm.id)
-    }
+    source: proactiveNoticeSource(boundContextSummary(PROACTIVE_PLUGIN + " silent wake " + alarm.id))
   });
 }
 
@@ -187,12 +183,7 @@ export function createTombstoneMessage(alarm: Alarm, firedAt: Date, compaction: 
 export function createExchangeNoticeMessage(alarm: Alarm, firedAt: Date): UserMessage {
   return createUserMessage({
     content: [{ type: "text", text: "[dsh-proactive: silent wake " + alarm.id + " exchange folded]" }],
-    source: {
-      kind: "plugin",
-      plugin: PROACTIVE_PLUGIN,
-      form: "notice",
-      summary: boundContextSummary(PROACTIVE_PLUGIN + " fold " + alarm.id)
-    }
+    source: proactiveNoticeSource(boundContextSummary(PROACTIVE_PLUGIN + " fold " + alarm.id))
   });
 }
 

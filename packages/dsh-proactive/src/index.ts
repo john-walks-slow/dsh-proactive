@@ -19,14 +19,14 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import { resolveConfig } from "./config.js";
 import { ProactiveStore } from "./store.js";
 import { ProactiveScheduler } from "./scheduler.js";
-import { WakeDriver, type AgentPresetsPort, type WakeDriverDeps } from "./wake.js";
+import { WakeDriver, type AgentPresetsPort, type AgentsFacade, type WakeDriverDeps } from "./wake.js";
 import { registerProactiveTools } from "./tools.js";
 import { startDeclaredScheduleSync } from "./declared.js";
 import { ProactivePanelService } from "./panel/service.js";
 import { installPanelRoutes } from "./panel/routes.js";
 import { wireSettings } from "./settings.js";
 import { PROACTIVE_PLUGIN } from "./domain.js";
-import { createPresetWakePort, createWorkspaceWakePort, liveEventsOf, resolveWorkspaceArg, type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type WorkspaceRegistryFacade } from "./workspace.js";
+import { coldSessionHeaders, createPresetWakePort, createWorkspaceWakePort, liveEventsOf, resolveWorkspaceArg, type LiveSessionLike, type ProjectionCacheLike, type SessionPersistenceListRow, type WorkspaceRegistryFacade } from "./workspace.js";
 
 export const name = PROACTIVE_PLUGIN;
 export const inject = ["agents", "tools", "sessionPersistence", "workspaceRegistry"];
@@ -105,9 +105,12 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     ? undefined
     : (args: Record<string, unknown>, sessionCwd?: string) => resolveWorkspaceArg(args, { registry, sessionCwd });
   // The persistence service plays two narrow roles (fork seed reads via
-  // inspect, cold workspace ranking via list); one cast covers both.
+  // inspect, cold workspace ranking via list); one cast covers both. list()
+  // returns snapshot rows on the shipped core (≥0.1.5) — coldSessionHeaders
+  // unwraps .header; treating a row as the header itself indexes every cold
+  // session under undefined and silently skips all workspace/preset wakes.
   const persistenceService = ctx.get("sessionPersistence", false) as
-    (WakeDriverDeps["sessionPersistence"] & { list(): Promise<readonly SessionHeaderLike[]> }) | undefined;
+    (WakeDriverDeps["sessionPersistence"] & { list(): Promise<readonly SessionPersistenceListRow[]> }) | undefined;
   // The preset roster joins every wake agent to its session's preset — the
   // same defensive read as above: without dsh-agent-presets in the profile
   // (rosterless deployment) wake agents stay on the host-plane registry.
@@ -123,7 +126,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
           const sessions = ctx.get("sessions", false) as { list?: () => readonly LiveSessionLike[] } | undefined;
           return sessions?.list?.() ?? [];
         },
-        coldHeaders: persistenceService === undefined ? undefined : () => persistenceService.list(),
+        coldHeaders: persistenceService === undefined ? undefined : async () => coldSessionHeaders(await persistenceService.list()),
         projectionCache: ctx.get("sessionProjectionCache", false) as ProjectionCacheLike | undefined,
         createdSessionKind: (sessionId) => store.createdSessionKind(sessionId),
         log: (level, message) => ctx.logger[level](message)
@@ -138,7 +141,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   };
   const presetTargets = createPresetWakePort({
     liveSessions: liveSessionsForTargets,
-    coldHeaders: persistenceService === undefined ? undefined : () => persistenceService.list(),
+    coldHeaders: persistenceService === undefined ? undefined : async () => coldSessionHeaders(await persistenceService.list()),
     projectionCache: ctx.get("sessionProjectionCache", false) as ProjectionCacheLike | undefined,
     archivedSessionIds: registry === undefined ? undefined : () => registry.archivedSessionIds,
     createdSessionKind: (sessionId) => store.createdSessionKind(sessionId),
@@ -146,7 +149,10 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   });
 
   const driver = new WakeDriver({
-    agents: ctx.agents,
+    // The facade describes the LIVE 0.1.7 factory contract (setup receives
+    // (agentCtx, agent)); the dev-mirror dsh-agent@0.1.1-rc.2 types AgentSetup
+    // with one argument, so the registry no longer satisfies it structurally.
+    agents: ctx.agents as unknown as AgentsFacade,
     // Cold-parent fork seed reads go through the same persistence service the
     // web host uses; degraded to a logged failed wake when absent (headless).
     // Access is defensive: the cordis augmentation for sessionPersistence only

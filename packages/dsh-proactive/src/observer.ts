@@ -15,7 +15,7 @@
  */
 
 import { isRecord, type RunDecision } from "./domain.js";
-import { FRAMING_MARKER } from "./framing.js";
+import { FRAMING_MARKER, PROACTIVE_SOURCE_KIND } from "./framing.js";
 
 /** The subset of a session event we inspect. */
 export interface MinimalEvent {
@@ -134,7 +134,13 @@ const FAILURE_KINDS = new Set(["error", "aborted", "max-tokens"]);
 export function isFramingNotice(event: MinimalEvent): boolean {
   if (event.type !== "user/message") return false;
   const source = isRecord(event.data["source"]) ? event.data["source"] : undefined;
-  if (source === undefined || source["kind"] !== "plugin" || source["plugin"] !== "dsh-proactive") return false;
+  if (source === undefined) return false;
+  // v4 producer-owned kind is the live spelling; the legacy v3 wrapper
+  // ({kind:"plugin", plugin}) is still accepted so pre-migration logs and
+  // replayed fixtures keep anchoring.
+  const ours = source["kind"] === PROACTIVE_SOURCE_KIND
+    || (source["kind"] === "plugin" && source["plugin"] === "dsh-proactive");
+  if (!ours) return false;
   const blocks = Array.isArray(event.data["content"]) ? event.data["content"] : [];
   const first = blocks[0];
   return isRecord(first) && first["type"] === "text" && typeof first["text"] === "string" && first["text"].startsWith(FRAMING_MARKER);

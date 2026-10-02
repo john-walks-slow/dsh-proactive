@@ -473,6 +473,14 @@ export async function syncDeclaredSchedules(deps: DeclaredSyncDeps): Promise<Dec
     }
 
     if (summary.mutated) await deps.store.persist().catch(() => undefined);
+    // Per-entry failures must be visible, not just counted: an entry whose
+    // workspace is not registered (or whose spec fails validation) otherwise
+    // vanishes with zero trace — the summary count alone says nothing about
+    // WHICH entry dropped or why. cordis info/warn is not persisted anywhere,
+    // so the warn here is the only durable surface short of runs.jsonl.
+    for (const error of summary.errors) {
+      log("warn", "declared schedules: " + error);
+    }
     if (summary.created + summary.updated + summary.removed + summary.errors.length > 0) {
       log("info", "declared schedules: +" + summary.created + " ~" + summary.updated + " -" + summary.removed +
         " skippedPast=" + summary.skippedPast + " errors=" + summary.errors.length);

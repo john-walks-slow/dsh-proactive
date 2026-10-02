@@ -531,7 +531,7 @@ test("wake: new mode provider/model override threads into agentOptions and the f
     // request waterfall: the override must win over the seed route.
     const agentCtx = new Context();
     Object.defineProperty(agentCtx, "agent", { value: h.fakeAgent, configurable: true });
-    await (created.setup as (ctx: Context) => unknown)(agentCtx);
+    await (created.setup as (ctx: Context, agent: Agent) => unknown)(agentCtx, h.fakeAgent);
     const waterfall = (agentCtx as unknown as { waterfall: (subject: unknown, name: string, ...args: unknown[]) => Promise<unknown> }).waterfall;
     // system-prompt/assemble snapshots the fixed selection, then
     // agent/request stamps it over the seed route (the platform contract).

@@ -40,6 +40,7 @@
 
 ## Pitfalls
 
+- **平台 API 契约以线上运行时为准，devDependency 的 .d.ts 会说谎**：`ctx.sessionPersistence.list()` 在 devDep 0.1.1-rc.2 里是裸 `SessionHeader[]`，在运行时 ≥0.1.5 是 `SessionPersistenceSnapshot[]`（`{header, revision, …}`）；装配层把 snapshot 当 header 用会全量静默丢弃冷会话（260102 缺陷 1，`coldSessionHeaders` 适配）。`ctx.sessionProjectionCache.cachedSnapshot` 运行时签名是 `(meta, keys?)`——键白名单，不是 inheritedEventCount，传 `0` 永远取不到缓存行。跨版本消费 host 服务前先 grep 运行时实现（`/usr/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl` 是后端真身，不在 dsh/node_modules 下）。
 - 字符串构造 RegExp 时 `\d` 会在一层转义后被吞掉（"d" === "d"）——一律用正则字面量
 - 写 TS 源码/文档时，模板字面量内的反引号与 `$` 必须先占位后替换，否则程序级语法错误
 - 用 read 工具回写文件时注意 totalLines：read(limit) 只返回前 N 行，直接按返回内容 write 会截断文件（曾把 package.json 截成非法 JSON 导致 tsc 按 CJS 报 TS1295）。改 JSON/长文件要么读全，要么用 edit 做定点替换

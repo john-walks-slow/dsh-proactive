@@ -46,8 +46,9 @@ export interface SchedulerDeps {
   /**
    * Runs one alarm through the agent world; returns ok + analysis + the session the wake actually ran in (fork/new children differ from the owner).
    * "skipped" = no eligible destination (nothing was woken): the reason rides along for the run record.
+   * "failed" carries the driver's error text so the run record states WHY the wake failed (observability: the cordis warn log is not persisted anywhere).
    */
-  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; skipReason?: string; deferUntilMs?: number; analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
+  runWake: (alarm: Alarm) => Promise<{ outcome: WakeOutcome; sessionId?: string; skipReason?: string; deferUntilMs?: number; error?: string; analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string; noReplyReason?: string } }>;
   now?: () => number;
   /** Uniform(0,1) source for jittered repeats; defaults to Math.random. */
   random?: () => number;
@@ -233,7 +234,12 @@ export class ProactiveScheduler {
     if (result.outcome === "failed") {
       this.bumpRetry(alarm);
       const attempt = this.retries.get(alarm.id)!;
-      await this.recordRun(alarm, "failed", 0, "wake failed (attempt " + attempt + ")", result.sessionId);
+      // The driver's error text rides in the note: cordis info/warn never
+      // reaches a persisted log, so runs.jsonl is the only durable trace of
+      // WHY a wake failed. sessionId goes to its own (last) slot — passing it
+      // positionally as the 5th arg once misfiled it into reasoningSummary.
+      const reason = result.error !== undefined && result.error !== "" ? ": " + result.error : "";
+      await this.recordRun(alarm, "failed", 0, "wake failed (attempt " + attempt + ")" + reason, undefined, undefined, undefined, result.sessionId);
       if (attempt >= this.config.maxRetriesPerFire) {
         this.retries.delete(alarm.id);
         if (alarm.type === "once") {

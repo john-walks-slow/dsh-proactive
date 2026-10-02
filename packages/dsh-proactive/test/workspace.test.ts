@@ -9,9 +9,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  createdSessionEligible, createWorkspaceWakePort, listMetadataOf, liveEventsOf, pickWorkspaceTarget,
+  coldSessionHeaders, createdSessionEligible, createWorkspaceWakePort, listMetadataOf, liveEventsOf, pickWorkspaceTarget,
   resolveWorkspaceArg, resolveWorkspaceWakeTarget, updatedAtOf,
-  type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type WorkspaceCandidate, type WorkspaceLike, type WorkspaceRegistryFacade
+  type LiveSessionLike, type ProjectionCacheLike, type SessionHeaderLike, type SessionPersistenceListRow, type WorkspaceCandidate, type WorkspaceLike, type WorkspaceRegistryFacade
 } from "../src/workspace.js";
 
 function workspace(overrides: Partial<WorkspaceLike> = {}): WorkspaceLike {
@@ -253,6 +253,36 @@ test("resolveWorkspaceWakeTarget: live + cold mix — a cold row's cached lastPr
   };
   const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
   assert.deepEqual(destination, { kind: "session", sessionId: "cold-active" }); // 900 > 500
+});
+
+test("resolveWorkspaceWakeTarget: cold ranking survives the runtime list() snapshot shape (260102 defect 1)", async () => {
+  // dsh-session-persistence ≥0.1.5 resolves ctx.sessionPersistence.list() to
+  // SessionPersistenceSnapshot rows ({header, revision, sizeBytes}); the
+  // 0.1.1-rc.2 devDependency types still promised bare SessionHeader[]. A
+  // wiring that feeds the rows through unadapted indexes every cold session
+  // under row.id === undefined and the resolver returns {kind:"none"} —
+  // the 100%-skipped workspace heartbeats. coldSessionHeaders is the adapter.
+  const rows = [
+    { header: coldHeader({ id: "session-cold", createdAt: 100, cwd: "/repos/alpha" }), revision: "r1", sizeBytes: 42 },
+    { header: coldHeader({ id: "session-cold-2", createdAt: 200, cwd: "/repos/alpha", isSeeded: false }), revision: "r2" }
+  ] as unknown as readonly SessionPersistenceListRow[];
+  assert.deepEqual(
+    coldSessionHeaders(rows).map((header) => header.id),
+    ["session-cold", "session-cold-2"]
+  );
+  const deps = {
+    registry: registry({
+      get: () => workspace({ sessionIds: ["session-cold", "session-cold-2"] }),
+      resolveByPath: async () => undefined
+    }),
+    liveSessions: () => [],
+    // the index.ts wiring: snapshot rows -> headers, exactly as shipped
+    coldHeaders: async () => coldSessionHeaders(rows),
+    projectionCache: cacheWith({ "session-cold": { blank: false, lastPromptAt: 900 } }),
+    log: () => undefined
+  };
+  const destination = await resolveWorkspaceWakeTarget(deps, "ws-1");
+  assert.deepEqual(destination, { kind: "session", sessionId: "session-cold" });
 });
 
 test("resolveWorkspaceWakeTarget: live sessions read the log across dsh Session lines (0.1.2 dropped .events)", async () => {

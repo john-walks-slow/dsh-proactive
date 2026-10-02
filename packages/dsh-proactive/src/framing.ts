@@ -36,6 +36,31 @@ export interface FramingContext {
  */
 export const FRAMING_MARKER = "[dsh-proactive wake ";
 
+/**
+ * Session-format v4 producer-owned source kind for this plugin's durable
+ * messages. v4 retired the v3 `{kind:"plugin", plugin}` wrapper — the v4
+ * write path (encodeEvent row admission) rejects it with "format v4 message
+ * requires a producer-owned source kind", which broke every wake whose
+ * framing hit the disk (see docs/issues/260102-proactive-not-firing/). The
+ * producer now rides inside the kind itself, exactly like the released
+ * v3-to-v4 migration rewrites historical rows.
+ */
+export const PROACTIVE_SOURCE_KIND = "plugin:" + PROACTIVE_PLUGIN;
+
+/**
+ * Notice-form producer source in the v4 shape. Cast once here because the
+ * dev-mirror dsh-llm (0.1.1-rc.2) still types the retired v3 plugin wrapper
+ * as the only plugin source; the runtime host is already on producer-owned
+ * kinds and its union has no member for them.
+ */
+export function proactiveNoticeSource(summary: string): UserMessage["source"] {
+  return {
+    kind: PROACTIVE_SOURCE_KIND,
+    form: "notice",
+    summary
+  } as UserMessage["source"];
+}
+
 /** The instruction text the wake turn should actually follow: the alarm's own prompt. */
 export function effectiveWakePrompt(ctx: FramingContext): string {
   return ctx.alarm.prompt.trim();
@@ -82,11 +107,6 @@ export function createFramingMessage(ctx: FramingContext): UserMessage {
   const text = renderFraming(ctx);
   return createUserMessage({
     content: [{ type: "text", text }],
-    source: {
-      kind: "plugin",
-      plugin: PROACTIVE_PLUGIN,
-      form: "notice",
-      summary: boundContextSummary(PROACTIVE_PLUGIN + " wake (" + ctx.alarm.id + "): " + effectiveWakePrompt(ctx))
-    }
+    source: proactiveNoticeSource(boundContextSummary(PROACTIVE_PLUGIN + " wake (" + ctx.alarm.id + "): " + effectiveWakePrompt(ctx)))
   });
 }

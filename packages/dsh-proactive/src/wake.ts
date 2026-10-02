@@ -51,7 +51,7 @@
  */
 
 import type { Context } from "@deepseek-ai/cordis";
-import type { Agent, AgentOptions, AgentSetup, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
+import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from "@deepseek-ai/dsh-agent";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import type { EpochHeader, SessionEvent, SessionHeader } from "@deepseek-ai/dsh-session";
 import { randomUUID } from "node:crypto";
@@ -153,23 +153,32 @@ export interface AgentPresetsPort {
 }
 
 /**
- * Resume-time composition hook, handed the resumed agent's scoped context.
- * Reuses dsh-agent's own `AgentSetup` type so upstream contract drift in the
- * setup signature surfaces as a compile error here too.
+ * Creation/resume-time composition hook, handed the agent's scoped context
+ * and the agent itself.
+ *
+ * dsh-agent 0.1.7 passes the Agent as the SECOND setup argument; reading it
+ * as `agentCtx.agent` became an inject-gated service access on 0.1.7 and
+ * throws `cannot get property "agent" without inject` (which took down every
+ * new/fork/cold-resume wake, see docs/issues/260102-proactive-not-firing/).
+ * The dev-mirror dsh-agent is still 0.1.1-rc.2 (one-argument AgentSetup), so
+ * the live contract is declared here instead of imported from it.
  */
-export type WakeResumeSetup = AgentSetup;
+export type WakeSetup = (agentCtx: Context, agent: Agent) => void | Promise<void>;
+
+/** Back-compat alias for the setup hook's historical export name. */
+export type WakeResumeSetup = WakeSetup;
 
 export interface ResumeFacadeOptions {
   resumeSessionId: string;
   agentOptions?: AgentOptions;
-  setup?: WakeResumeSetup;
+  setup?: WakeSetup;
 }
 
 export interface CreateFacadeOptions {
   sessionId: string;
   seed?: readonly SessionEvent[];
   agentOptions?: AgentOptions;
-  setup?: AgentSetup;
+  setup?: WakeSetup;
   meta?: { cwd?: string; parentSession?: string; seedLength?: number; agentPreset?: string };
 }
 
@@ -300,14 +309,7 @@ export class WakeDriver {
     return options;
   }
 
-  private installSelection(agentCtx: unknown, override?: { provider?: string; model?: string }): void {
-    const agent = (agentCtx as unknown as { agent: Agent }).agent;
-    // react-loop installs `agent` on the scoped ctx before setup runs;
-    // absence means the setup contract drifted — fail loudly instead of
-    // silently reproducing the original "no provider/model" error
-    if (agent === undefined) {
-      throw new Error("wake resume: resumed agent has no scoped .agent (dsh-agent setup contract drift)");
-    }
+  private installSelection(agentCtx: unknown, agent: Agent, override?: { provider?: string; model?: string }): void {
     installModelSelection(agentCtx as Parameters<typeof installModelSelection>[0], this.createWakeSelection(agent, override));
   }
 
@@ -349,11 +351,10 @@ export class WakeDriver {
    * reads `.events` directly, so it always receives the compat-adapted view —
    * never the raw live Session.
    */
-  private async composeAgent(agentCtx: unknown, override?: { provider?: string; model?: string }): Promise<void> {
-    this.installSelection(agentCtx, override);
+  private async composeAgent(agentCtx: unknown, agent: Agent, override?: { provider?: string; model?: string }): Promise<void> {
+    this.installSelection(agentCtx, agent, override);
     const presets = this.deps.agentPresets;
     if (presets === undefined) return;
-    const agent = (agentCtx as unknown as { agent: Agent }).agent;
     const log = sessionLogOf(agent.session) as readonly SessionEvent[];
     const presetId = resolveSessionPresetOf({ header: agent.session.header, events: log });
     await presets.mount(agentCtx as Context, presetId);
@@ -394,7 +395,7 @@ export class WakeDriver {
     const handle = await this.deps.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: this.agentOptions(),
-      setup: (agentCtx) => this.composeAgent(agentCtx)
+      setup: (agentCtx, agent) => this.composeAgent(agentCtx, agent)
     });
     return { agent: handle.agent, handle, presence: "cold" };
   }
@@ -535,7 +536,7 @@ export class WakeDriver {
           sessionId: actualSessionId,
           agentOptions: this.agentOptions(override),
           meta,
-          setup: (agentCtx) => this.composeAgent(agentCtx, override)
+          setup: (agentCtx, agent) => this.composeAgent(agentCtx, agent, override)
         });
         // Bookkeep BEFORE attach/drive: even a failed attach or drive leaves
         // a real session behind, and it must never become a later wake's
@@ -748,7 +749,7 @@ export class WakeDriver {
         seed: parent.events.slice(0, cut),
         meta,
         agentOptions: this.agentOptions(),
-        setup: (agentCtx) => this.composeAgent(agentCtx)
+        setup: (agentCtx, agent) => this.composeAgent(agentCtx, agent)
       });
       // Fork children inherit the parent's human history, so lastPromptAt
       // can never expose them — only the bookkeeping keeps them out of

@@ -91,9 +91,11 @@ test("createFramingMessage wraps the rendered text in a notice-form plugin sourc
   const [block] = message.content;
   assert.equal(block.type, "text");
   assert.equal(block.text, renderFraming(ctx()));
+  // Session format v4 producer-owned source: the v3 {kind:"plugin", plugin}
+  // wrapper is retired (the v4 write path rejects it), so the producer rides
+  // inside the kind itself.
   assert.deepEqual(message.source, {
-    kind: "plugin",
-    plugin: "dsh-proactive",
+    kind: "plugin:dsh-proactive",
     form: "notice",
     summary: "dsh-proactive wake (alarm_abc123): 提醒我喝水"
   });

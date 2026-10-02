@@ -124,15 +124,37 @@ export function resolveSessionPresetOf(session: { header: { agentPreset?: string
   return session.header.agentPreset;
 }
 
+/**
+ * One row of `ctx.sessionPersistence.list()` on the shipped core
+ * (dsh-session-persistence ≥0.1.5): a {@link SessionPersistenceSnapshot} —
+ * the detached header under `.header`, not the header itself. The 0.1.1-rc.2
+ * devDependency this package compiles against still typed `list()` as bare
+ * `SessionHeader[]`; reading `.id` off a snapshot row yields `undefined` and
+ * silently drops every cold session from wake-target resolution
+ * (docs/issues/260102-proactive-not-firing/, defect 1).
+ */
+export interface SessionPersistenceListRow {
+  readonly header: SessionHeaderLike;
+}
+
+/**
+ * Adapt runtime `list()` rows into the header stream the resolvers rank —
+ * the single choke point for the snapshot/header contract drift above.
+ */
+export function coldSessionHeaders(rows: readonly SessionPersistenceListRow[]): readonly SessionHeaderLike[] {
+  return rows.map((row) => row.header);
+}
+
 /** The persisted projection cache row (ctx.sessionProjectionCache.cachedSnapshot). */
 export interface ProjectionCacheLike {
   /**
-   * The persisted cache read. The host contract (session-controller
-   * projectionsFor): the identity needs the durable inherited-event count,
-   * which a bare listed header does not carry — seeded (fork) headers are
-   * therefore skipped (no cache row), unseeded ones always key at 0.
+   * The persisted cache read, at host parity with the session controller's
+   * cold listing (projectionsFor: `cachedSnapshot(header)` with no key
+   * filter). The runtime's second parameter is a projection-key whitelist:
+   * passing the legacy numeric inherited-event count there selects an empty
+   * key set and the row always reads as undefined — never fold it back in.
    */
-  cachedSnapshot(meta: SessionHeaderLike, inheritedEventCount: 0): { values?: { sessionListMetadata?: { blank: boolean; lastPromptAt: number | null } } } | undefined;
+  cachedSnapshot(meta: SessionHeaderLike): { values?: { sessionListMetadata?: { blank: boolean; lastPromptAt: number | null } } } | undefined;
 }
 
 /** Inputs the create-side resolver needs from the host. */
@@ -358,12 +380,12 @@ export async function resolveWorkspaceWakeTarget(deps: WorkspaceWakeDeps, worksp
     }
     const header = coldById.get(sessionId);
     if (header === undefined) continue; // neither live nor materialized: not a real destination
-    // The sidebar fold's exact cold read (projectionsFor): seeded (fork)
-    // headers carry no durable inherited count in a bare listing, so they get
-    // no cache row; unseeded ones key at 0.
+    // The sidebar fold's cold read (projectionsFor): seeded (fork) headers
+    // carry no cache row on the current host; a missing row stays
+    // conservatively visible.
     const metadata = header.isSeeded === true
       ? undefined
-      : deps.projectionCache?.cachedSnapshot(header, 0)?.values?.sessionListMetadata;
+      : deps.projectionCache?.cachedSnapshot(header)?.values?.sessionListMetadata;
     if (created !== undefined && !createdSessionEligible(created, metadata?.lastPromptAt)) continue;
     candidates.push({
       sessionId,
@@ -500,11 +522,11 @@ export async function resolvePresetWakeTarget(deps: PresetWakeDeps, presetId: st
     if (archived.has(header.id)) continue;
     if (header.origin === "subagent") continue;
     if (header.agentPreset !== presetId) continue;
-    // The sidebar fold's exact cold read: seeded (fork) headers carry no
-    // cache row; a missing row is conservatively visible.
+    // The sidebar fold's cold read: seeded (fork) headers carry no cache row;
+    // a missing row is conservatively visible.
     const metadata = header.isSeeded === true
       ? undefined
-      : deps.projectionCache?.cachedSnapshot(header, 0)?.values?.sessionListMetadata;
+      : deps.projectionCache?.cachedSnapshot(header)?.values?.sessionListMetadata;
     const created = deps.createdSessionKind?.(header.id);
     if (created !== undefined && !createdSessionEligible(created, metadata?.lastPromptAt)) continue;
     candidates.push({

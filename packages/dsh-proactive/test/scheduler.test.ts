@@ -65,6 +65,7 @@ interface Outcome {
   sessionId?: string;
   skipReason?: string;
   deferUntilMs?: number;
+  error?: string;
   analysis?: { decision: RunDecision; budgetDelta: number; note?: string; reasoningSummary?: string; replySummary?: string };
 }
 
@@ -270,6 +271,22 @@ test("failed once alarm terminates after maxRetriesPerFire", async (tctx) => {
   await h.flush(() => h.store.getAlarm("f1")?.status === "failed");
   assert.equal(h.fired.length, 2);
   assert.equal(h.store.getAlarm("f1")?.status, "failed");
+});
+
+test("failed wake records the driver's error text in the run note (not as reasoningSummary)", async (tctx) => {
+  const h = await harness({ maxRetriesPerFire: 1 });
+  tctx.after(async () => { h.scheduler.stop(); rmSyncSafe(h.dir); });
+  h.outcomes.push({ outcome: "failed", error: "cannot get property \"agent\" without inject", sessionId: "session-wake-target-1" });
+  const a = alarm("ferr");
+  h.store.addAlarm(a);
+  h.scheduler.start();
+  await h.flush(() => h.store.getAlarm("ferr")?.status === "failed");
+  const runs = readFileSync(join(h.dir, "runs.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  const failed = runs.find((run) => run["decision"] === "failed");
+  assert.ok(failed !== undefined, "a failed run record must exist");
+  assert.match(String(failed["note"]), /wake failed \(attempt 1\): cannot get property "agent" without inject/);
+  assert.equal(failed["sessionId"], "session-wake-target-1", "the wake session id must land in sessionId, not reasoningSummary");
+  assert.equal(failed["reasoningSummary"], undefined, "the misfiled historical sessionId-as-reasoningSummary must not regress");
 });
 
 test("failed repeating alarm advances to next occurrence after maxRetriesPerFire", async (tctx) => {

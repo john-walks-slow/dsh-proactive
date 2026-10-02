@@ -482,7 +482,7 @@ test("cold resume installs a model-selection setup that drives the request water
     // execute the real setup against a real cordis Context with the fake agent
     const agentCtx = new Context();
     Object.defineProperty(agentCtx, "agent", { value: wakeAgent, configurable: true });
-    const applied = (capturedOptions.setup as (ctx: Context) => unknown)(agentCtx);
+    const applied = (capturedOptions.setup as (ctx: Context, agent: Agent) => unknown)(agentCtx, wakeAgent);
     if (applied && typeof (applied as { then?: unknown }).then === "function") await applied;
 
     // drive the two model-selection waterfalls (strict cordis event typings
@@ -545,7 +545,7 @@ test("cold resume mounts the session's preset, newest selection winning", async 
     // context and the LAST recorded selection, not the creation header
     const agentCtx = new Context();
     Object.defineProperty(agentCtx, "agent", { value: wakeAgent, configurable: true });
-    const applied = (capturedOptions.setup as (ctx: Context) => unknown)(agentCtx);
+    const applied = (capturedOptions.setup as (ctx: Context, agent: Agent) => unknown)(agentCtx, wakeAgent);
     if (applied && typeof (applied as { then?: unknown }).then === "function") await applied;
 
     assert.equal(mounted.length, 1);
@@ -580,7 +580,7 @@ test("cold resume without a roster composes no preset (rosterless deployments)",
     // makeWakeAgent's session deliberately has no `header`, so a regression
     // that drops the rosterless guard rejects right here (reading
     // `header.agentPreset` off the fake session).
-    await (capturedOptions.setup as (ctx: Context) => Promise<void>)(agentCtx);
+    await (capturedOptions.setup as (ctx: Context, agent: Agent) => Promise<void>)(agentCtx, wakeAgent);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
