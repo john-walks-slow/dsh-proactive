@@ -17,7 +17,6 @@ import type { LocaleRuntime } from "@deepseek-ai/dsh-client-locale/client";
 import type {} from "@deepseek-ai/dsh-client-ui-slots";
 import type {} from "@deepseek-ai/dsh-client-ui-conversation/client";
 import { ProactivePanel } from "./panel.js";
-import { ProactiveSessionPanel } from "./session-panel.js";
 import { bindProactiveLocale } from "./use-locale.js";
 import { injectProactiveStyles } from "./style.js";
 import type { WorkspacesSource } from "./workspaces-source.js";
@@ -90,22 +89,6 @@ export function apply(ctx: ClientContext): void {
     anyApplied = true;
   } catch (error) {
     console.error("[dsh-proactive] settings.section registration failed", error);
-  }
-
-  try {
-    ctx.slots.inject("conversation.view", () =>
-      ctx.slots.register({
-        name: "conversation.view",
-        id: "proactive",
-        order: 20,
-        locale: NS,
-        label: () => t("tabLabel"),
-        inject: injectWorkspaces,
-      }, ProactiveSessionPanel)
-    );
-    anyApplied = true;
-  } catch (error) {
-    console.error("[dsh-proactive] conversation.view registration failed", error);
   }
 
   if (anyApplied) console.info("[dsh-proactive] panel surfaces mounted (settings.section + conversation.view)");

@@ -192,8 +192,9 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       sessionEvents: sessionEventsOf(ctx)
     });
   };
-  const stopCreated = ctx.on("agent/created", ({ agent }: { agent: Agent }) => {
+  const stopCreated = ctx.on("agent/created", ({ agent }) => {
     registerOne(agent);
+    return undefined;
   });
   for (const existing of ctx.agents.roots()) {
     registerOne(existing);

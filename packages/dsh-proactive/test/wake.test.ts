@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import { Session, deriveEventMessage, type EpochHeader } from "@deepseek-ai/dsh-session";
-import { CallId, ReasoningEffortId, createAssistantMessage, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { ToolCallId, ReasoningEffortId, createAssistantMessage, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { WakeDriver, createWakeSelectionRef, selectionFromHeader, completedTurnCut, sessionLogOf, lastEventEpoch, type AgentHandleLike, type AgentPresetsPort, type AgentsFacade, type CreateFacadeOptions, type WakeFireResult } from "../src/wake.js";
 import type { WorkspaceWakePort } from "../src/workspace.js";
 import { ProactiveStore } from "../src/store.js";
@@ -48,7 +48,7 @@ function makeFakeAgent(rec: FakeRecording, opts: { busy?: boolean; failWhenIdle?
       rec.messages.push({ message });
       rec.activeDuringFollowup = true; // driver must still count this wake as active
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: ToolCallId("c1"), name: "proactive_reclaim", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => {
@@ -319,7 +319,7 @@ test("fork from a cold parent reads the persisted log for the seed", async () =>
   const driver = new WakeDriver({
     agents,
     sessionPersistence: {
-      inspect: async () => ({ events: persistedEvents as never, meta: { version: 0, id: "parent" as never, createdAt: 0, cwd: "/persisted", agentPreset: "general" } })
+      inspect: async () => ({ events: persistedEvents as never, meta: { version: 0, id: "parent" as never, createdAt: 0, cwd: "/persisted", agentPreset: "general" } } as never)
     },
     modelSelection: () => undefined,
     store,
@@ -386,7 +386,7 @@ test("new target without a workspace inherits the owner session's cwd", async ()
   const driver = new WakeDriver({
     agents,
     sessionPersistence: {
-      inspect: async () => ({ events: [] as never, meta: { version: 0, id: "s1" as never, createdAt: 0, cwd: "/root/agents/luna", agentPreset: "standard" } })
+      inspect: async () => ({ events: [] as never, meta: { version: 0, id: "s1" as never, createdAt: 0, cwd: "/root/agents/luna", agentPreset: "standard" } } as never)
     },
     modelSelection: () => undefined,
     store,
@@ -424,7 +424,7 @@ test("new target stays workspace-less when the owner session has no readable cwd
     // Cold owner whose persisted header carries no cwd; inspect throwing is
     // the same shape (parentLog folds it to undefined).
     sessionPersistence: {
-      inspect: async () => ({ events: [] as never, meta: { version: 0, id: "s1" as never, createdAt: 0, agentPreset: "standard" } })
+      inspect: async () => ({ events: [] as never, meta: { version: 0, id: "s1" as never, createdAt: 0, agentPreset: "standard" } } as never)
     },
     modelSelection: () => undefined,
     store,
@@ -622,7 +622,7 @@ function makeWakeAgent(header: EpochHeader) {
     session: { id: "s1", events, requestHeader: () => header },
     followup: () => {
       events.push({ type: "turn/start", data: { turn: 1 } });
-      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" } });
+      events.push({ type: "tool/call", data: { turn: 1, step: 1, callId: ToolCallId("c1"), name: "proactive_reclaim", arguments: "{}" } });
       events.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
@@ -672,16 +672,17 @@ test("silent wake collapses on the model surface after the turn settles", async 
       session.append("assistant/message", {
         turn: 1,
         step: 1,
+        stream: [],
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: ToolCallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
-      }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" });
+      }, { surfaceOp: "append" });
+      session.append("tool/call", { turn: 1, step: 1, callId: ToolCallId("c1"), name: "proactive_reclaim", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
-        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
+        message: createToolResultMessage({ callId: ToolCallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
       }, { surfaceOp: "append" });
       session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
     },
@@ -701,7 +702,7 @@ test("silent wake collapses on the model surface after the turn settles", async 
     // Compaction landed: the model surface derives ONLY the tombstone from
     // the whole wake exchange (framing + assistant + tool result erased).
     const derived = session.surface.nodes
-      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as never))
       .filter((message) => message !== null);
     assert.equal(derived.length, 1);
     const [only] = derived;
@@ -710,8 +711,8 @@ test("silent wake collapses on the model surface after the turn settles", async 
     assert.ok(block.text.startsWith("[dsh-proactive silent wake silent1 "), "tombstone expected, got: " + block.text);
     assert.ok(Buffer.byteLength(block.text) < 90, "tombstone must stay tiny, was " + Buffer.byteLength(block.text));
     // The raw log keeps the full exchange for the human transcript.
-    assert.ok(session.events.some((event) => event.type === "assistant/message"));
-    assert.ok(session.events.some((event) => event.type === "tool/result"));
+    assert.ok(session.snapshotEvents().some((event) => event.type === "assistant/message"));
+    assert.ok(session.snapshotEvents().some((event) => event.type === "tool/result"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -731,16 +732,17 @@ test("silent wake is NOT compacted when silentWakeCompaction is off", async () =
       session.append("assistant/message", {
         turn: 1,
         step: 1,
+        stream: [],
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: ToolCallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
-      }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" });
+      }, { surfaceOp: "append" });
+      session.append("tool/call", { turn: 1, step: 1, callId: ToolCallId("c1"), name: "proactive_reclaim", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
-        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
+        message: createToolResultMessage({ callId: ToolCallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
       }, { surfaceOp: "append" });
       session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
     },
@@ -758,7 +760,7 @@ test("silent wake is NOT compacted when silentWakeCompaction is off", async () =
     assert.equal(fire.outcome, "ok");
     if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
     const derived = session.surface.nodes
-      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as never))
       .filter((message) => message !== null);
     const texts = derived.map((m) => (m.content[0] as { text?: string }).text ?? "");
     assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake silentoff1 ")), "framing must stay on the surface (no compaction)");
@@ -787,16 +789,17 @@ test("a host 'no_reply' silence keeps the work in context (NOT compacted, even w
       session.append("assistant/message", {
         turn: 1,
         step: 1,
+        stream: [],
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "no_reply", arguments: "{}" }],
+          content: [{ type: "tool-call", id: ToolCallId("c1"), name: "no_reply", arguments: "{}" }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
-      }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "no_reply", arguments: "{}" });
+      }, { surfaceOp: "append" });
+      session.append("tool/call", { turn: 1, step: 1, callId: ToolCallId("c1"), name: "no_reply", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
-        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ acknowledged: true }) }], isError: false })
+        message: createToolResultMessage({ callId: ToolCallId("c1"), content: [{ type: "text", text: JSON.stringify({ acknowledged: true }) }], isError: false })
       }, { surfaceOp: "append" });
       session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
     },
@@ -816,7 +819,7 @@ test("a host 'no_reply' silence keeps the work in context (NOT compacted, even w
     // No tombstone: the wake exchange (framing + the model's tool work) stays
     // on the model surface so later turns can see what was done.
     const texts = session.surface.nodes
-      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as never))
       .filter((message) => message !== null)
       .map((m) => (m.content[0] as { text?: string }).text ?? "");
     assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake keepwork1 ")), "framing must stay (no compaction)");
@@ -856,7 +859,7 @@ test("an implicit silence (no tool, no text) is NOT compacted — reclaim needs 
     assert.equal(fire.outcome, "ok");
     if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
     const texts = session.surface.nodes
-      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as never))
       .filter((message) => message !== null)
       .map((m) => (m.content[0] as { text?: string }).text ?? "");
     assert.ok(texts.some((t) => t.startsWith("[dsh-proactive wake implicit1 ")), "framing must stay (no compaction)");
@@ -879,11 +882,12 @@ test("visible-reply wakes are never compacted", async () => {
       session.append("assistant/message", {
         turn: 1,
         step: 1,
+        stream: [],
         message: createAssistantMessage({
           content: [{ type: "text", text: "到点了，喝水！" }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
-      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      }, { surfaceOp: "append" });
       session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
     },
     runMaintenance: async (task: () => Promise<unknown>) => { await task(); return true; },
@@ -903,7 +907,7 @@ test("visible-reply wakes are never compacted", async () => {
       assert.equal(fire.analysis.budgetDelta, 1);
     }
     const derived = session.surface.nodes
-      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as never))
       .filter((message) => message !== null);
     assert.equal(derived.length, 2); // framing + visible reply, untouched
     const reply = derived[1].content[0] as { type: string; text: string };
@@ -928,11 +932,12 @@ test("raced user turn cannot make a visible wake reply compactable (P1 regressio
       session.append("assistant/message", {
         turn: 1,
         step: 1,
+        stream: [],
         message: createAssistantMessage({
           content: [{ type: "text", text: "到点了，该喝水了！" }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
-      }, { surfaceOp: "append", sourceEventSeqs: [] });
+      }, { surfaceOp: "append" });
       session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
       session.append("turn/start", { turn: 2 });
       session.append("user/message", createUserMessage({ content: [{ type: "text", text: "用户竞态消息" }], source: { kind: "user" } }), { surfaceOp: "append" });
@@ -955,7 +960,7 @@ test("raced user turn cannot make a visible wake reply compactable (P1 regressio
       assert.equal(fire.analysis.budgetDelta, 1);
     }
     const derived = session.surface.nodes
-      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as never))
       .filter((message) => message !== null);
     const texts = derived.map((m) => (m.content[0] as { text?: string }).text ?? "");
     assert.ok(texts.some((t) => t.includes("到点了，该喝水了！")), "visible reply must stay on the model surface");
@@ -984,16 +989,17 @@ test("raced user turn with text does not block compaction of a SILENT wake", asy
       session.append("assistant/message", {
         turn: 1,
         step: 1,
+        stream: [],
         message: createAssistantMessage({
-          content: [{ type: "tool-call", id: CallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
+          content: [{ type: "tool-call", id: ToolCallId("c1"), name: "proactive_reclaim", arguments: JSON.stringify({ reason: "没事" }) }],
           source: { provider: "cpa", model: "gemini-3-flash" }
         })
-      }, { surfaceOp: "append", sourceEventSeqs: [] });
-      session.append("tool/call", { turn: 1, step: 1, callId: CallId("c1"), name: "proactive_reclaim", arguments: "{}" });
+      }, { surfaceOp: "append" });
+      session.append("tool/call", { turn: 1, step: 1, callId: ToolCallId("c1"), name: "proactive_reclaim", arguments: "{}" });
       session.append("tool/result", {
         turn: 1,
         step: 1,
-        message: createToolResultMessage({ callId: CallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
+        message: createToolResultMessage({ callId: ToolCallId("c1"), content: [{ type: "text", text: JSON.stringify({ accepted: true, silent: true }) }], isError: false })
       }, { surfaceOp: "append" });
       session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
       session.append("turn/start", { turn: 2 });
@@ -1014,7 +1020,7 @@ test("raced user turn with text does not block compaction of a SILENT wake", asy
     assert.equal(fire.outcome, "ok");
     if (fire.outcome === "ok") assert.equal(fire.analysis.decision, "no_reply");
     const texts = session.surface.nodes
-      .map((seq) => deriveEventMessage(session.events[seq] as never))
+      .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as never))
       .filter((message) => message !== null)
       .map((m) => (m.content[0] as { text?: string }).text ?? "");
     assert.ok(texts.some((t) => t.startsWith("[dsh-proactive silent wake silentraced1 ")), "silent wake still collapsed to a tombstone");
