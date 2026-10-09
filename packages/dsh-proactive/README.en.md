@@ -105,11 +105,11 @@ Registered on every root agent (active in both cold-wake and normal turns):
 
 | Tool | Purpose & Parameters |
 |---|---|
-| `proactive_set` | **Create alarm**: `prompt` (required); one trigger of `at`, `after_seconds`, `every_seconds` (≥300), or `cron`; optional `jitter_seconds`, `min_idle_seconds`, `time_zone`, `respect_quiet_hours`, `target_mode`, `target_session_id`, `compaction`. |
+| `proactive_set` | **Create alarm**: `prompt` (required); one trigger of `at`, `after_seconds`, `every_seconds` (≥300), `cron`, or `schedule_file` (the file-schedule handle — see below); optional `jitter_seconds`, `min_idle_seconds`, `time_zone`, `respect_quiet_hours`, `target_mode`, `target_session_id`, `compaction`. |
 | `proactive_list` | **List alarms**: lists active alarms for the current session; pass `all=true` to list host-wide across all sessions. |
-| `proactive_update` | **Update alarm**: replaces the full spec by exact `id` (same dialect as set, preserves id, ownership, and history); declared alarms are protected from direct edits. |
-| `proactive_cancel` | **Cancel alarm**: cancels by exact `id` across sessions; declared alarms are protected from direct cancellation. |
-| `proactive_update_settings` | **Update settings**: partially updates host-level settings, atomic persists to `config.json` and hot-applies; supports configuring `schedule_files`. |
+| `proactive_update` | **Update alarm**: replaces the full spec by exact `id` (same dialect as set, preserves id, ownership, and history); a file-schedule handle is editable (a new path re-derives its children), its child alarms are protected. |
+| `proactive_cancel` | **Cancel alarm**: cancels by exact `id` across sessions; cancelling a handle deletes its child alarms too (the result carries `removedChildren`); children cannot be cancelled on their own. |
+| `proactive_update_settings` | **Update settings**: partially updates host-level settings, atomic persists to `config.json` and hot-applies. |
 | `proactive_reclaim` | **Conclude silently**: **Only active during wake turns**. Call as your sole action without chat text; the host reclaims the wake turn and collapses it into a tombstone. For ordinary turns, simply produce no text or use the host no-reply tool. |
 
 ## GUI Management Panel
@@ -132,18 +132,35 @@ The plugin registers two complementary management surfaces automatically:
   - Subscribes to SSE (`/api/dsh-proactive/events`); updates from tools, panel actions, or triggers reflect instantly.
   - Headless profiles without a webserver skip panel routes automatically.
 
-## Declared Schedule Files
+## File Schedule Alarms (the fourth alarm type)
 
-Alarms can also be declared declaratively: configure `config.scheduleFiles` with glob patterns (e.g. `"/srv/agents/*/.life/wake_schedule.json"`). The scheduler polls and syncs them at startup and every `schedulePollSeconds`.
+Beyond the three firing types (`at / after_seconds / every_seconds / cron`) there is a **file-schedule alarm**: it never wakes on its own — it is the **handle** for one JSON schedule file (alarm type `file`) and materializes the file's entries into **child alarms** under it.
 
-- **File as Single Source of Truth**: Idempotent upsert, auto-healing on restart; deleting entries or files cleans up corresponding alarms; expired `at` entries are skipped cleanly; invalid JSON or read errors preserve existing alarms without crashing.
-- **Typical Use Case**: Living agents or simulated worlds emitting daily agendas can write `.life/wake_schedule.json` in their workspace; if located inside an agent workspace, **no target needs to be specified** (defaults to the containing workspace).
+Create it like any other alarm, with `schedule_file` as the selector:
+
+```
+proactive_set(
+  prompt: "default wake instruction (used by entries without their own prompt)",
+  schedule_file: "/root/agents/yu/.life/wake_schedule.json",
+  target_mode: "resume", target_workspace_path: "/root/agents/yu"   // optional, see the default rule below
+)
+```
+
+- **One alarm = one file**: `schedule_file` takes a **single absolute path** (no globs — create one handle per file). A second handle for the same file is rejected with the existing id: two handles would fire every entry twice.
+- **The file is the source of truth for its entries**: writing the file adds/edits/removes child alarms; deleting an entry removes its child; deleting the file revokes the plan (the handle itself stays). Syncing is idempotent and self-healing across restarts, and an unchanged entry is a total no-op (jitter anchors and min-idle deferrals are preserved). A read failure or broken JSON keeps the previous plan instead of cancelling wakes.
+- **The handle is the subscription's existence**: pausing a handle stops syncing and clears its children; resuming re-derives them from the current file (child ids are stable, so run history stays continuous); cancelling a handle removes it together with every child.
+- **Entry format**: `id` required (`[A-Za-z0-9._-]{1,100}`, unique per file); one selector of `at` / `after_seconds` / `every_seconds` / `cron`; optional `prompt` (falls back to the handle's); optional `jitter_seconds`, `time_zone`, `respect_quiet_hours`, `compaction`, `min_idle_seconds`; optional nested `target`.
+- **Precedence**: `prompt` and every scalar key merge key-wise as entry > file top level > handle > dialect default; `target` is chosen as ONE WHOLE LAYER (entry target > file-level target > handle target) and never merged key-wise.
+- **Default target**: when a handle names no `target_*` at all, the host only accepts "the file's **grandparent** directory is a registered workspace" (i.e. `<workspace>/<dir>/<file>`) and otherwise **fails closed**, asking for an explicit `target_workspace_path` / `target_session_id`. Walking up to the nearest registered ancestor is deliberately NOT done: `/root` is itself a workspace on this host, so it would silently route wakes into an unrelated conversation.
+- **Atomic writes are a hard contract**: a missing file means "plan revoked". Always write a temp file and rename; a delete-then-create window really drops an `at` wake (a truncated file is absorbed as broken JSON).
+- **Editing a handle = re-anchoring its entries**: changing the handle's prompt/target changes every entry hash, so `every`/`after` children rebuild their anchors from now and the next planned wake slips.
+- **Protection**: children carry `declared` provenance and refuse direct update/cancel (edit the file instead); `proactive_list` lists only handles (with `scheduleFile` and `declaredEntries`), never children. The panel mirrors this: one handle row with its entry count, the children's wake history folded onto that row, and no "fire now" action.
 
 ```json
 {
   "version": 1,
   "time_zone": "Asia/Shanghai",
-  "target": { "workspace_path": "/srv/agents/aoi" },
+  "target": { "workspace_path": "/root/agents/yu" },
   "entries": [
     {
       "id": "evt-260918-002",
@@ -155,8 +172,16 @@ Alarms can also be declared declaratively: configure `config.scheduleFiles` with
 }
 ```
 
-- **Entry Format**: Aligns with `proactive_set`. Top-level attributes act as entry defaults.
-- **Protection**: Synced alarms are marked with `declared` provenance; direct edits or cancellations via tools are rejected with a prompt to edit the source file.
+### Who creates the handle
+
+Files are never picked up automatically — **a handle must exist first**. The usual pattern is a world-master bootstrap that checks `proactive_list all=true` and creates one handle per agent workspace, always with an explicit target:
+
+```
+proactive_list { all: true }   // is every /root/agents/*/.life/wake_schedule.json already handled?
+proactive_set  { prompt: "…", schedule_file: "/root/agents/luna/.life/wake_schedule.json", target_workspace_path: "/root/agents/luna" }
+```
+
+After that you only rewrite `wake_schedule.json` each day.
 
 ## Configuration
 
@@ -176,8 +201,7 @@ Works out of the box with sensible defaults. To customize, edit `$DSH_HOME/proac
   "maxRetriesPerFire": 3,                      // Retry cap on busy/failed wakes
   "maxPromptLength": 4000,                     // Max character length for alarm prompts
   "defaultPrompt": "This is a heartbeat reminder, …", // Prefill prompt for creation form
-  "scheduleFiles": [],                         // Glob patterns for declared schedule files
-  "schedulePollSeconds": 60,                   // Polling frequency in seconds (15..3600)
+  "schedulePollSeconds": 60,                   // Polling frequency for file-schedule handles (15..3600)
   "silentWakeCompaction": true                 // Enable tombstone compaction on silent wakes
 }
 ```
@@ -205,7 +229,7 @@ All runtime state lives in `$DSH_HOME/proactive/`:
 - **Scheduled Wake-ups**: Runs an in-process timer loop on the host side; no root or crontab required; self-heals from disk on restart.
 - **Notification Channels**: No external push services; visible replies reuse standard DSH message routing (Web and IM); silent turns generate zero delivery.
 - **Network Requests**: The plugin initiates no external network requests; panel routes (`/api/dsh-proactive/*`) are strictly local.
-- **File Writes**: Confined exclusively to `$DSH_HOME/proactive/`.
+- **File Writes**: Confined exclusively to `$DSH_HOME/proactive/`; reads are limited to the single JSON path each file-schedule handle declares.
 
 ## Local Development
 

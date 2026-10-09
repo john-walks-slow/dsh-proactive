@@ -17,6 +17,8 @@ import { ProactivePanelService, type PanelServiceDeps } from "../src/panel/servi
 import { applyHotConfig, hotSubset } from "../src/settings.js";
 import { DEFAULT_CONFIG, type ProactiveConfig } from "../src/config.js";
 import { createArgsFromForm, type PanelCreateForm } from "../src/panel/contract.js";
+import { syncScheduleFiles, type SyncSummary } from "../src/schedule-sync.js";
+import { mkdirSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 
 const NOW = Date.parse("2026-08-29T12:00:00.000Z");
 
@@ -29,7 +31,11 @@ interface Harness {
   advance: (ms: number) => void;
 }
 
-async function harness(titleOverrides?: Record<string, string>, resolveWorkspace?: NonNullable<PanelServiceDeps["resolveWorkspace"]>): Promise<Harness> {
+async function harness(
+  titleOverrides?: Record<string, string>,
+  resolveWorkspace?: NonNullable<PanelServiceDeps["resolveWorkspace"]>,
+  extra: Partial<PanelServiceDeps> = {}
+): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "dsh-proactive-panel-"));
   const store = new ProactiveStore(dir);
   const config: ProactiveConfig = { ...DEFAULT_CONFIG, quietHours: { ...DEFAULT_CONFIG.quietHours } };
@@ -44,7 +50,8 @@ async function harness(titleOverrides?: Record<string, string>, resolveWorkspace
     log: () => undefined,
     sessionTitle: (sessionId) => titleOverrides?.[sessionId] ?? "",
     sessionEvents: (sessionId) => (sessionId.startsWith("sess-") ? [{ type: "user/message", time: 100, data: { source: { kind: "user", rpcId: "r1", clientTimeZone: "Asia/Tokyo" } } }] : undefined),
-    ...(resolveWorkspace !== undefined ? { resolveWorkspace } : {})
+    ...(resolveWorkspace !== undefined ? { resolveWorkspace } : {}),
+    ...extra
   });
   return { store, service, drives: () => drives.count, config, advance: (ms) => { clock += ms; } };
 }
@@ -574,4 +581,74 @@ test("panel: workspace resolver error surfaces as the action error", async () =>
   if (created.ok) return;
   assert.equal(created.error.code, "not_found");
   assert.ok(created.error.message.includes("does not exist"));
+});
+
+// ---------------------------------------------------------------------------
+// 261009: schedule-file handles in the panel
+// ---------------------------------------------------------------------------
+
+test("panel: schedule_file form args map to the shared dialect", () => {
+  const args = createArgsFromForm({ prompt: "p", kind: "file", scheduleFile: " /ws/.life/w.json ", targetMode: "resume", targetSource: "session", targetSessionId: "sess-a" });
+  assert.equal(args["schedule_file"], "/ws/.life/w.json");
+  assert.equal(args["after_seconds"], undefined);
+  assert.equal(args["every_seconds"], undefined);
+  assert.equal(args["target_session_id"], "sess-a");
+});
+
+test("panel: a file handle stays one row, syncs its children immediately, and folds their runs", async () => {
+  let syncNow: (() => Promise<unknown>) | undefined;
+  let lastSync: SyncSummary | undefined;
+  const h = await harness(undefined, undefined, {
+    syncNow: () => syncNow?.() ?? Promise.resolve(undefined),
+    syncSummary: () => lastSync
+  });
+  const dir = await mkdtemp(join(tmpdir(), "dsh-proactive-panel-handle-"));
+  try {
+    const file = join(dir, ".life", "wake_schedule.json");
+    mkdirSync(join(dir, ".life"), { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 1, entries: [{ id: "e1", every_seconds: 3600, prompt: "child" }] }), "utf8");
+    syncNow = async () => {
+      lastSync = await syncScheduleFiles({ config: h.config, store: h.store, now: () => NOW, log: () => undefined });
+    };
+
+    const created = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "handle", schedule_file: file, target_session_id: "sess-a" } } });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const canonical = join(realpathSync(dir), ".life", "wake_schedule.json");
+    const handle = created.snapshot.alarms[0] as unknown as Record<string, unknown>;
+    assert.equal(handle["type"], "file");
+    assert.equal(handle["scheduleFile"], canonical);
+    assert.equal(handle["declaredEntries"], 1);
+    // The child is real but NOT a row of its own.
+    assert.equal(created.snapshot.alarms.length, 1);
+    assert.equal(h.store.listAlarms().length, 2);
+    const child = h.store.listAlarms().find((alarm) => alarm.declared !== undefined);
+    assert.ok(child !== undefined);
+    assert.equal(child.declared?.sourceId, handle["id"]);
+    assert.equal(created.snapshot.server.sync?.created, 1);
+
+    // The child's wake history renders under the handle row.
+    await h.store.appendRun({ id: "run_1", alarmId: child.id, sessionId: "sess-a", firedAt: new Date(NOW).toISOString(), decision: "reply", budgetDelta: 1 });
+    const withRun = await h.service.snapshot();
+    assert.equal(withRun.runs[0]?.alarmId, handle["id"]);
+
+    // A handle never fires on its own.
+    const fired = await h.service.action({ action: { kind: "fire", id: String(handle["id"]) } });
+    assert.equal(fired.ok, false);
+    if (!fired.ok) assert.equal(fired.error.code, "invalid_action");
+
+    // Pausing drops the children right away; resuming re-derives them.
+    const paused = await h.service.action({ action: { kind: "toggle", id: String(handle["id"]) } });
+    assert.equal(paused.ok, true);
+    if (!paused.ok) return;
+    assert.equal(paused.snapshot.alarms[0]?.declaredEntries, 0);
+    assert.equal(h.store.listAlarms().length, 1);
+
+    // A second handle for the same file is refused from the panel too.
+    const again = await h.service.action({ action: { kind: "create", sessionId: "sess-a", args: { prompt: "handle", schedule_file: file, target_session_id: "sess-a" } } });
+    assert.equal(again.ok, false);
+    if (!again.ok) assert.equal(again.error.code, "invalid_action");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

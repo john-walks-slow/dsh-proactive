@@ -8,8 +8,11 @@
  *   - wake_reason (heartbeat|alarm) is gone; every alarm carries its own
  *     `respectQuietHours` switch (true = deferred inside quiet hours and gated
  *     by the daily budget; false = user-requested, exempt from both).
- *   - alarm `type`: "once" | "every" | "cron"; all three support a unified
- *     `jitterSeconds` random delay drawn after each scheduled instant.
+ *   - alarm `type`: "once" | "every" | "cron" | "file"; the three firing
+ *     types support a unified `jitterSeconds` random delay drawn after each
+ *     scheduled instant. "file" is the 260918/261009 schedule-file HANDLE:
+ *     it never fires itself (firesAlarm) — it watches one absolute JSON file
+ *     and materializes one child alarm per entry.
  *   - the wake destination is decoupled from the creator: `ownerSessionId`
  *     (tools/panel ownership) vs `target` (resume existing / fork from an
  *     existing session / create a new session).
@@ -73,7 +76,17 @@ export function isValidPresetId(presetId: string): boolean {
   return SESSION_ID_PATTERN.test(presetId);
 }
 
-export type AlarmType = "once" | "every" | "cron";
+export type AlarmType = "once" | "every" | "cron" | "file";
+
+/**
+ * Whether an alarm type ever fires a wake turn. "file" is a subscription
+ * HANDLE (261009): the scheduler must never select it as due, the panel must
+ * never offer "fire now", and overdue rendering must skip it. Every consumer
+ * asks this one predicate instead of comparing against "file" itself.
+ */
+export function firesAlarm(type: AlarmType): boolean {
+  return type !== "file";
+}
 /** Per-alarm surface compaction policy for silent wake turns. */
 export type AlarmCompaction = "off" | "minimal" | "aggressive";
 export type TargetMode = "resume" | "fork" | "new" | "workspace";
@@ -135,6 +148,36 @@ export function targetSourceOf(target: AlarmTarget): TargetSourceType | undefine
   return target.sourceType ?? (target.workspaceId !== undefined ? "workspace" : target.presetId !== undefined ? "preset" : "session");
 }
 
+/**
+ * Project a stored target back onto the flat `target_*` create dialect — the
+ * inverse of alarm-factory's flattening, and the ONLY sanctioned way to feed
+ * a stored target to validateCreateArgs. File-schedule entries inherit their
+ * handle's target this way: a hand-rolled partial merge would drop
+ * `target_session_id`/`target_source` and make the entry fail validation
+ * silently (keptIds = "no change"), or -- worse -- key-merge two layers into
+ * a combination neither layer meant (the 260928 residual-key failure class).
+ */
+export function targetArgsOf(target: AlarmTarget): Record<string, unknown> {
+  if (target.mode === "workspace") {
+    return { target_mode: "resume", target_source: "workspace", target_workspace_id: target.workspaceId };
+  }
+  if (target.mode === "new") {
+    return {
+      target_mode: "new",
+      ...(target.workspaceId !== undefined ? { target_workspace_id: target.workspaceId } : {}),
+      ...(target.presetId !== undefined ? { target_preset_id: target.presetId } : {}),
+      ...(target.provider !== undefined ? { target_provider: target.provider } : {}),
+      ...(target.model !== undefined ? { target_model: target.model } : {})
+    };
+  }
+  const source = targetSourceOf(target);
+  const flat: Record<string, unknown> = { target_mode: target.mode, target_source: source };
+  if (source === "workspace") flat["target_workspace_id"] = target.workspaceId;
+  else if (source === "preset") flat["target_preset_id"] = target.presetId;
+  else flat["target_session_id"] = target.sessionId;
+  return flat;
+}
+
 export interface OnceTrigger {
   /** Canonical RFC 3339 UTC instant. */
   at: string;
@@ -155,17 +198,33 @@ export interface CronTrigger {
   jitterSeconds?: number;
 }
 
-export type AlarmTrigger = OnceTrigger | EveryTrigger | CronTrigger;
+/**
+ * Schedule-file handle trigger (261009). The alarm never fires: it points at
+ * ONE absolute JSON file whose entries are synced into child alarms. The path
+ * is stored in its canonical form (see schedule-file.ts), so two spellings of
+ * the same file can never become two handles.
+ */
+export interface FileTrigger {
+  file: string;
+  /** Optional per-occurrence random delay inherited by entries that set none. */
+  jitterSeconds?: number;
+}
+
+export type AlarmTrigger = OnceTrigger | EveryTrigger | CronTrigger | FileTrigger;
 
 /**
- * Provenance of a file-declared alarm (declared.ts): the source schedule file,
- * the entry id inside it, and a hash of the entry's normalized spec so the
- * sync can distinguish "unchanged" (no-op) from "changed" (replace).
+ * Provenance of a file-declared alarm (schedule-sync.ts): the source schedule
+ * file (canonical path), the entry id inside it, and a hash of the entry's
+ * normalized spec so the sync can distinguish "unchanged" (no-op) from
+ * "changed" (replace). `sourceId` names the owning file-handle alarm;
+ * it is optional because records synced before 261009 carry no parent — the
+ * sync treats them as orphans and removes them.
  */
 export interface DeclaredSource {
   file: string;
   entry: string;
   hash: string;
+  sourceId?: string;
 }
 
 export interface Alarm {
@@ -191,7 +250,7 @@ export interface Alarm {
   compaction?: AlarmCompaction;
   /** Resume targets only: deliver the wake only after the destination session has been idle at least this many seconds; absent/0 = off. */
   minIdleSeconds?: number;
-  /** Present only for alarms synced from a declared-schedule file; the file is their source of truth. */
+  /** Present only for alarms materialized from a schedule file; the file + its handle alarm are their source of truth. */
   declared?: DeclaredSource;
 }
 
@@ -251,6 +310,16 @@ export type AlarmView = {
   /** Present only for declared (file-sourced) alarms: the source file and entry id. */
   declaredFile?: string;
   declaredEntry?: string;
+  /**
+   * File-handle alarms only ("type": "file"): the canonical schedule-file
+   * path. Present also on child rows whenever the caller enriches the view.
+   */
+  scheduleFile?: string;
+  /**
+   * File-handle alarms only: how many child alarms this handle currently owns
+   * (computed live by the caller from the store, never persisted).
+   */
+  declaredEntries?: number;
 }
 
 export type ProactiveErrorCode =
@@ -585,7 +654,9 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function toAlarmView(alarm: Alarm, now: number): AlarmView {
-  const overdue = alarm.status === "scheduled" && instantEpoch(alarm.nextDueAt) <= now;
+  // File handles never fire, so they are never "overdue": their nextDueAt is
+  // a derived display value (the earliest child wake).
+  const overdue = alarm.status === "scheduled" && firesAlarm(alarm.type) && instantEpoch(alarm.nextDueAt) <= now;
   const targetSource = targetSourceOf(alarm.target);
 
   return {
@@ -614,7 +685,8 @@ export function toAlarmView(alarm: Alarm, now: number): AlarmView {
       : {}),
     ...(alarm.type === "once" && "at" in alarm.trigger ? { at: alarm.trigger["at"] } : {}),
     ...(alarm.timeZone !== undefined ? { timeZone: alarm.timeZone } : {}),
-    ...(alarm.declared !== undefined ? { declaredFile: alarm.declared.file, declaredEntry: alarm.declared.entry } : {})
+    ...(alarm.declared !== undefined ? { declaredFile: alarm.declared.file, declaredEntry: alarm.declared.entry } : {}),
+    ...(alarm.type === "file" && "file" in alarm.trigger ? { scheduleFile: alarm.trigger["file"] } : {})
   };
 }
 

@@ -59,7 +59,26 @@ export interface AlarmRowView extends AlarmView {
 }
 
 export interface PanelSnapshot {
-  server: { now: string; dataDir: string; corrupt: boolean };
+  server: {
+    now: string;
+    dataDir: string;
+    corrupt: boolean;
+    /**
+     * Last schedule-file reconciliation, in memory only. cordis info/warn is
+     * not persisted anywhere, so this is the surface that lets a user SEE
+     * that a file handle materialized nothing (or why) instead of silently
+     * believing it works.
+     */
+    sync?: {
+      lastAt: string;
+      handles: number;
+      created: number;
+      updated: number;
+      removed: number;
+      skippedPast: number;
+      errors: string[];
+    };
+  };
   config: ConfigView;
   /**
    * Agent preset roster rows for pickers (v3). Optional for backward
@@ -126,7 +145,7 @@ export type PanelResult = { ok: true; snapshot: PanelSnapshot } | { ok: false; e
  */
 export interface PanelCreateForm {
   prompt: string;
-  kind: "once" | "every" | "cron";
+  kind: "once" | "every" | "cron" | "file";
   /** once: relative delay in seconds (alternative to atDate/atTime). */
   afterSeconds?: number;
   /** once: local absolute date (alternative to afterSeconds). */
@@ -137,6 +156,8 @@ export interface PanelCreateForm {
   everySeconds?: number;
   /** cron: five-field expression. */
   cron?: string;
+  /** file: absolute path of the ONE schedule JSON file this handle watches. */
+  scheduleFile?: string;
   /** Unified per-occurrence random delay in seconds; 0/absent = exact timing. */
   jitterSeconds?: number;
   /** Resume targets only: minimum destination idle span in seconds; 0/absent = off. */
@@ -164,7 +185,11 @@ export interface PanelCreateForm {
 /** Map a form to the shared argument root so one validator serves both surfaces. */
 export function createArgsFromForm(form: PanelCreateForm): Record<string, unknown> {
   const args: Record<string, unknown> = { prompt: form.prompt };
-  if (form.kind === "every") {
+  if (form.kind === "file") {
+    // Always sent (even empty) so an unfinished form yields the path error
+    // rather than "exactly one selector is required".
+    args["schedule_file"] = (form.scheduleFile ?? "").trim();
+  } else if (form.kind === "every") {
     if (form.everySeconds !== undefined) args["every_seconds"] = form.everySeconds;
   } else if (form.kind === "cron") {
     if (form.cron !== undefined && form.cron !== "") args["cron"] = form.cron;

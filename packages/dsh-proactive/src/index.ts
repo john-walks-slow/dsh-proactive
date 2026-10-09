@@ -21,7 +21,7 @@ import { ProactiveStore } from "./store.js";
 import { ProactiveScheduler } from "./scheduler.js";
 import { WakeDriver, type AgentPresetsPort, type AgentsFacade, type WakeDriverDeps } from "./wake.js";
 import { registerProactiveTools } from "./tools.js";
-import { startDeclaredScheduleSync } from "./declared.js";
+import { startScheduleSync, type ScheduleSyncHandle } from "./schedule-sync.js";
 import { ProactivePanelService } from "./panel/service.js";
 import { installPanelRoutes } from "./panel/routes.js";
 import { wireSettings } from "./settings.js";
@@ -177,6 +177,11 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   // Register on every root agent exactly once: the listener covers agents
   // created/resumed after plugin load, the initial scan covers agents that
   // already exist when this plugin applies (boot order is not guaranteed).
+  // The schedule-sync handle is late-bound: tools and the panel only need a
+  // way to REQUEST an immediate pass, never a construction-order guarantee.
+  const syncRef: { current?: ScheduleSyncHandle } = {};
+  const requestSync = (): Promise<unknown> => syncRef.current?.enqueueSync() ?? Promise.resolve(undefined);
+  const hostLog = (level: "info" | "warn" | "error", message: string) => ctx.logger[level](message);
   const registered = new WeakSet<Agent>();
   const registerOne = (agent: Agent) => {
     if (registered.has(agent)) return;
@@ -189,7 +194,9 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       scheduler,
       now: () => Date.now(),
       resolveWorkspace,
-      sessionEvents: sessionEventsOf(ctx)
+      sessionEvents: sessionEventsOf(ctx),
+      log: hostLog,
+      syncNow: requestSync
     });
   };
   const stopCreated = ctx.on("agent/created", ({ agent }) => {
@@ -210,6 +217,10 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     sessionTitle: resolveSessionTitle(ctx),
     sessionEvents: sessionEventsOf(ctx),
     resolveWorkspace,
+    // Schedule-file handles: an immediate pass on create/edit/pause, plus the
+    // last pass's summary for the panel's diagnostics block.
+    syncNow: requestSync,
+    syncSummary: () => syncRef.current?.lastSummary(),
     // Roster rows for the create form's preset pickers; the same defensive
     // read as the wake path (rosterless deployments get a degraded picker).
     ...(presetsService === undefined ? {} : {
@@ -229,18 +240,19 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   const settingsWire = wireSettings(ctx, config);
   if (settingsWire.installed && settingsWire.dispose !== undefined) extraDisposers.push(settingsWire.dispose);
 
-  // Declared-schedule files (config.scheduleFiles): a declarative alarm
-  // source synced into the store on boot and polled on an interval; the file
-  // is the source of truth. Feature-off by default (empty list = no-op pass).
-  const declaredSync = startDeclaredScheduleSync({
+  // Schedule files ("file" alarms): each handle owns one JSON file whose
+  // entries are reconciled into child alarms. One serialized pass loop serves
+  // both the poll tick and the immediate requests from the tools/panel.
+  const scheduleSync = startScheduleSync({
     config,
     store,
     now: () => Date.now(),
     resolveWorkspace,
     scheduler,
-    log: (level, message) => ctx.logger[level](message)
+    log: hostLog
   });
-  extraDisposers.push(declaredSync.dispose);
+  syncRef.current = scheduleSync;
+  extraDisposers.push(scheduleSync.dispose);
 
   scheduler.start();
   ctx.logger.info(

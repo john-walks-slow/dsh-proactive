@@ -51,6 +51,10 @@ export interface AlarmRow {
   everySeconds?: number;
   cron?: string;
   at?: string;
+  /** "file" rows: the canonical schedule-file path this handle watches. */
+  scheduleFile?: string;
+  /** "file" rows: how many child alarms it currently owns. */
+  declaredEntries?: number;
 }
 
 export function stateLabel(copy: ProactivePanelCopy, state: string): string {
@@ -66,11 +70,18 @@ export function stateLabel(copy: ProactivePanelCopy, state: string): string {
   }
 }
 
+/** A usable schedule-file path: absolute and free of glob metacharacters. */
+export function isScheduleFilePath(value: string | undefined): boolean {
+  const path = (value ?? "").trim();
+  return path.startsWith("/") && !/[*?]/.test(path);
+}
+
 export function typeLabel(copy: ProactivePanelCopy, type: string): string {
   switch (type) {
     case "once": return copy.typeOnce;
     case "every": return copy.typeEvery;
     case "cron": return copy.typeCron;
+    case "file": return copy.typeFile;
     default: return type;
   }
 }
@@ -246,6 +257,7 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
           <option value="once">{copy.typeOnce}</option>
           <option value="every">{copy.typeEvery}</option>
           <option value="cron">{copy.typeCron}</option>
+          <option value="file">{copy.typeFile}</option>
         </select>
         {showSession === true ? (
           <select className="dshp-input" value={sessionFilter} onChange={(e) => setSessionFilter(e.target.value)}>
@@ -291,6 +303,11 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
                   <td><StatePill copy={copy} state={alarm.state} /></td>
                   <td>
                     <span className="dshp-pill dshp-pill-plain">{typeLabel(copy, alarm.type)}</span>
+                    {alarm.type === "file" ? (
+                      <div className="dshp-cell-dim" style={{ marginTop: 2 }} title={alarm.scheduleFile}>
+                        {alarm.scheduleFile} · {alarm.declaredEntries ?? 0} {copy.declaredEntries}
+                      </div>
+                    ) : null}
                     {alarm.jitterSeconds !== undefined && alarm.jitterSeconds > 0 ? (
                       <span className="dshp-pill dshp-pill-accent" style={{ marginLeft: 4 }} title={copy.jitterSeconds}>±{alarm.jitterSeconds}s</span>
                     ) : null}
@@ -330,7 +347,7 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
                       {alarm.state === "scheduled" || alarm.state === "overdue" || alarm.state === "paused" ? (
                         <button className="dshp-btn dshp-btn-sm dshp-btn-danger" disabled={busy} onClick={() => onCancel(alarm.id)}>{copy.cancel}</button>
                       ) : null}
-                      {alarm.state === "scheduled" || alarm.state === "overdue" || alarm.state === "paused" ? (
+                      {alarm.type !== "file" && (alarm.state === "scheduled" || alarm.state === "overdue" || alarm.state === "paused") ? (
                         <button className="dshp-btn dshp-btn-sm" disabled={busy} onClick={() => onFire(alarm.id)}>{copy.fire}</button>
                       ) : null}
                     </div>
@@ -466,6 +483,7 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
   const pickKind = (nextKind: PanelCreateForm["kind"]) => {
     if (nextKind === "every") setForm({ ...form, kind: nextKind, everySeconds: form.everySeconds ?? 3600 });
     else if (nextKind === "cron") setForm({ ...form, kind: nextKind, cron: form.cron ?? "" });
+    else if (nextKind === "file") setForm({ ...form, kind: nextKind, scheduleFile: form.scheduleFile ?? "" });
     // "once" needs a concrete delay so the submit guard passes immediately
     // (the input would otherwise show a fallback the form state lacks).
     else setForm({ ...form, kind: nextKind, afterSeconds: form.afterSeconds ?? (form.atDate !== undefined && form.atDate !== "" ? undefined : 3600) });
@@ -497,6 +515,7 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
     (kind !== "every" || (form.everySeconds ?? 0) >= 300) &&
     (kind !== "cron" || (form.cron ?? "").trim() !== "") &&
     (kind !== "once" || (form.afterSeconds !== undefined && (form.afterSeconds ?? 0) > 0) || ((form.atDate ?? "") !== "" && (form.atTime ?? "") !== "")) &&
+    (kind !== "file" || isScheduleFilePath(form.scheduleFile)) &&
     (sessionTargeted && sessionSourced ? targetId !== "" && !targetInvalid : true) &&
     (sessionTargeted && source === "workspace" ? workspaceSelected !== "" : true) &&
     (presetSourced ? presetSelected !== "" : true);
@@ -513,7 +532,7 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
           <div className="dshp-field" style={{ flex: 1, minWidth: 220 }}>
             <label className="dshp-field-label">{copy.type}</label>
             <div className="dshp-btn-row">
-              {(["once", "every", "cron"] as const).map((k) => (
+              {(["once", "every", "cron", "file"] as const).map((k) => (
                 <button key={k} className={"dshp-btn dshp-btn-sm" + (kind === k ? " dshp-btn-primary" : "")} onClick={() => pickKind(k)}>
                   {typeLabel(copy, k)}
                 </button>
@@ -547,6 +566,18 @@ export function CreateForm({ form, setForm, showForm, setShowForm, busy, copy, o
                 <input className="dshp-input" type="date" value={form.atDate ?? ""} onChange={(e) => setForm({ ...form, atDate: e.target.value, afterSeconds: undefined })} />
                 <input className="dshp-input" type="time" value={form.atTime ?? ""} onChange={(e) => setForm({ ...form, atTime: e.target.value, afterSeconds: undefined })} />
               </div>
+            </div>
+          </div>
+        ) : kind === "file" ? (
+          <div className="dshp-field">
+            <label className="dshp-field-label">{copy.scheduleFile}</label>
+            <input className="dshp-input dshp-grow" value={form.scheduleFile ?? ""} placeholder={copy.scheduleFilePlaceholder}
+              onChange={(e) => setForm({ ...form, scheduleFile: e.target.value })} />
+            <div className="dshp-cell-dim">
+              {copy.scheduleFileHint}
+              {(form.scheduleFile ?? "").trim() !== "" && !isScheduleFilePath(form.scheduleFile)
+                ? <span className="dshp-cell-dim" style={{ marginLeft: 6 }}>{copy.scheduleFilePathInvalid}</span>
+                : null}
             </div>
           </div>
         ) : kind === "every" ? (
@@ -755,7 +786,8 @@ export function formFromAlarm(alarm: AlarmRow): PanelCreateForm {
   const presetId = alarm.targetPresetId !== undefined && alarm.targetPresetId !== "" ? alarm.targetPresetId : undefined;
   const next: PanelCreateForm = {
     prompt: alarm.prompt,
-    kind: alarm.type === "every" ? "every" : alarm.type === "cron" ? "cron" : "once",
+    kind: alarm.type === "every" ? "every" : alarm.type === "cron" ? "cron" : alarm.type === "file" ? "file" : "once",
+    ...(alarm.type === "file" ? { scheduleFile: alarm.scheduleFile ?? "" } : {}),
     respectQuietHours: alarm.respectQuietHours,
     compaction: alarm.compaction,
     ...(alarm.minIdleSeconds !== undefined && alarm.minIdleSeconds > 0 ? { minIdleSeconds: alarm.minIdleSeconds } : {}),

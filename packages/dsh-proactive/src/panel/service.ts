@@ -10,9 +10,10 @@
  * to is owned BY the session.
  */
 
-import { isRecord, isToolError, isValidSessionId, toAlarmView, instantEpoch, nextDriftingOccurrence, jitterDelay, type Alarm, type RunRecord, type ToolError } from "../domain.js";
+import { firesAlarm, isRecord, isToolError, isValidSessionId, targetArgsOf, toAlarmView, instantEpoch, nextDriftingOccurrence, jitterDelay, type Alarm, type RunRecord, type ToolError } from "../domain.js";
 import { nextCronOccurrence } from "../cron.js";
 import { buildAlarm, validateCreateArgs, type CreateSpec } from "../alarm-factory.js";
+import { canonicalizeScheduleFile, childrenOfHandle, defaultHandleTargetArgs, findScheduleHandle, hasTargetArgs, viewWithDeclaredEntries } from "../schedule-file.js";
 import { wireTimeZones } from "../zone.js";
 import type { ProactiveConfig } from "../config.js";
 import type { ProactiveStore } from "../store.js";
@@ -42,6 +43,10 @@ export interface PanelServiceDeps {
    * pickers degrade to free-text preset ids.
    */
   presetRoster?: () => Promise<readonly PresetRosterRow[]>;
+  /** Immediate schedule-file sync (late-bound: created after the panel). */
+  syncNow?: () => Promise<unknown>;
+  /** Last schedule-file sync summary, for the snapshot's diagnostics block. */
+  syncSummary?: () => { lastAt: number; handles: number; created: number; updated: number; removed: number; skippedPast: number; errors: string[] } | undefined;
 }
 
 export class ProactivePanelService {
@@ -61,20 +66,48 @@ export class ProactivePanelService {
       throw new Error("invalid session id: " + JSON.stringify(sessionId));
     }
     const allRuns = await this.deps.store.listRecentRuns(RUNS_WINDOW);
+    const alarms = this.deps.store.listAlarms();
+    // Child alarms are an implementation detail: the panel shows ONE row per
+    // file handle and folds the children's runs onto it (their alarmId is
+    // rewritten to the handle) so the file-driven wake history stays visible
+    // instead of rendering nowhere.
+    const handleOf = new Map<string, string>();
+    for (const alarm of alarms) {
+      if (alarm.declared?.sourceId !== undefined) handleOf.set(alarm.id, alarm.declared.sourceId);
+    }
+    const foldRuns = (runs: readonly RunRecord[]): RunView[] =>
+      runs.map((run) => ({ ...run, alarmId: handleOf.get(run.alarmId) ?? run.alarmId }));
+    const visible = alarms.filter((alarm) => alarm.declared === undefined);
     let rows: RunView[];
     let alarmRows: AlarmRowView[];
     if (sessionId === undefined) {
-      rows = allRuns;
-      alarmRows = this.deps.store.listAlarms().map((alarm) => this.rowFor(alarm, now));
+      rows = foldRuns(allRuns);
+      alarmRows = visible.map((alarm) => this.rowFor(alarm, now, alarms));
     } else {
-      const owned = new Set(this.deps.store.listAlarms().filter((alarm) => alarm.ownerSessionId === sessionId).map((alarm) => alarm.id));
-      rows = allRuns.filter((run) => run.sessionId === sessionId || owned.has(run.alarmId));
-      alarmRows = this.deps.store.listAlarms()
+      const owned = new Set(alarms.filter((alarm) => alarm.ownerSessionId === sessionId).map((alarm) => alarm.id));
+      rows = foldRuns(allRuns.filter((run) => run.sessionId === sessionId || owned.has(run.alarmId)));
+      alarmRows = visible
         .filter((alarm) => alarm.ownerSessionId === sessionId)
-        .map((alarm) => this.rowFor(alarm, now));
+        .map((alarm) => this.rowFor(alarm, now, alarms));
     }
+    const sync = this.deps.syncSummary?.();
     return {
-      server: { now: new Date(now).toISOString(), dataDir: this.deps.dataDir, corrupt: this.deps.store.corrupt },
+      server: {
+        now: new Date(now).toISOString(),
+        dataDir: this.deps.dataDir,
+        corrupt: this.deps.store.corrupt,
+        ...(sync !== undefined ? {
+          sync: {
+            lastAt: new Date(sync.lastAt).toISOString(),
+            handles: sync.handles,
+            created: sync.created,
+            updated: sync.updated,
+            removed: sync.removed,
+            skippedPast: sync.skippedPast,
+            errors: sync.errors
+          }
+        } : {})
+      },
       config: {
         enabled: cfg.enabled,
         maxDeliveriesPerDay: cfg.maxDeliveriesPerDay,
@@ -99,10 +132,9 @@ export class ProactivePanelService {
     }
   }
 
-  private rowFor(alarm: Alarm, now: number): AlarmRowView {
-    const view = toAlarmView(alarm, now);
+  private rowFor(alarm: Alarm, now: number, alarms: readonly Alarm[]): AlarmRowView {
     return {
-      ...view,
+      ...viewWithDeclaredEntries(alarms, alarm, now),
       sessionTitle: this.deps.sessionTitle(alarm.ownerSessionId),
       createdAt: alarm.createdAt
     };
@@ -147,6 +179,39 @@ export class ProactivePanelService {
   }
 
   /**
+   * Schedule-file handle pre-wiring, shared by create and edit: canonicalize
+   * the path, enforce same-file uniqueness, and fill the target when the
+   * caller named none (create: the file's own workspace; edit: the alarm's
+   * current target, so a bare edit can never retarget a handle).
+   */
+  private async wireScheduleFile(
+    args: Record<string, unknown>,
+    excludeId: string | undefined,
+    fallbackTarget: Record<string, unknown> | "file-workspace"
+  ): Promise<{ args: Record<string, unknown> } | { error: PanelError }> {
+    if (args["schedule_file"] === undefined) return { args };
+    if (typeof args["schedule_file"] !== "string" || args["schedule_file"].length === 0) {
+      return { error: { code: "invalid_trigger", message: "schedule_file must be a non-empty absolute path string." } };
+    }
+    const canonical = await canonicalizeScheduleFile(args["schedule_file"]);
+    const clash = findScheduleHandle(this.deps.store.listAlarms(), canonical, excludeId);
+    if (clash !== undefined) {
+      return { error: { code: "invalid_action", message: "schedule file " + canonical + " already has a handle alarm " + clash.id + " (owner " + clash.ownerSessionId + "); edit that alarm instead — a second handle would fire every entry twice." } };
+    }
+    let next: Record<string, unknown> = { ...args, schedule_file: canonical };
+    if (!hasTargetArgs(next)) {
+      if (fallbackTarget === "file-workspace") {
+        const fallback = await defaultHandleTargetArgs(canonical, this.deps.resolveWorkspace);
+        if (isToolError(fallback)) return { error: fallback };
+        next = { ...next, ...fallback };
+      } else {
+        next = { ...next, ...fallbackTarget };
+      }
+    }
+    return { args: next };
+  }
+
+  /**
    * Roll a failed mutation back in memory and surface the durable failure as
    * persistence_uncertain — the same contract the model tools follow, so the
    * panel never reports a save that a crash could silently drop.
@@ -175,7 +240,9 @@ export class ProactivePanelService {
       // Workspace ids normalize through the shared resolver (existence check).
       const wiredCreate = await this.wireWorkspace(action.args, this.deps.sessionEvents(action.sessionId));
       if ("error" in wiredCreate) return { ok: false, error: wiredCreate.error };
-      const spec = validateCreateArgs(wiredCreate.args, action.sessionId);
+      const fileCreate = await this.wireScheduleFile(wiredCreate.args, undefined, "file-workspace");
+      if ("error" in fileCreate) return { ok: false, error: fileCreate.error };
+      const spec = validateCreateArgs(fileCreate.args, action.sessionId);
       if ("code" in spec) return { ok: false, error: spec };
       const built = buildAlarm(action.sessionId, spec as CreateSpec, now);
       if ("code" in built) return { ok: false, error: built };
@@ -185,6 +252,8 @@ export class ProactivePanelService {
       } catch (error) {
         return this.persistFailure("create", () => store.removeAlarm(built.alarm.id), error);
       }
+      // A new handle materializes its children immediately.
+      if (built.alarm.type === "file") await this.deps.syncNow?.().catch(() => undefined);
       this.deps.scheduler.requestDrive();
       return { ok: true };
     }
@@ -199,7 +268,9 @@ export class ProactivePanelService {
       if (!isRecord(action.args)) return { ok: false, error: { code: "bad_action", message: "edit.args must be an object." } };
       const wiredEdit = await this.wireWorkspace(action.args, this.deps.sessionEvents(current.ownerSessionId));
       if ("error" in wiredEdit) return { ok: false, error: wiredEdit.error };
-      const spec = validateCreateArgs(wiredEdit.args, current.ownerSessionId);
+      const fileEdit = await this.wireScheduleFile(wiredEdit.args, current.id, targetArgsOf(current.target));
+      if ("error" in fileEdit) return { ok: false, error: fileEdit.error };
+      const spec = validateCreateArgs(fileEdit.args, current.ownerSessionId);
       if ("code" in spec) return { ok: false, error: spec };
       const built = buildAlarm(current.ownerSessionId, spec as CreateSpec, now);
       if ("code" in built) return { ok: false, error: built };
@@ -221,6 +292,7 @@ export class ProactivePanelService {
       } catch (error) {
         return this.persistFailure("edit", () => store.replaceAlarm(current), error);
       }
+      if (updated.type === "file" || current.type === "file") await this.deps.syncNow?.().catch(() => undefined);
       this.deps.scheduler.requestDrive();
       return { ok: true };
     }
@@ -229,11 +301,18 @@ export class ProactivePanelService {
       if (current === undefined) return { ok: false, error: { code: "not_found", message: "alarm " + action.id + " not found." } };
       const denied = this.guardOwnership(current, sessionId);
       if (denied !== undefined) return { ok: false, error: denied };
+      // Cancelling a file handle cancels the subscription: its children go
+      // with it, and a failed write restores the whole set.
+      const children = current.type === "file" ? childrenOfHandle(store.listAlarms(), current.id) : [];
       store.removeAlarm(action.id);
+      for (const child of children) store.removeAlarm(child.id);
       try {
         await store.persist();
       } catch (error) {
-        return this.persistFailure("cancel", () => store.addAlarm(current), error);
+        return this.persistFailure("cancel", () => {
+          store.addAlarm(current);
+          for (const child of children) store.addAlarm(child);
+        }, error);
       }
       this.deps.scheduler.requestDrive();
       return { ok: true };
@@ -273,6 +352,9 @@ export class ProactivePanelService {
       } catch (error) {
         return this.persistFailure("toggle", () => store.replaceAlarm(current), error);
       }
+      // Pausing a handle must drop its children NOW, not up to a poll cycle
+      // later (they would still fire once in the meantime).
+      if (current.type === "file") await this.deps.syncNow?.().catch(() => undefined);
       this.deps.scheduler.requestDrive();
       return { ok: true };
     }
@@ -281,6 +363,9 @@ export class ProactivePanelService {
       if (current === undefined) return { ok: false, error: { code: "not_found", message: "alarm " + action.id + " not found." } };
       const denied = this.guardOwnership(current, sessionId);
       if (denied !== undefined) return { ok: false, error: denied };
+      if (!firesAlarm(current.type)) {
+        return { ok: false, error: { code: "invalid_action", message: "alarm " + action.id + " is a schedule-file handle and never fires on its own; its child alarms follow the file." } };
+      }
       if (current.status === "in-flight" || current.status === "completed" || current.status === "cancelled" || current.status === "failed") {
         return { ok: false, error: { code: "invalid_action", message: "alarm " + action.id + " cannot fire in its current state." } };
       }

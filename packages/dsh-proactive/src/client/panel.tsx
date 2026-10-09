@@ -241,6 +241,10 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
     return map;
   }, [snapshot]);
 
+  // Schedule-file diagnostics: the only surface that shows whether a file
+  // handle actually materialized entries (cordis warn logs are not persisted).
+  const sync = snapshot?.server.sync;
+
   return (
     <div className="dshp-panel" data-testid="proactive-panel">
       <div className="dshp-head">
@@ -336,7 +340,13 @@ export function ProactivePanel(props: ProactivePanelProps): React.ReactElement {
       <div className="dshp-card">
         <div className="dshp-card-head">
           <span>{copy.alarmsTitle}</span>
-          <span className="dshp-cell-dim">{snapshot?.server.corrupt === true ? copy.storageCorrupt : ""}</span>
+          <span className="dshp-cell-dim" title={sync !== undefined && sync.errors.length > 0 ? sync.errors.join("\n") : undefined}>
+            {snapshot?.server.corrupt === true ? copy.storageCorrupt : ""}
+            {snapshot?.server.corrupt === true && sync !== undefined ? " · " : ""}
+            {sync !== undefined
+              ? copy.syncLast + ": h" + sync.handles + " +" + sync.created + " ~" + sync.updated + " -" + sync.removed + " err" + sync.errors.length
+              : ""}
+          </span>
         </div>
         <div className="dshp-card-body" style={{ padding: 0 }}>
           {loading ? (

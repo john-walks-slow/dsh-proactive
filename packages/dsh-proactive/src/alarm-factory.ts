@@ -8,7 +8,15 @@
  * every_seconds | cron) derives the alarm type once/every/cron; a unified
  * jitter_seconds applies a random delay after every scheduled instant; the
  * wake target is decoupled from the creator via target_mode/target_session_id.
+ *
+ * 261009: the fifth selector `schedule_file` derives the fourth alarm type,
+ * "file" — a schedule-file HANDLE that never fires itself (domain.firesAlarm)
+ * and whose child alarms are materialized by schedule-sync.ts. Path
+ * canonicalization and same-file uniqueness live in schedule-file.ts (they
+ * need the store), so the validation here only checks the path's shape.
  */
+
+import { isAbsolute } from "node:path";
 
 import {
   canonicalizeTimeZone,
@@ -41,14 +49,18 @@ import { parseCron, nextCronOccurrence } from "./cron.js";
 
 /** 10 years in seconds — a safe ceiling so epoch math can never escape the Date range. */
 const MAX_DELAY_SECONDS = 10 * 365 * 86400;
+/** Upper bound for a schedule_file path (mirrors the old glob pattern cap). */
+export const MAX_SCHEDULE_FILE_LENGTH = 512;
 
 export interface CreateSpec {
   prompt: string;
-  kind: "at" | "after" | "every" | "cron";
+  kind: "at" | "after" | "every" | "cron" | "file";
   at?: unknown;
   afterSeconds?: number;
   everySeconds?: number;
   cron?: string;
+  /** kind "file": absolute schedule-file path (canonicalized by the caller). */
+  scheduleFile?: string;
   /** Unified per-occurrence random delay in seconds; absent/0 = exact timing. */
   jitterSeconds?: number;
   /** Resume targets only: minimum destination idle span in seconds; absent/0 = off. */
@@ -74,16 +86,16 @@ function allocateId(prefix: string): string {
  */
 export function validateCreateArgs(args: Record<string, unknown>, defaultTargetSessionId: string): CreateSpec | ToolError {
   const allowed = new Set([
-    "prompt", "at", "after_seconds", "every_seconds", "cron", "jitter_seconds",
+    "prompt", "at", "after_seconds", "every_seconds", "cron", "schedule_file", "jitter_seconds",
     "time_zone", "respect_quiet_hours", "target_mode", "target_source",
     "target_session_id", "target_workspace_id", "target_preset_id",
     "target_provider", "target_model", "compaction", "min_idle_seconds"
   ]);
   for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) return { code: "invalid_trigger", message: "the alarm spec accepts only prompt, at, after_seconds, every_seconds, cron, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_source, target_session_id, target_workspace_id, target_preset_id, target_provider, target_model, compaction, min_idle_seconds." };
+    if (!allowed.has(key)) return { code: "invalid_trigger", message: "the alarm spec accepts only prompt, at, after_seconds, every_seconds, cron, schedule_file, jitter_seconds, time_zone, respect_quiet_hours, target_mode, target_source, target_session_id, target_workspace_id, target_preset_id, target_provider, target_model, compaction, min_idle_seconds." };
   }
-  const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined) + Number(args["cron"] !== undefined);
-  if (selectors !== 1) return { code: "invalid_trigger", message: "the alarm spec requires exactly one of at, after_seconds, every_seconds, or cron." };
+  const selectors = Number(args["at"] !== undefined) + Number(args["after_seconds"] !== undefined) + Number(args["every_seconds"] !== undefined) + Number(args["cron"] !== undefined) + Number(args["schedule_file"] !== undefined);
+  if (selectors !== 1) return { code: "invalid_trigger", message: "the alarm spec requires exactly one of at, after_seconds, every_seconds, cron, or schedule_file." };
   let jitterSeconds: number | undefined;
   if (args["jitter_seconds"] !== undefined) {
     try {
@@ -257,6 +269,19 @@ export function validateCreateArgs(args: Record<string, unknown>, defaultTargetS
       return inputError(error);
     }
   }
+  if (args["schedule_file"] !== undefined) {
+    const raw = args["schedule_file"];
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_SCHEDULE_FILE_LENGTH) {
+      return { code: "invalid_trigger", message: "schedule_file must be a non-empty absolute path of at most " + MAX_SCHEDULE_FILE_LENGTH + " characters." };
+    }
+    if (!isAbsolute(raw) || raw.includes("\0")) {
+      return { code: "invalid_trigger", message: "schedule_file must be an absolute path (the file itself need not exist yet)." };
+    }
+    if (/[*?]/.test(raw)) {
+      return { code: "invalid_trigger", message: "schedule_file accepts exactly ONE literal file path — glob patterns (* and ?) are not supported; create one alarm per file." };
+    }
+    return { prompt, kind: "file", scheduleFile: raw, ...(jitterSeconds !== undefined ? { jitterSeconds } : {}), respectQuietHours, compaction, target, ...(minIdleSeconds !== undefined && minIdleSeconds > 0 ? { minIdleSeconds } : {}), ...(timeZone !== undefined ? { timeZone } : {}) };
+  }
   if (args["after_seconds"] !== undefined) {
     const value = args["after_seconds"];
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
@@ -319,7 +344,13 @@ export function buildAlarm(ownerSessionId: string, spec: CreateSpec, nowStart: n
   let type: AlarmType;
   let trigger: AlarmTrigger;
   let epoch: number;
-  if (spec.kind === "after") {
+  if (spec.kind === "file") {
+    // The handle's nextDueAt is a derived display value (the earliest child
+    // wake); schedule-sync rewrites it, and nothing ever fires on it.
+    type = "file";
+    epoch = nowStart;
+    trigger = { file: spec.scheduleFile!, ...(spec.jitterSeconds !== undefined ? { jitterSeconds: spec.jitterSeconds } : {}) };
+  } else if (spec.kind === "after") {
     type = "once";
     epoch = nowStart + spec.afterSeconds! * 1000;
     trigger = { at: new Date(epoch).toISOString() };

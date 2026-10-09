@@ -25,7 +25,7 @@
 
 import type { Alarm, RunDecision } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
-import { instantEpoch, isRecord, nextDriftingOccurrence } from "./domain.js";
+import { firesAlarm, instantEpoch, isRecord, nextDriftingOccurrence } from "./domain.js";
 import { nextCronOccurrence } from "./cron.js";
 import { isInQuietHours } from "./config.js";
 import type { ProactiveStore } from "./store.js";
@@ -119,7 +119,9 @@ export class ProactiveScheduler {
   private dueAlarms(now: number): Alarm[] {
     return this.deps.store
       .listAlarms()
-      .filter((alarm) => alarm.status === "scheduled" && instantEpoch(alarm.nextDueAt) <= now)
+      // "file" alarms are subscription handles: they never fire, and their
+      // nextDueAt is a derived display value (the earliest child wake).
+      .filter((alarm) => alarm.status === "scheduled" && firesAlarm(alarm.type) && instantEpoch(alarm.nextDueAt) <= now)
       .sort((left, right) => instantEpoch(left.nextDueAt) - instantEpoch(right.nextDueAt));
   }
 
@@ -481,7 +483,7 @@ export class ProactiveScheduler {
     const now = this.now();
     let next = Infinity;
     for (const alarm of this.deps.store.listAlarms()) {
-      if (alarm.status !== "scheduled") continue;
+      if (alarm.status !== "scheduled" || !firesAlarm(alarm.type)) continue;
       const due = instantEpoch(alarm.nextDueAt);
       if (due > now && due < next) next = due;
     }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateJsonSchemaValue } from "@deepseek-ai/dsh-tools";
@@ -578,4 +578,96 @@ test("proactive_reclaim is closed outside an active wake (no hard fallback)", as
   assert.ok(String(res.message).includes("only available during an active dsh-proactive wake"));
   assert.equal(h.concluded(), false); // did NOT conclude the turn
   h.cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// 261009: schedule-file handles (the fourth alarm type)
+// ---------------------------------------------------------------------------
+
+function workspaceStub(): { calls: string[]; resolve: NonNullable<ToolServices["resolveWorkspace"]> } {
+  const calls: string[] = [];
+  return {
+    calls,
+    resolve: async (args: Record<string, unknown>) => {
+      calls.push(String(args["target_workspace_path"] ?? args["target_workspace_id"] ?? ""));
+      const next = { ...args };
+      delete next["target_workspace_path"];
+      next["target_workspace_id"] = "ws-1";
+      return next;
+    }
+  };
+}
+
+test("proactive_set: schedule_file creates a canonical file handle", async () => {
+  const h = harness();
+  const dir = mkdtempSync(join(tmpdir(), "dsh-proactive-tools-handle-"));
+  try {
+    const file = join(dir, "w.json");
+    const view = await h.run("proactive_set", { prompt: "p", schedule_file: file, target_session_id: "s1" });
+    assert.equal(code(view), undefined);
+    assert.equal(asView(view).type, "file");
+    assert.equal((view as { scheduleFile?: string }).scheduleFile, join(realpathSync(dir), "w.json"));
+    assert.equal((view as { declaredEntries?: number }).declaredEntries, 0);
+    // Same physical file, another spelling → the same-file rule still fires.
+    const again = await h.run("proactive_set", { prompt: "p", schedule_file: join(dir, ".", "w.json"), target_session_id: "s1" });
+    assert.equal(code(again), "invalid_action");
+    assert.match((again as { message: string }).message, /already has a handle alarm/);
+    // A glob is refused outright instead of silently matching nothing.
+    const glob = await h.run("proactive_set", { prompt: "p", schedule_file: join(dir, "*.json"), target_session_id: "s1" });
+    assert.equal(code(glob), "invalid_trigger");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("proactive_set: a handle without a target defaults to the file's grandparent workspace", async () => {
+  const stub = workspaceStub();
+  const h = harness({ resolveWorkspace: stub.resolve });
+  const view = await h.run("proactive_set", { prompt: "p", schedule_file: "/ws/.life/wake_schedule.json" });
+  assert.equal(code(view), undefined);
+  // The default resolves the file's directory, then the workspace gate
+  // existence-checks the id it produced.
+  assert.deepEqual(stub.calls, ["/ws", "ws-1"]);
+  assert.equal(asView(view).targetMode, "resume");
+  assert.equal(asView(view).targetWorkspaceId, "ws-1");
+  // No registry on this host → closed error, never a silent creator-session fallback.
+  const bare = harness();
+  const failed = await bare.run("proactive_set", { prompt: "p", schedule_file: "/ws/.life/wake_schedule.json" });
+  assert.equal(code(failed), "not_found");
+});
+
+test("proactive_list: child alarms are hidden, the handle reports its child count", async () => {
+  const h = harness();
+  const handle: Alarm = { ...v2Fixture("alarm_handle", "s1"), type: "file", trigger: { file: "/ws/.life/w.json" }, prompt: "handle" };
+  h.store.alarms.push(handle);
+  h.store.alarms.push({ ...v2Fixture("decl_child", "s1"), declared: { file: "/ws/.life/w.json", entry: "e1", hash: "h", sourceId: "alarm_handle" } });
+  const listed = await h.run("proactive_list", {}) as Array<Record<string, unknown>>;
+  assert.deepEqual(listed.map((row) => row["id"]), ["alarm_handle"]);
+  assert.equal(listed[0]["declaredEntries"], 1);
+  assert.equal(listed[0]["scheduleFile"], "/ws/.life/w.json");
+  // A child is still refused individually: the file is its source of truth.
+  const cancelChild = await h.run("proactive_cancel", { id: "decl_child" });
+  assert.equal(code(cancelChild), "invalid_action");
+});
+
+test("proactive_cancel: cancelling a handle takes its children with it", async () => {
+  const h = harness();
+  const handle: Alarm = { ...v2Fixture("alarm_handle", "s1"), type: "file", trigger: { file: "/ws/.life/w.json" }, prompt: "handle" };
+  h.store.alarms.push(handle);
+  h.store.alarms.push({ ...v2Fixture("decl_child", "s1"), declared: { file: "/ws/.life/w.json", entry: "e1", hash: "h", sourceId: "alarm_handle" } });
+  const result = await h.run("proactive_cancel", { id: "alarm_handle" });
+  assert.equal(code(result), undefined);
+  assert.equal((result as { removedChildren?: number }).removedChildren, 1);
+  assert.deepEqual(h.store.alarms, []);
+});
+
+test("proactive_cancel: a failed persist restores the handle AND every child", async () => {
+  const h = harness();
+  const handle: Alarm = { ...v2Fixture("alarm_handle", "s1"), type: "file", trigger: { file: "/ws/.life/w.json" }, prompt: "handle" };
+  h.store.alarms.push(handle);
+  h.store.alarms.push({ ...v2Fixture("decl_child", "s1"), declared: { file: "/ws/.life/w.json", entry: "e1", hash: "h", sourceId: "alarm_handle" } });
+  h.store.failPersist = true;
+  const result = await h.run("proactive_cancel", { id: "alarm_handle" });
+  assert.equal(code(result), "persistence_uncertain");
+  assert.deepEqual(h.store.alarms.map((a) => a.id).sort(), ["alarm_handle", "decl_child"]);
 });

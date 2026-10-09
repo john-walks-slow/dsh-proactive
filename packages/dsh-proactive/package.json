@@ -33,7 +33,8 @@
     "prepare": "npm run build",
     "prepublishOnly": "npm test",
     "release": "npm run test && npm version patch && npm pack --pack-destination /tmp",
-    "e2e:wake": "dsh-e2e run e2e/wake-smoke.mjs"
+    "e2e:wake": "dsh-e2e run e2e/wake-smoke.mjs",
+    "e2e:schedule-file": "dsh-e2e run e2e/schedule-file.mjs"
   },
   "dsh": {
     "bundle": {

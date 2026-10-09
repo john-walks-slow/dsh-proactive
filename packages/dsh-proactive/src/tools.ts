@@ -32,13 +32,15 @@ import {
   inputError,
   internalError,
   isToolError,
+  targetArgsOf,
   targetSourceOf,
   toAlarmView,
   type Alarm,
   type ToolError
 } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
-import { writeConfigFile, MAX_SCHEDULE_FILES } from "./config.js";
+import { writeConfigFile } from "./config.js";
+import { canonicalizeScheduleFile, childrenOfHandle, defaultHandleTargetArgs, findScheduleHandle, hasTargetArgs, viewWithDeclaredEntries } from "./schedule-file.js";
 import { liveEventsOf, type LiveSessionLike } from "./workspace.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveScheduler } from "./scheduler.js";
@@ -65,6 +67,13 @@ export interface ToolServices {
    * sessions service; timezone wiring then falls back to the host zone.
    */
   sessionEvents?: (sessionId: string) => readonly unknown[] | undefined;
+  /** Host logger; absent in unit tests. */
+  log?: (level: "info" | "warn" | "error", message: string) => void;
+  /**
+   * Immediate schedule-file sync (late-bound: the sync loop is constructed
+   * after the tools so the registration order never matters).
+   */
+  syncNow?: () => Promise<unknown>;
 }
 
 
@@ -83,7 +92,7 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
   properties: {
     id: { type: "string", required: true },
     sessionId: { type: "string", required: true },
-    type: { type: "string", required: true, enum: ["once", "every", "cron"] },
+    type: { type: "string", required: true, enum: ["once", "every", "cron", "file"] },
     targetMode: { type: "string", required: true, enum: ["resume", "fork", "new", "workspace"] },
     // Present only for resume/fork targets ("workspace" is a stored v2 spelling).
     targetSource: { type: "string", enum: ["session", "workspace", "preset"] },
@@ -115,7 +124,11 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     timeZone: { type: "string" },
     // Present only for declared (file-sourced) alarms: they refuse update/cancel.
     declaredFile: { type: "string" },
-    declaredEntry: { type: "string" }
+    declaredEntry: { type: "string" },
+    // Present only for "file" alarms (the schedule-file handle): the canonical
+    // file path and how many child alarms it currently owns.
+    scheduleFile: { type: "string" },
+    declaredEntries: { type: "integer" }
   }
 };
 
@@ -140,8 +153,7 @@ const SETTINGS_VIEW_SCHEMA: ValueSchemaSpec = {
     max_retries_per_fire: { type: "integer", required: true },
     max_prompt_length: { type: "integer", required: true },
     default_prompt: { type: "string", required: true },
-    silent_wake_compaction: { type: "boolean", required: true },
-    schedule_files: { type: "array", items: { type: "string" } }
+    silent_wake_compaction: { type: "boolean", required: true }
   }
 };
 
@@ -198,6 +210,7 @@ const ALARM_SPEC_PARAMETERS: ParameterSchemaSpec = {
   after_seconds: { type: "integer", description: "Positive delay in seconds from now." },
   every_seconds: { type: "integer", description: "Fixed rate in seconds, at least 300; occurrences align to creation time and missed ones are skipped." },
   cron: { type: "string", description: "Five-field numeric cron expression, e.g. '0 9 * * 1-5' (minute hour day-of-month month day-of-week; 0 and 7 = Sunday; dom/dow OR rule; no names, '?' or seconds)." },
+  schedule_file: { type: "string", description: "Absolute path of ONE schedule JSON file whose entries are synced into child alarms; this creates the fourth alarm type — a file-schedule HANDLE that never wakes on its own. The file is the source of truth for its entries (declarative, idempotent, self-healing across restarts): entries are objects with an id plus exactly one selector (at / after_seconds / every_seconds / cron), an optional prompt and optional knobs (jitter_seconds / time_zone / respect_quiet_hours / compaction / min_idle_seconds), and an optional nested target {mode, session_id, workspace_id, workspace_path, preset_id, provider, model}. Entry parameters layer as: entry > file top level > this alarm's own fields > dialect defaults; `target` is picked whole from the first layer that names one. Removing an entry (or the whole file) removes its child alarms; cancelling this alarm removes every child with it; a SECOND alarm for the same file is rejected — list handles with proactive_list and edit that one instead. Glob patterns are not supported: one alarm per file. When no target_* argument is given, the target defaults to the registered workspace that is the file's GRANDPARENT directory (the `<workspace>/<dir>/<file>` convention); otherwise pass target_workspace_path / target_session_id explicitly." },
   jitter_seconds: { type: "integer", description: "Unified per-occurrence random delay in seconds, 0.." + MAX_JITTER_SECONDS + " (0 = exact timing). Each fire is delayed by a uniform random amount drawn from (0, jitter_seconds]; absent/0 = no jitter." },
   min_idle_seconds: { type: "integer", description: "Resume targets only: deliver the wake only after the destination session has been idle at least this many seconds, 0.." + MAX_MIN_IDLE_SECONDS + " (0 = off, default). Any session event resets the clock — including earlier wake turns — so a self-monitoring alarm enforces its own spacing; a cold session counts as idle; fork/new targets ignore it. While the destination is not idle enough, the wake is deferred silently (no run record, no retry/budget cost) and re-checked at most once a minute." },
   respect_quiet_hours: { type: "boolean", description: "false (default) = user-requested reminder, exempt from quiet hours and the daily budget. true = model-initiated style: occurrences due inside the quiet window are skipped, not postponed (once alarms complete; repeating alarms advance to the next occurrence outside the window), and the daily budget applies." },
@@ -218,7 +231,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
   return [
         defineTool({
           name: "proactive_set",
-          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, or a five-field cron expression (minute hour day-of-month month day-of-week; occurrences at least 300 seconds apart). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required. The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent.",
+          description: "Create one host-level alarm for this session. Supply exactly one selector: a positive safe-integer after_seconds delay, an explicit-zone 'at' date-time, every_seconds of at least 300 for a fixed-rate repeat, a five-field cron expression (minute hour day-of-month month day-of-week), or schedule_file for a schedule-file handle (the fourth alarm type; it never wakes on its own but materializes one child alarm per file entry — see that parameter). All selectors accept the unified jitter_seconds random delay. respect_quiet_hours=false means user-requested: fires inside quiet hours and ignores the daily budget. The prompt is the user's instruction and is always required (for a schedule_file handle it is the default prompt for entries that carry none). The alarm fires even when the target session is cold; the wake turn is framed so the model can stay silent.",
           parameters: ALARM_SPEC_PARAMETERS,
           output: {
             schema: { oneOf: [ALARM_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -231,6 +244,28 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             // zone, else the host zone) before the closed validation sees an
             // empty slot.
             let wired = wireTimeZones(args as Record<string, unknown>, sessionEventsOf(agent));
+            // Schedule-file handles: canonicalize the path (so two spellings
+            // of one file can never become two handles), enforce same-file
+            // uniqueness, and default the target to the file's own workspace
+            // when the caller named none. All of it BEFORE validation, so the
+            // stored alarm and the child ids share one canonical spelling.
+            if (wired["schedule_file"] !== undefined) {
+              if (typeof wired["schedule_file"] !== "string" || wired["schedule_file"].length === 0) {
+                return { code: "invalid_trigger", message: "schedule_file must be a non-empty absolute path string." } as ToolError;
+              }
+              const canonical = await canonicalizeScheduleFile(wired["schedule_file"]);
+              const existing = findScheduleHandle(services.store.listAlarms(), canonical);
+              if (existing !== undefined) {
+                return { code: "invalid_action", message: "schedule file " + canonical + " already has a handle alarm " + existing.id + " (owner " + existing.ownerSessionId + "); edit that alarm instead — a second handle would fire every entry twice." } as ToolError;
+              }
+              wired = { ...wired, schedule_file: canonical };
+              if (!hasTargetArgs(wired)) {
+                const fallback = await defaultHandleTargetArgs(canonical, services.resolveWorkspace);
+                if (isToolError(fallback)) return fallback;
+                wired = { ...wired, ...fallback };
+                services.log?.("warn", "dsh-proactive: schedule_file handle for " + canonical + " defaulted its target to workspace " + String(fallback["target_workspace_id"]) + " (the file's grandparent directory).");
+              }
+            }
             // Workspace arguments are the async half of the same pre-validation
             // wiring: path / default-cwd spellings normalize to a canonical,
             // existence-checked target_workspace_id.
@@ -255,15 +290,18 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
               services.store.removeAlarm(alarm.id);
               return { code: "persistence_uncertain", message: "The alarm was not durably stored; please retry." } as ToolError;
             }
+            // A new handle materializes its children immediately instead of
+            // waiting up to schedulePollSeconds for the next tick.
+            if (alarm.type === "file") await services.syncNow?.().catch(() => undefined);
             services.scheduler.requestDrive();
-            return toAlarmView(alarm, services.now());
+            return viewWithDeclaredEntries(services.store.listAlarms(), alarm, services.now());
           },
           presentCall: (callArgs) => presentCard("Create proactive alarm", String((callArgs as { prompt?: unknown })["prompt"] ?? ""))
         }),
 
         defineTool({
           name: "proactive_list",
-          description: "List this session's active host-level alarms (scheduled, overdue, in-flight) in creation order with exact ids and states. Pass all=true to list active alarms across ALL sessions, not just this one — useful when the user asks to enumerate every alarm or you need to manage alarms owned by other sessions.",
+          description: "List this session's active host-level alarms (scheduled, overdue, in-flight) in creation order with exact ids and states. Pass all=true to list active alarms across ALL sessions, not just this one — useful when the user asks to enumerate every alarm or you need to manage alarms owned by other sessions. Child alarms materialized from a schedule file are NOT listed: a 'file' alarm row carries scheduleFile and declaredEntries, and the file (not this tool) is their source of truth.",
           parameters: {
             all: { type: "boolean", description: "When true, list active alarms across all sessions instead of only this session's. Default false." }
           },
@@ -278,7 +316,11 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             const alarms = services.store
               .listAlarms()
               .filter((alarm) => (all || alarm.ownerSessionId === agent.session.id) && (alarm.status === "scheduled" || alarm.status === "in-flight"))
-              .map((alarm) => toAlarmView(alarm, now));
+              // Child alarms are an implementation detail of a file handle:
+              // the model sees the handle (with scheduleFile / declaredEntries)
+              // and manages the FILE, never the children.
+              .filter((alarm) => alarm.declared === undefined)
+              .map((alarm) => viewWithDeclaredEntries(services.store.listAlarms(), alarm, now));
             return alarms;
           },
           presentCall: () => presentCard("List proactive alarms", "")
@@ -291,7 +333,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             id: { type: "string", required: true, description: "Exact alarm id." }
           },
           output: {
-            schema: { oneOf: [{ type: "object", additionalProperties: false, properties: { id: { type: "string", required: true }, cancelled: { type: "boolean", required: true, const: true } } }, ERROR_SCHEMA] },
+            schema: { oneOf: [{ type: "object", additionalProperties: false, properties: { id: { type: "string", required: true }, cancelled: { type: "boolean", required: true, const: true }, removedChildren: { type: "integer" } } }, ERROR_SCHEMA] },
             render: renderValue
           },
           async execute(args, exec) {
@@ -304,15 +346,22 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             if (alarm.declared !== undefined) {
               return { code: "invalid_action", message: "Alarm " + id + " is declared by schedule file " + alarm.declared.file + " (entry \"" + alarm.declared.entry + "\"); edit or remove the entry in that file instead — a cancellation would be undone by the next sync." } as ToolError;
             }
+            // Cancelling a file handle cancels the subscription: every child
+            // alarm goes with it. The whole set is removed in memory first and
+            // restored together if the durable write fails (a half-cancelled
+            // handle would keep firing children with no file to reconcile).
+            const children = alarm.type === "file" ? childrenOfHandle(services.store.listAlarms(), alarm.id) : [];
             services.store.removeAlarm(id);
+            for (const child of children) services.store.removeAlarm(child.id);
             try {
               await services.store.persist();
             } catch {
               services.store.addAlarm(alarm);
+              for (const child of children) services.store.addAlarm(child);
               return { code: "persistence_uncertain", message: "The cancellation was not durably stored; please retry." } as ToolError;
             }
             services.scheduler.requestDrive();
-            return { id, cancelled: true };
+            return { id, cancelled: true, ...(alarm.type === "file" ? { removedChildren: children.length } : {}) };
           },
           presentCall: (callArgs) => presentCard("Cancel proactive alarm", String((callArgs as { id?: unknown })["id"] ?? ""))
         }),
@@ -353,6 +402,20 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             // Zone default chain follows the OWNING session's client (the
             // alarm belongs to its owner, not to whoever happens to edit it).
             let wired = wireTimeZones(spec, services.sessionEvents?.(current.ownerSessionId));
+            // Re-pointing a handle at another schedule file: canonicalize and
+            // re-check same-file uniqueness (excluding this alarm itself).
+            const wantsFile = wired["schedule_file"] !== undefined;
+            if (wantsFile) {
+              if (typeof wired["schedule_file"] !== "string" || wired["schedule_file"].length === 0) {
+                return { code: "invalid_trigger", message: "schedule_file must be a non-empty absolute path string." } as ToolError;
+              }
+              const canonical = await canonicalizeScheduleFile(wired["schedule_file"]);
+              const clash = findScheduleHandle(services.store.listAlarms(), canonical, current.id);
+              if (clash !== undefined) {
+                return { code: "invalid_action", message: "schedule file " + canonical + " already has a handle alarm " + clash.id + " (owner " + clash.ownerSessionId + "); edit that alarm instead." } as ToolError;
+              }
+              wired = { ...wired, schedule_file: canonical };
+            }
             // v3 carryovers (full-replace dialect): a source/target field the
             // caller leaves out keeps the alarm's current spelling — an edit of
             // just the schedule must not silently retarget the conversation.
@@ -386,6 +449,14 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
               if (wired["target_provider"] === undefined && prev.provider !== undefined) wired = { ...wired, target_provider: prev.provider };
               if (wired["target_model"] === undefined && prev.model !== undefined) wired = { ...wired, target_model: prev.model };
             }
+            // A schedule-file handle must never drift on a bare edit: the
+            // dialect default for a session source is the OWNING session,
+            // which is not necessarily the handle's destination. Inject the
+            // stored target whole through the one sanctioned projection.
+            if (wantsFile && !hasTargetArgs(wired)) {
+              wired = { ...wired, ...targetArgsOf(prev) };
+              workspaceCarriedOver = true;
+            }
             if (!workspaceCarriedOver && (wired["target_mode"] === "workspace" || wired["target_source"] === "workspace" || wired["target_workspace_id"] !== undefined || wired["target_workspace_path"] !== undefined)) {
               if (services.resolveWorkspace === undefined) {
                 return { code: "not_found", message: "workspace targets are unavailable on this host (no workspace registry)." } as ToolError;
@@ -416,8 +487,11 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
               services.store.replaceAlarm(current);
               return { code: "persistence_uncertain", message: "The alarm change was not durably stored; please retry." } as ToolError;
             }
+            // A changed path or changed handle defaults must reconcile the
+            // children now, not on the next poll tick.
+            if (updated.type === "file" || current.type === "file") await services.syncNow?.().catch(() => undefined);
             services.scheduler.requestDrive();
-            return toAlarmView(updated, services.now());
+            return viewWithDeclaredEntries(services.store.listAlarms(), updated, services.now());
           },
           presentCall: (callArgs) => presentCard("Update proactive alarm", String((callArgs as { id?: unknown })["id"] ?? ""))
         }),
@@ -472,12 +546,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             max_retries_per_fire: { type: "integer", description: "Retry budget when a wake cannot run (busy/transient); 0..10." },
             max_prompt_length: { type: "integer", description: "Upper bound for alarm prompts; 100..20000." },
             default_prompt: { type: "string", description: "Default wake-up instruction pre-filled into the GUI create form; non-empty, at most 20000 characters. Purely a prefill — stored alarms always keep their own prompt." },
-            silent_wake_compaction: { type: "boolean", description: "Master gate for silent-wake tombstone compaction (default true); a per-alarm compaction of 'off' still keeps that alarm's full exchange on the model surface." },
-            schedule_files: {
-              type: "array",
-              items: { type: "string" },
-              description: "Declared-schedule source files: absolute glob paths (supports * within a segment, ** across segments, ? one character) whose JSON entries sync into host alarms idempotently; e.g. ['/srv/agents/*/.life/wake_schedule.json']. Empty array = feature off. Takes effect within one poll cycle (schedule_poll_seconds, default 60)."
-            }
+            silent_wake_compaction: { type: "boolean", description: "Master gate for silent-wake tombstone compaction (default true); a per-alarm compaction of 'off' still keeps that alarm's full exchange on the model surface." }
           },
           output: {
             schema: { oneOf: [SETTINGS_VIEW_SCHEMA, ERROR_SCHEMA] },
@@ -485,44 +554,15 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
           },
           async execute(args, exec) {
             if (exec.agent !== agent) return internalError();
-            // schedule_files is intentionally OUTSIDE HotConfig: the settings
-            // namespace schema does not declare it, so a settings watch would
-            // strip it and the hot-apply would clobber it back to undefined.
-            // It is validated here, persisted via config.json, and applied
-            // directly onto the live config the sync loop reads each tick.
-            const rawScheduleFiles = args["schedule_files"];
-            const rest: Record<string, unknown> = { ...args };
-            delete rest["schedule_files"];
-            let scheduleFiles: string[] | undefined;
-            if (rawScheduleFiles !== undefined) {
-              if (!Array.isArray(rawScheduleFiles)) {
-                return { code: "invalid_trigger", message: "schedule_files must be an array of absolute glob path strings." } as ToolError;
-              }
-              const seen: string[] = [];
-              for (const entry of rawScheduleFiles) {
-                if (typeof entry !== "string" || entry.length === 0 || entry.length > 512 || !entry.startsWith("/") || entry.includes("\0")) {
-                  return { code: "invalid_trigger", message: "schedule_files entries must be non-empty absolute paths of at most 512 characters." } as ToolError;
-                }
-                if (!seen.includes(entry)) seen.push(entry);
-                if (seen.length > MAX_SCHEDULE_FILES) {
-                  return { code: "invalid_trigger", message: "schedule_files accepts at most " + MAX_SCHEDULE_FILES + " patterns." } as ToolError;
-                }
-              }
-              scheduleFiles = seen;
-            }
-            const shape = validateSettingsPatch(rest);
-            if (isToolError(shape) && scheduleFiles === undefined) return shape;
-            const patch = isToolError(shape) ? {} : shape.patch;
+            const shape = validateSettingsPatch(args as Record<string, unknown>);
+            if (isToolError(shape)) return shape;
             try {
-              await writeConfigFile(services.config.dataDir, { ...patch, ...(scheduleFiles !== undefined ? { scheduleFiles } : {}) } as unknown as Partial<ProactiveConfig>);
+              await writeConfigFile(services.config.dataDir, shape.patch as unknown as Partial<ProactiveConfig>);
             } catch {
               return { code: "persistence_uncertain", message: "Settings were not durably stored; please retry." } as ToolError;
             }
-            if (!isToolError(shape)) {
-              const next: HotConfig = { ...hotSubset(services.config), ...shape.patch };
-              applyHotConfig(services.config, next);
-            }
-            if (scheduleFiles !== undefined) services.config.scheduleFiles = scheduleFiles;
+            const next: HotConfig = { ...hotSubset(services.config), ...shape.patch };
+            applyHotConfig(services.config, next);
             return settingsView(services.config);
           },
           presentCall: (callArgs) => presentCard("Update proactive settings", Object.keys((callArgs as Record<string, unknown>) ?? {}).join(", "))
@@ -541,8 +581,7 @@ function settingsView(config: ProactiveConfig): JsonValue {
     max_retries_per_fire: config.maxRetriesPerFire,
     max_prompt_length: config.maxPromptLength,
     default_prompt: config.defaultPrompt,
-    silent_wake_compaction: config.silentWakeCompaction,
-    schedule_files: [...config.scheduleFiles]
+    silent_wake_compaction: config.silentWakeCompaction
   };
 }
 

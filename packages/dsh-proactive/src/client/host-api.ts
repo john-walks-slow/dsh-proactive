@@ -20,7 +20,7 @@ export interface AlarmRowDto {
   id: string;
   sessionId: string;
   sessionTitle: string;
-  type: "once" | "every" | "cron";
+  type: "once" | "every" | "cron" | "file";
   targetMode: "resume" | "fork" | "new" | "workspace";
   /** Source arm for resume/fork targets (session/workspace/preset). */
   targetSource?: "session" | "workspace" | "preset";
@@ -49,10 +49,28 @@ export interface AlarmRowDto {
   everySeconds?: number;
   cron?: string;
   at?: string;
+  /** Present on "file" rows only: the canonical schedule-file path. */
+  scheduleFile?: string;
+  /** Present on "file" rows only: how many child alarms it currently owns. */
+  declaredEntries?: number;
 }
 
 export interface PanelSnapshotDto {
-  server: { now: string; dataDir: string; corrupt: boolean };
+  server: {
+    now: string;
+    dataDir: string;
+    corrupt: boolean;
+    /** Last schedule-file reconciliation (in-memory; absent on older hosts). */
+    sync?: {
+      lastAt: string;
+      handles: number;
+      created: number;
+      updated: number;
+      removed: number;
+      skippedPast: number;
+      errors: string[];
+    };
+  };
   /**
    * `defaultPrompt` (the create-form prefill) is optional: a host still
    * running a pre-260907 build serves the v2 shape without it, and the client

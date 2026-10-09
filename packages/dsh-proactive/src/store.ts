@@ -47,11 +47,12 @@ const LEGACY_REASONS = { alarm: false, heartbeat: true } as const;
 
 const TARGET_MODES: readonly string[] = ["resume", "fork", "new", "workspace"];
 const TARGET_SOURCES: readonly string[] = ["session", "workspace", "preset"];
-const ALARM_TYPES: readonly string[] = ["once", "every", "cron"];
+const ALARM_TYPES: readonly string[] = ["once", "every", "cron", "file"];
 const ALARM_STATUSES: readonly string[] = ["scheduled", "in-flight", "completed", "cancelled", "failed", "paused"];
 
 function isTriggerForType(type: AlarmType, trigger: unknown): boolean {
   if (!isRecord(trigger)) return false;
+  if (type === "file") return typeof trigger["file"] === "string" && trigger["file"].length > 0;
   if (type === "once") return typeof trigger["at"] === "string";
   if (type === "every") return typeof trigger["everySeconds"] === "number" && (trigger["anchor"] === undefined || typeof trigger["anchor"] === "string") && (trigger["jitterSeconds"] === undefined || typeof trigger["jitterSeconds"] === "number");
   return typeof trigger["expr"] === "string";
@@ -117,13 +118,17 @@ function alarmIsValid(value: unknown): value is Alarm {
   if (minIdleSeconds !== undefined && (typeof minIdleSeconds !== "number" || !Number.isSafeInteger(minIdleSeconds) || minIdleSeconds < 0 || minIdleSeconds > 86400)) return false;
   // declared provenance is optional; a present value must carry the full
   // triple (file / entry / hash) so a partial record can never be mistaken
-  // for a synced one.
+  // for a synced one. sourceId (the owning file handle) is OPTIONAL: records
+  // synced before 261009 have no parent, and treating them as invalid would
+  // flip the whole store to corrupt on load. The sync removes them as
+  // orphans instead.
   const declared = value["declared"];
   if (declared !== undefined) {
     if (!isRecord(declared)) return false;
     if (typeof declared["file"] !== "string" || declared["file"].length === 0) return false;
     if (typeof declared["entry"] !== "string" || declared["entry"].length === 0) return false;
     if (typeof declared["hash"] !== "string" || declared["hash"].length === 0) return false;
+    if (declared["sourceId"] !== undefined && (typeof declared["sourceId"] !== "string" || declared["sourceId"].length === 0)) return false;
   }
   return isTriggerForType(type, value["trigger"]);
 }
