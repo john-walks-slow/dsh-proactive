@@ -58,6 +58,9 @@ dsh plugin --profile web add dsh-proactive
 
 It works out of the box: the package ships its own `dsh.bundle.patch`, so the dsh loader mounts `cordis.patch.yml` automatically — no manual profile edits needed.
 
+> **Compatibility**: this version targets **dsh 0.2.0-rc.1 or newer** (see the package's `peerDependencies`).
+> On an older dsh (0.1.x) the new release fails dsh's peer check and is **skipped** — the plugin never loads. Install `dsh-proactive@0.2.3` there instead.
+
 Install from GitHub source (monorepo subdirectory; pnpm ≥10 requires allowing the build script):
 
 ```bash

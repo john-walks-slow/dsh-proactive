@@ -58,6 +58,9 @@ dsh plugin --profile web add dsh-proactive
 
 安装即生效：包内自带 `dsh.bundle.patch`，dsh loader 自动挂载 `cordis.patch.yml`，无需手工改 profile 配置。
 
+> **兼容性**：本版本面向 **dsh 0.2.0-rc.1 及以上**（见包内 `peerDependencies`）。
+> 在更早的 dsh（0.1.x）上装新版会被 dsh 的 peer 检查**跳过**、插件根本不加载 —— 请改用 `dsh-proactive@0.2.3`。
+
 GitHub 源码安装（monorepo 子目录；pnpm ≥10 需允许构建脚本）：
 
 ```bash
