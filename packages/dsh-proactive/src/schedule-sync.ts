@@ -43,6 +43,14 @@ import { MAX_FILE_BYTES, declaredAlarmId, parseScheduleFile, sha256, stableStrin
 import type { ProactiveConfig } from "./config.js";
 
 const MAX_REPORTED_ERRORS = 20;
+/**
+ * The synthetic owner every pre-261009 declared alarm carries (see 260918).
+ * It is what makes an id-matching record ADOPTABLE during the upgrade: the
+ * child id is derived from (file, entry), so a record with a child id and
+ * this owner can only have come from the declared-schedule machinery — a
+ * user alarm never gets such an id.
+ */
+const LEGACY_DECLARED_OWNER = "declared-schedule";
 
 export interface SyncSummary {
   /** Instant of the pass (epoch ms). */
@@ -257,12 +265,20 @@ export async function syncScheduleFiles(deps: ScheduleSyncDeps): Promise<SyncSum
       }
       const existing = deps.store.getAlarm(alarmId);
       if (existing !== undefined) {
-        if (existing.declared === undefined) {
+        // A pre-261009 record has no `sourceId` (and the earliest ones have no
+        // `declared` provenance at all): the same (file, entry) still derives
+        // the same id, so it is ADOPTED — re-pointed at the handle instead of
+        // being dropped and re-created (which would have lost its history).
+        const adoptable = existing.declared !== undefined || existing.ownerSessionId === LEGACY_DECLARED_OWNER;
+        if (!adoptable) {
           log("warn", "schedule files: alarm id " + alarmId + " already exists as a regular alarm; entry skipped.");
           continue;
         }
         if (existing.status === "in-flight") continue;
-        if (existing.declared.hash === alarm.declared?.hash) continue;
+        const unchanged = existing.declared !== undefined &&
+          existing.declared.hash === alarm.declared?.hash &&
+          existing.declared.sourceId === alarm.declared?.sourceId;
+        if (unchanged) continue;
         deps.store.replaceAlarm(alarm);
         summary.updated++;
         summary.mutated = true;
@@ -280,6 +296,9 @@ export async function syncScheduleFiles(deps: ScheduleSyncDeps): Promise<SyncSum
     for (const alarm of [...deps.store.listAlarms()]) {
       const declared = alarm.declared;
       if (declared === undefined || alarm.status === "in-flight") continue;
+      // Backed by a parsed entry in THIS pass (created, adopted or kept):
+      // never remove it below, whatever its (possibly stale) sourceId says.
+      if (desired.has(alarm.id) || keptIds.has(alarm.id)) continue;
       const sourceId = declared.sourceId;
       const handleActive = sourceId !== undefined && activeHandleIds.has(sourceId);
       if (!handleActive) {
@@ -288,7 +307,7 @@ export async function syncScheduleFiles(deps: ScheduleSyncDeps): Promise<SyncSum
         summary.mutated = true;
         continue;
       }
-      if (brokenHandleIds.has(sourceId) || desired.has(alarm.id) || keptIds.has(alarm.id)) continue;
+      if (brokenHandleIds.has(sourceId)) continue;
       deps.store.removeAlarm(alarm.id);
       summary.removed++;
       summary.mutated = true;

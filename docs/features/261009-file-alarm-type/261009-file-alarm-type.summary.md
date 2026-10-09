@@ -14,7 +14,7 @@
 - **失败语义**：文件 ENOENT = 撤销计划（子闹钟移除，句柄保留）；读坏/JSON 坏 = 保留现有子闹钟；`sourceId` 不指向活跃句柄 = 孤儿移除（也是 260918 迁移路径）；hash 未变完全 no-op（保住 jitter 锚点与 min_idle defer）。
 - **`firesAlarm(type)` 唯一判据**：dueAlarms/arm 跳过、`toAlarmView` 不判 overdue、面板 fire 拒绝。
 - **面板**：第 4 种创建类型；一行句柄（`scheduleFile` + `declaredEntries`），子闹钟 runs 按 `sourceId` 折叠到句柄行；`server.sync` 摘要 + 悬停看错误；前端即时校验绝对路径/无 glob。
-- **迁移**：旧 declared 闹钟被首轮同步当孤儿清掉，随后由句柄以**相同 id** 重建（runs 历史连续，但面板 runCount 从 0 重来）。**不可回滚到旧 lib**（旧 `ALARM_TYPES` 不认 `type:"file"` → 整店 corrupt → 启动即 persist 清空）；重启前已备份 `alarms.json.bak-261009`。
+- **迁移（0.2.x → 0.3.x）**：旧 `decl_*` 记录由首轮同步**领养**，不再当孤儿清掉——apply 阶段对同 id 记录（`declared` 存在，或 0.2.x 最早的 pre-provenance 形态：owner `declared-schedule`、无 `declared`）按 id 重指向当前句柄并替换；孤儿规则只在「不在本轮 desired/keptIds 且 sourceId 不指向活跃句柄」时生效（顺序写反会导致领养后当场删除——离线预演抓到，已修 + 回归用例）。配套脚本 `scripts/migrate-schedule-files.mjs`（repo 内、不随 npm 发布）在停 dsh 期间为每个 `scheduleFiles` 文件写一个句柄。离线预演结果（线上真实 store + 4 个文件副本）：`handles=4 +0 ~6 -0 skippedPast=0 errors=0`，6 条子闹钟 id 与迁移前逐条相同、唤醒零中断。**不可回滚到旧 lib**（旧 `ALARM_TYPES` 不认 `type:"file"` → 整店 corrupt → 启动即 persist 清空）；重启前已备份 `alarms.json.bak-261009`。
 
 ## 验证证据
 

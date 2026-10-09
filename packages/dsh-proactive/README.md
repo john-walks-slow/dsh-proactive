@@ -184,6 +184,22 @@ proactive_set  { prompt: "…", schedule_file: "/root/agents/luna/.life/wake_sch
 
 之后的每天只需重写 `wake_schedule.json`，不必再动闹钟。
 
+### 从 0.2.x 升级
+
+0.2.x 的 `config.scheduleFiles`（宿主 glob 自动读取）**已删除**，且**不会**自动为你补建句柄——升级后那些时间表文件不再产生任何闹钟。旧机制留下的 `decl_*` 闹钟又不属于任何句柄，会被首轮同步当孤儿清掉（唤醒静默断供）。
+
+升级步骤（**必须先停 dsh**，否则运行中的进程会用内存状态覆盖写入）：
+
+```bash
+sv stop dsh
+node scripts/migrate-schedule-files.mjs /root/.dsh     # 读 config.json 的 scheduleFiles 建句柄；也可显式传文件路径
+sv start dsh
+```
+
+脚本为每个文件写一个句柄闹钟（目标 workspace 按「文件祖父目录是已注册 workspace」判定）。启动后首轮同步会**领养**这些旧闹钟：子闹钟 id 由「文件 + 条目 id」稳定派生，因此 id 不变、runs 历史连续、唤醒不断供。文件不多时也可以不跑脚本，直接用 `proactive_set` / 面板表单逐个建句柄，效果相同。
+
+> 该脚本在仓库内（`packages/dsh-proactive/scripts/migrate-schedule-files.mjs`），不随 npm 包发布；从 npm 安装的用户请用工具或面板建句柄。
+
 ## 全局配置（Configuration）
 
 默认配置开箱即用。若需自定义，可编辑 `$DSH_HOME/proactive/config.json`：

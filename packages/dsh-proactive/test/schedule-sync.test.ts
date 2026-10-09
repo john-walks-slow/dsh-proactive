@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startScheduleSync, syncScheduleFiles, type ScheduleSyncDeps, type ScheduleSyncStore } from "../src/schedule-sync.js";
+import { declaredAlarmId } from "../src/schedule-file.js";
 import type { Alarm, ToolError } from "../src/domain.js";
 
 const NOW = Date.parse("2026-09-01T09:00:00.000Z");
@@ -218,6 +219,42 @@ test("sync: pausing the handle removes its children; resuming recreates them", a
     const resumed = await syncScheduleFiles(makeDeps(store));
     assert.equal(resumed.created, 1);
     assert.equal(children(store).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("sync: a pre-261009 record for the same (file, entry) is adopted, not dropped", async () => {
+  const { file, cleanup } = scratch();
+  try {
+    writeFileSync(file, JSON.stringify({ version: 1, entries: [entry("e1")] }), "utf8");
+    const store = new SyncStore();
+    store.addAlarm(handle(file));
+    // The 0.2.x shape: the child id is already the (file, entry) hash, but the
+    // record predates both `declared` provenance and `sourceId`.
+    const id = declaredAlarmId(file, "e1");
+    const legacy: Alarm = {
+      ...handle(file),
+      id,
+      ownerSessionId: "declared-schedule",
+      type: "once",
+      trigger: { at: FUTURE_AT },
+      nextDueAt: FUTURE_AT
+    };
+    delete (legacy as { declared?: unknown }).declared;
+    store.addAlarm(legacy);
+    const summary = await syncScheduleFiles(makeDeps(store));
+    assert.equal(summary.removed, 0);
+    const adopted = store.getAlarm(id);
+    assert.equal(adopted?.declared?.sourceId, "alarm_handle");
+    assert.equal(adopted?.declared?.entry, "e1");
+    // A record with a child-shaped id owned by a REAL session is never
+    // clobbered: it can only be a user alarm that happens to collide.
+    const foreign: Alarm = { ...legacy, ownerSessionId: "s-real" };
+    store.replaceAlarm(foreign);
+    const again = await syncScheduleFiles(makeDeps(store));
+    assert.equal(again.updated, 0);
+    assert.equal(store.getAlarm(id)?.declared, undefined);
   } finally {
     cleanup();
   }

@@ -183,6 +183,22 @@ proactive_set  { prompt: "…", schedule_file: "/root/agents/luna/.life/wake_sch
 
 After that you only rewrite `wake_schedule.json` each day.
 
+### Upgrading from 0.2.x
+
+The 0.2.x `config.scheduleFiles` (host-side glob pickup) is **gone**, and no handle is created for you: after the upgrade those schedule files produce no alarms at all. The `decl_*` alarms the old mechanism left behind belong to no handle, so the first sync pass treats them as orphans and removes them — silent loss of every wake-up.
+
+Upgrade steps (**dsh must be stopped**, otherwise the running process overwrites the file from memory):
+
+```bash
+sv stop dsh
+node scripts/migrate-schedule-files.mjs /root/.dsh     # builds handles from config.json's scheduleFiles; explicit paths also accepted
+sv start dsh
+```
+
+The script writes one handle alarm per file (its target is resolved by "the file's grandparent directory is a registered workspace"). On the first sync pass those legacy alarms are **adopted** — a child id is derived from `(file, entry id)`, so ids stay stable, run history is continuous and no wake-up is lost. With just a few files you can skip the script and create handles with `proactive_set` or the panel form instead; the result is the same.
+
+> The script lives in the repository (`packages/dsh-proactive/scripts/migrate-schedule-files.mjs`) and is not published to npm; users installing from npm should create handles via the tool or the panel.
+
 ## Configuration
 
 Works out of the box with sensible defaults. To customize, edit `$DSH_HOME/proactive/config.json`:
