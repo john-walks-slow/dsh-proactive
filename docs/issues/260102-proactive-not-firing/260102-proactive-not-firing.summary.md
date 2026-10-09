@@ -38,6 +38,13 @@
 
 - **线上重启 dsh**：改动已就位（`lib/` 已重建、config 已改），但重启会中断当前会话，按 restart-dsh 红线必须每次单独取得用户书面同意 —— 本次已申请，等待同意。
 
+## 已发布（2026-10-09）
+
+- **npm `dsh-proactive@0.2.4`**（`latest`）与 **GitHub `main` + tag `v0.2.4`** 已发布：包含 9ec11e6 的 dsh 0.2.0-rc.2 适配与本次 compaction 契约修复 —— 此前 npm 上的 0.2.3 在 dsh 0.2.0-rc.2 上会被 loader 的 peer 检查**跳过**，即 npm 用户其实拿不到能用的 proactive。
+- tarball 已补 `README.en.md`（原先漏在 `files` 外），四个 README 都补了 **dsh 版本要求**（0.2.0-rc.1+ 用新版；0.1.x 用 0.2.3）。
+- 验证：scratch profile 装 tgz 与装 registry 版各一次，layer 出现 + `apply` 可导入；`npm view version` 轮询到 0.2.4。
+- 注意：本仓库 `npm run release` 里的 `npm version patch` **不会**提交或打 tag（包位于 git 仓库子目录、仓库根无 package.json 时 npm 只改 package.json，已用最小复现确认）——发版必须手动 `chore(release)` 提交 + `git tag -a`，再 `git push --follow-tags`。
+
 ## 遗留
 
 - `world-master` 的 `world-evolution-5am` 仍无法注册：`/root/agents/world-master` 不在 DSH 工作区注册表里，declared 同步解析 `workspace_path` 失败（713d2b7 之后至少会打 warn）。
