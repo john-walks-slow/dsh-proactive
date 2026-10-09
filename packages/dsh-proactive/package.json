@@ -31,7 +31,8 @@
     "test": "tsc -p tsconfig.json && node --test 'dist/test/*.test.js'",
     "prepare": "npm run build",
     "prepublishOnly": "npm test",
-    "release": "npm run test && npm version patch && npm pack --pack-destination /tmp"
+    "release": "npm run test && npm version patch && npm pack --pack-destination /tmp",
+    "e2e:wake": "dsh-e2e run e2e/wake-smoke.mjs"
   },
   "dsh": {
     "bundle": {

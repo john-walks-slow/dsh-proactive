@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Session, deriveEventMessage, type SessionEvent } from "@deepseek-ai/dsh-session";
+import { Session, SessionSeq, deriveEventMessage, type SessionEvent } from "@deepseek-ai/dsh-session";
 import { ToolCallId, createAssistantMessage, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { proactiveNoticeSource } from "../src/framing.js";
 import {
   applyWakeCompaction,
+  exchangeNoticeText,
   planWakeCompaction,
   tombstoneText,
   TOMBSTONE_MARKER,
@@ -133,7 +134,7 @@ test("planWakeCompaction stops at the wake turn's turn/end and skips earlier sta
   assert.deepEqual(plan.runs[0], { seqs: [events[2].seq], framing: true });
 });
 
-test("applyWakeCompaction collapses the surface: tombstone in, wake exchange and eraser invisible", () => {
+test("applyWakeCompaction collapses the surface: tombstone in, wake exchange folded to a notice", () => {
   const session = Session.create("s1" as never);
   appendSilentWake(session);
   const events = session.snapshotEvents() as unknown as CompactEvent[];
@@ -142,7 +143,6 @@ test("applyWakeCompaction collapses the surface: tombstone in, wake exchange and
   const ok = applyWakeCompaction(
     session as unknown as CompactSession,
     plan,
-    events,
     alarm,
     new Date("2026-09-01T09:00:00.000Z"),
     "aggressive",
@@ -153,25 +153,26 @@ test("applyWakeCompaction collapses the surface: tombstone in, wake exchange and
   assert.deepEqual(warnings, []);
 
   // The model-visible surface now derives: tombstone (user), snapshot (user),
-  // and NOTHING from the assistant/tool exchange — the eraser is an
-  // empty-content assistant/message, which derives to null.
+  // fold notice (user). The assistant/tool payload is gone — an
+  // assistant/message cannot be a surface replacement on this platform, so the
+  // exchange folds into a one-line notice the same way a /compact checkpoint
+  // does.
   const derived = session.surface.nodes
     .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as SessionEvent))
     .filter((message) => message !== null);
-  assert.equal(derived.length, 2);
+  assert.equal(derived.length, 3);
   const texts = derived.map((message) => (message.role === "user" && message.content[0].type === "text" ? message.content[0].text : "<non-text>"));
   assert.ok(texts[0].startsWith(TOMBSTONE_MARKER));
   assert.equal(texts[0], tombstoneText(alarm, new Date("2026-09-01T09:00:00.000Z"), "aggressive", undefined));
   assert.ok(texts[1].includes("supersedes earlier runtime-context snapshots"));
+  assert.equal(texts[2], exchangeNoticeText(alarm));
 
   // The raw log keeps every original event (GUI transcript is append-origin).
   const rawTypes = session.snapshotEvents().map((event) => event.type);
   assert.deepEqual(rawTypes.slice(0, 6), ["turn/start", "user/message", "user/message", "assistant/message", "tool/result", "turn/end"]);
 
-  // Persistent cost of the silent wake: the tombstone text only.
+  // Persistent cost of the silent wake: the one-line tombstone.
   const tombstoneBytes = Buffer.byteLength(texts[0]);
-  const framingBytes = Buffer.byteLength("x"); // placeholder replaced below
-  assert.ok(tombstoneBytes < framingBytes + 80);
   assert.ok(tombstoneBytes < 90, "tombstone was " + tombstoneBytes + " bytes");
 });
 
@@ -180,7 +181,7 @@ test("applyWakeCompaction is idempotent-safe: a second plan over the compacted l
   appendSilentWake(session);
   const events = session.snapshotEvents() as unknown as CompactEvent[];
   const plan = planWakeCompaction(events, 0)!;
-  applyWakeCompaction(session as unknown as CompactSession, plan, events, alarm, new Date(), "aggressive", undefined, () => undefined);
+  applyWakeCompaction(session as unknown as CompactSession, plan, alarm, new Date(), "aggressive", undefined, () => undefined);
   // The next wake's slice starts after the compaction events: planning from
   // there must not see the tombstone as a framing notice.
   const next = planWakeCompaction(session.snapshotEvents() as unknown as CompactEvent[], session.snapshotEvents().length);
@@ -192,16 +193,17 @@ test("applyWakeCompaction skips a run whose range a concurrent compaction alread
   appendSilentWake(session);
   const events = session.snapshotEvents() as unknown as CompactEvent[];
   const plan = planWakeCompaction(events, 0)!;
-  // Simulate an external /compact that replaced the whole wake turn first.
-  session.append("assistant/message", { turn: 99, step: 1, stream: [], message: createAssistantMessage({ content: [{ type: "text", text: "总结" }], source: { provider: "p", model: "m" } }) }, {
-    surfaceOp: { op: "replace", startSeq: events[1].seq as never, endSeq: events[4].seq as never },
-    
+  // Simulate an external /compact that replaced the whole wake turn first
+  // (the platform's own checkpoint shape: a user/message citing every
+  // shadowed surface node).
+  session.append("user/message", createUserMessage({ content: [{ type: "text", text: "总结" }], source: { kind: "user" } }), {
+    surfaceOp: { op: "replace", startSeq: SessionSeq(events[1].seq), endSeq: SessionSeq(events[4].seq) },
+    sourceEventSeqs: [events[1].seq, events[2].seq, events[3].seq, events[4].seq].map(SessionSeq)
   });
   const warnings = logs();
   const ok = applyWakeCompaction(
     session as unknown as CompactSession,
     plan,
-    events,
     alarm,
     new Date(),
     "aggressive",
@@ -213,21 +215,20 @@ test("applyWakeCompaction skips a run whose range a concurrent compaction alread
   assert.ok(warnings.every((line) => line.startsWith("warn:")));
 });
 
-test("eraserless runs fall back to a tombstone", () => {
-  // An assistant/tool run without assistant provenance (cannot happen with
-  // real events, but the fallback must stay safe) becomes a tombstone.
+test("a run that contains the framing collapses wholesale to a tombstone", () => {
+  // No snapshot interleave: framing, assistant and tool/result form ONE owned
+  // run, so the whole run is replaced by the framing tombstone.
   const session = Session.create("s1" as never);
   session.append("turn/start", { turn: 1 });
   session.append("user/message", framingMessage(), { surfaceOp: "append" });
-  const brokenAssistant = { ...noReplyAssistant(), message: { ...noReplyAssistant().message, source: { kind: "model" } } };
-  session.append("assistant/message", brokenAssistant as never, { surfaceOp: "append" });
+  session.append("assistant/message", noReplyAssistant(), { surfaceOp: "append" });
   session.append("tool/result", noReplyResult(), { surfaceOp: "append" });
   session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
   const events = session.snapshotEvents() as unknown as CompactEvent[];
   const plan = planWakeCompaction(events, 0)!;
   assert.equal(plan.runs.length, 1); // no snapshot interleave: one run
   const warnings = logs();
-  const ok = applyWakeCompaction(session as unknown as CompactSession, plan, events, alarm, new Date(), "aggressive", undefined, (level: string, message: string) => warnings.push(level + ":" + message));
+  const ok = applyWakeCompaction(session as unknown as CompactSession, plan, alarm, new Date(), "aggressive", undefined, (level: string, message: string) => warnings.push(level + ":" + message));
   assert.equal(ok, true);
   assert.deepEqual(warnings, []);
   const derived = session.surface.nodes.map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as SessionEvent)).filter((message) => message !== null);
@@ -272,7 +273,6 @@ test("applyWakeCompaction with minimal compaction keeps the reason in the tombst
   const ok = applyWakeCompaction(
     session as unknown as CompactSession,
     plan,
-    events,
     alarm,
     new Date("2026-09-01T09:00:00.000Z"),
     "minimal",
@@ -284,8 +284,8 @@ test("applyWakeCompaction with minimal compaction keeps the reason in the tombst
   const derived = session.surface.nodes
     .map((seq) => deriveEventMessage(session.snapshotEvents()[seq] as SessionEvent))
     .filter((message) => message !== null);
-  // tombstone (with reason) + snapshot; assistant/tool erased
-  assert.equal(derived.length, 2);
+  // tombstone (with reason) + snapshot + fold notice
+  assert.equal(derived.length, 3);
   const ts = (derived[0].content[0] as { text: string }).text;
   assert.ok(ts.startsWith(TOMBSTONE_MARKER));
   assert.ok(ts.includes("silence: 没事发生，安静等待"));

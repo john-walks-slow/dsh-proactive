@@ -243,8 +243,8 @@ export class WakeDriver {
   }
 
   /**
-   * Collapse the settled wake turn on the model surface (tombstone + invisible
-   * erasers). Best-effort by design: a session without the platform's
+   * Collapse the settled wake turn on the model surface (tombstone + fold
+   * notice). Best-effort by design: a session without the platform's
    * append/surface split (test fakes) or a range a concurrent compaction
    * already shadowed just skips with a warn.
    */
@@ -257,8 +257,8 @@ export class WakeDriver {
       const events = sessionLogOf(agent.session) as unknown as CompactEvent[];
       const plan = planWakeCompaction(events, startIndex);
       if (plan === undefined) return;
-      if (applyWakeCompaction(session as CompactSession, plan, events, alarm, firedAt, compaction, reason, this.deps.log)) {
-        this.deps.log("info", "wake exchange compacted for alarm " + alarm.id + " (no visible output; model surface collapsed to a tombstone)");
+      if (applyWakeCompaction(session as CompactSession, plan, alarm, firedAt, compaction, reason, this.deps.log)) {
+        this.deps.log("info", "wake exchange compacted for alarm " + alarm.id + " (no visible output; model surface collapsed to a tombstone + fold notice)");
       }
     } catch (error) {
       this.deps.log("warn", "wake compaction failed for alarm " + alarm.id + ": " + (error instanceof Error ? error.message : String(error)));

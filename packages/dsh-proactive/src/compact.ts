@@ -2,22 +2,29 @@
  * Post-settle wake-slice compaction: after a wake turn ends with nothing
  * user-visible (deep silence via proactive_reclaim, or a turn that produced
  * no output),
- * rewrite the model-visible surface so the whole exchange — framing notice,
+ * rewrite the model-visible surface so the exchange — framing notice,
  * assistant reasoning/tool-call, tool result — collapses to a ~70-byte
- * tombstone. This is the mechanism that keeps hourly reminders from
- * polluting a long session's context: the raw session log keeps every event
- * (the GUI transcript renders append-origin events, so the wake exchange
- * stays visible to the human), while the LLM message surface — what
- * deriveMessages folds for every future request — sees only the tombstone.
+ * tombstone plus a one-line fold notice. This is the mechanism that keeps
+ * hourly reminders from polluting a long session's context: the raw session
+ * log keeps every event (the GUI transcript renders append-origin events, so
+ * the wake exchange stays visible to the human), while the LLM message
+ * surface — what deriveMessages folds for every future request — sees only
+ * the tombstone and the notice.
  *
  * The platform's surface-replacement channel (dsh-session SurfaceOp
- * `{op:"replace", start, end}`; "any surface-replacing producer may use it")
- * is used twice per run:
- *   - the run containing the framing is replaced by a one-line user/message
- *     tombstone (distinct marker, never mistaken for a fresh framing);
+ * `{op:"replace", startSeq, endSeq}`; "any surface-replacing producer may use
+ * it") is used once per owned run, always with a `user/message`:
+ *   - the run containing the framing is replaced by a one-line tombstone
+ *     (distinct marker, never mistaken for a fresh framing);
  *   - every other owned run (assistant/tool events of the wake turn) is
- *     replaced by an empty-content assistant/message, whose derived LLM
- *     message is null — the platform's own "invisible node" rule.
+ *     replaced by a one-line fold notice.
+ *
+ * The replacement MUST be a user/message: the platform rejects an
+ * `assistant/message` as a surface replacement ("assistant/message embeds its
+ * source stream and cannot carry sourceEventSeqs"), so the earlier
+ * empty-content assistant "eraser" is not expressible. The fold notice is
+ * ~55 bytes and carries no tool payload, which is what the context budget
+ * actually cares about.
  *
  * Runs are split around anything the wake did not author (runtime-context
  * snapshots, mnemon instructions, user messages that raced in mid-turn):
@@ -30,8 +37,8 @@
  * throws and we skip that run (logged, never fatal).
  */
 
-import { boundContextSummary, createAssistantMessage, createUserMessage, type AssistantMessage, type UserMessage } from "@deepseek-ai/dsh-llm";
-import { isSurfaceEvent, type SurfaceIntent } from "@deepseek-ai/dsh-session";
+import { boundContextSummary, createUserMessage, type UserMessage } from "@deepseek-ai/dsh-llm";
+import { isSurfaceEvent } from "@deepseek-ai/dsh-session";
 import { PROACTIVE_PLUGIN, type Alarm, type AlarmCompaction } from "./domain.js";
 import { isFramingNotice } from "./observer.js";
 import { proactiveNoticeSource } from "./framing.js";
@@ -54,7 +61,6 @@ export interface CompactEvent {
  */
 export interface CompactSession {
   append(type: "user/message", data: UserMessage, opts: unknown): unknown;
-  append(type: "assistant/message", data: { turn: number; step: number; message: AssistantMessage }, opts: unknown): unknown;
 }
 
 /** One owned surface range to be collapsed, plus how to collapse it. */
@@ -136,15 +142,15 @@ export function planWakeCompaction(events: readonly CompactEvent[], startIndex: 
 
 /**
  * Apply one compaction plan to the live session. Each run becomes a single
- * surface replacement appended after the settled turn; an empty-content
- * assistant/message eraser derives no LLM message at all. Any validation
- * failure (range no longer on the surface) skips that run with a warn.
+ * user/message surface replacement appended after the settled turn: the
+ * tombstone for a framing run, a one-line fold notice for an assistant/tool
+ * run. Any validation failure (range no longer on the surface) skips that run
+ * with a warn.
  * @returns true when at least the framing run was collapsed.
  */
 export function applyWakeCompaction(
   session: CompactSession,
   plan: WakeCompactionPlan,
-  events: readonly CompactEvent[],
   alarm: Alarm,
   firedAt: Date,
   compaction: AlarmCompaction,
@@ -162,7 +168,7 @@ export function applyWakeCompaction(
         session.append("user/message", createTombstoneMessage(alarm, firedAt, compaction, reason), opts);
         framingCollapsed = true;
       } else {
-        session.append("user/message", createExchangeNoticeMessage(alarm, firedAt), opts);
+        session.append("user/message", createExchangeNoticeMessage(alarm), opts);
       }
     } catch (error) {
       log("warn", "wake compaction skipped for alarm " + alarm.id + " (range no longer on the surface): " + (error instanceof Error ? error.message : String(error)));
@@ -179,50 +185,15 @@ export function createTombstoneMessage(alarm: Alarm, firedAt: Date, compaction: 
   });
 }
 
+/** The one-line text that replaces an assistant/tool exchange run. */
+export function exchangeNoticeText(alarm: Alarm): string {
+  return "[dsh-proactive: silent wake " + alarm.id + " exchange folded]";
+}
+
 /** Build the notice user message that replaces an assistant/tool exchange run. */
-export function createExchangeNoticeMessage(alarm: Alarm, firedAt: Date): UserMessage {
+export function createExchangeNoticeMessage(alarm: Alarm): UserMessage {
   return createUserMessage({
-    content: [{ type: "text", text: "[dsh-proactive: silent wake " + alarm.id + " exchange folded]" }],
+    content: [{ type: "text", text: exchangeNoticeText(alarm) }],
     source: proactiveNoticeSource(boundContextSummary(PROACTIVE_PLUGIN + " fold " + alarm.id))
   });
-}
-
-/**
- * Build the invisible eraser for an assistant/tool run: an empty-content
- * assistant/message derives no LLM message. Provider/model provenance is
- * taken from the shadowed assistant message so the event stays honest about
- * its origin; without it the caller falls back to a tombstone.
- */
-export function eraserMessage(provenance: { turn: number; step: number; provider: string; model: string } | undefined):
-  | { turn: number; step: number; message: AssistantMessage }
-  | undefined {
-  if (provenance === undefined) return undefined;
-  return {
-    turn: provenance.turn,
-    step: provenance.step,
-    message: createAssistantMessage({
-      content: [],
-      source: { provider: provenance.provider, model: provenance.model }
-    })
-  };
-}
-
-/**
- * Extract the eraser provenance (turn/step/provider/model) from the first
- * assistant/message event of a run.
- */
-export function eraserProvenance(events: readonly CompactEvent[], seqs: readonly number[]): { turn: number; step: number; provider: string; model: string } | undefined {
-  const wanted = new Set(seqs);
-  for (const event of events) {
-    if (!wanted.has(event.seq) || event.type !== "assistant/message") continue;
-    const message = isRecord(event.data["message"]) ? event.data["message"] : undefined;
-    const source = message !== undefined && isRecord(message["source"]) ? message["source"] : undefined;
-    const provider = source !== undefined && typeof source["provider"] === "string" ? source["provider"] : undefined;
-    const model = source !== undefined && typeof source["model"] === "string" ? source["model"] : undefined;
-    const turn = typeof event.data["turn"] === "number" ? event.data["turn"] : 0;
-    const step = typeof event.data["step"] === "number" ? event.data["step"] : 0;
-    if (provider !== undefined && model !== undefined) return { turn, step, provider, model };
-    continue;
-  }
-  return undefined;
 }
