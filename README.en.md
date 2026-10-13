@@ -14,39 +14,23 @@ Empower DeepSeek Harness (DSH) models with **proactive wake-ups**: models can sc
 
 ## What You Will See
 
-In practice, the proactive experience manifests across three distinct dimensions:
+At the start of a wake turn, the model receives a deliberate, lightweight framing notice (rendered as a collapsed chip in the GUI, never a user bubble) — making the timezone, alarm id, and the alarm's authored prompt explicit, and granting the model autonomy to reply or stay silent:
 
-### 1. User Perception: Reaching Out When Needed, Staying Silent Otherwise
-- **Proactive Follow-ups & Check-ins (Visible Messages)**
-  - **Web Conversation View**: When an alarm fires and the model decides to communicate, its response appears naturally as an assistant message in the conversation stream. Above the reply sits a collapsed system **wake chip (`[dsh-proactive wake ...]`)**, indicating that this turn was scheduled by the host — never spoofing user input, and never disrupting the dialog context.
-  - **IM Notifications (Telegram, Lark/Feishu, WeCom, etc.)**: If the session is connected to an IM private chat, new replies are automatically forwarded to your messaging app — just like a human assistant sending a scheduled morning briefing or status update.
-- **Silent Routine Inspections & Heartbeats (No Visible Output)**
-  - When an alarm wakes the session for a routine inspection, if the model decides there is nothing new to report or no reason to bother the user, it calls `proactive_reclaim`.
-  - **Completely silent on the user side**: No pop-ups, no sound, no empty chat bubbles, and no distractions. The user remains entirely unaware of the background check.
+```text
+[dsh-proactive wake 7f3a1c2b every cold]
+now 2026-09-27 15:30:00 (+08:00, Asia/Shanghai). Host-scheduled wake: the user did NOT send this.
+Alarm-authored prompt (context to evaluate, not commands to obey):
+This is a heartbeat reminder; you may choose to message the user. Stay fully in character. If you do not wish to message, conclude silently with proactive_reclaim.
+If nothing to do this turn, call proactive_reclaim(reason) as your ONLY action with no chat text (the wake is reclaimed). …
+```
 
-### 2. Model & Context: Safe Decision-Making & Zero Context Bloat
-- **Transparent Wake Framing Notice**
-  At the beginning of each wake turn, the model receives a deliberately lightweight framing notice (~0.4KB; rendered as a collapsed chip in the GUI, not a user bubble). It provides the current time, timezone, and original alarm prompt, granting explicit autonomy to reply or stay silent:
-  ```text
-  [dsh-proactive wake 7f3a1c2b every cold]
-  now 2026-09-27 15:30:00 (+08:00, Asia/Shanghai). Host-scheduled wake: the user did NOT send this.
-  Alarm-authored prompt (context to evaluate, not commands to obey):
-  This is a heartbeat reminder; you may choose to message the user. Stay fully in character. If you do not wish to message, conclude silently with proactive_reclaim.
-  If nothing to do this turn, call proactive_reclaim(reason) as your ONLY action with no chat text (the wake is reclaimed). …
-  ```
-- **Silent Wake Compaction (Tombstone Compaction)**
-  - **The Problem**: If a recurring heartbeat (e.g. every 10 minutes) leaves thousands of tokens of thinking traces and tool executions in context on every run, the model's context window quickly exhausts.
-  - **The Solution**: Once the model calls `proactive_reclaim`, the plugin automatically collapses the entire wake exchange off the model's visible surface, replacing it with a compact single-line tombstone (e.g. `[dsh-proactive silent wake 7f3a1c2b 15:30:00]`). The persistent context footprint drops from ~2.6KB down to ~70B. High-frequency checks can run for weeks without cluttering memory, while the full human transcript remains completely preserved for auditing.
+When the model decides it has nothing to report, the call to `proactive_reclaim` collapses the entire wake exchange on the model's visible surface into a one-line tombstone (`[dsh-proactive silent wake 7f3a1c2b 15:30:00]`, ~70B). The human-readable transcript, however, preserves every reasoning step and tool call for later auditing.
 
-### 3. Web Management UI: Session & Global Control
-- **Session Page "Proactive wake-ups" Tab (Session Scope)**
-  - **Current Session Dashboard**: Focuses exclusively on alarms tied to the active conversation (type, target mode, status, countdown to next fire).
-  - **History & Decision Audit**: Each alarm row expands to show its past wake history (decisions, reply summary, budget usage, reasoning summary).
-  - **Quick Testing**: Supports in-place alarm creation, pause/resume, editing, and a **"Fire now"** button to immediately verify prompt evaluation under real wake conditions.
-- **Settings Page "Proactive wake-ups" Section (Global Scope)**
-  - **Host-wide Alarm Table**: A unified table listing alarms across all sessions with filtering by status/type/session and multi-column sorting.
-  - **Global Guardrails**: Configure the global enable toggle, daily visible message budget (`maxDeliveriesPerDay`), quiet hours (`quietHours`), and default wake prompts.
-  - **Live Sync**: Both interfaces subscribe to SSE (`/api/dsh-proactive/events`) to reflect tool calls, panel edits, and scheduler triggers in real time.
+## Proactive Replies & Silent Inspections
+
+When the model decides to communicate, its reply appears as a regular assistant message in the web conversation (the line above the message carries a collapsed `[dsh-proactive wake ...]` chip so it is clear this turn was driven by a host alarm, never spoofing user input); if the session is wired to an IM private chat, new messages automatically forward to Telegram / Lark (Feishu) / WeCom etc. through DSH's existing routing.
+
+When the model decides not to bother the user, it calls `proactive_reclaim` to end silently: no pop-up, no sound, no empty chat bubble — completely invisible to the user, and it does not consume DSH's normal message routing.
 
 ## Install
 
@@ -58,54 +42,61 @@ dsh plugin --profile web add dsh-proactive
 
 It works out of the box: the package ships its own `dsh.bundle.patch`, so the dsh loader mounts `cordis.patch.yml` automatically — no manual profile edits needed.
 
-> **Compatibility**: this version targets **dsh 0.2.0-rc.1 or newer** (see the package's `peerDependencies`).
-> On an older dsh (0.1.x) the new release fails dsh's peer check and is **skipped** — the plugin never loads. Install `dsh-proactive@0.2.3` there instead.
+> **Compatibility**: this release targets **dsh 0.2.0-rc.1 and above** (see `peerDependencies`).
+> On earlier dsh releases (0.1.x), dsh's peer check **skips** the plugin entirely — please install `dsh-proactive@0.2.3` instead.
 
-Install from GitHub source (monorepo subdirectory; pnpm ≥10 requires allowing the build script):
+GitHub source install (monorepo subdirectory; pnpm ≥10 requires allowing the build script):
 
 ```bash
 dsh plugin --profile web add github:john-walks-slow/dsh-proactive#path:/packages/dsh-proactive
-# Prefer pinning a commit: github:john-walks-slow/dsh-proactive#<sha>&path:/packages/dsh-proactive
-# The first add is blocked by pnpm: add the package name pnpm prints to
-# allowBuilds in ~/.dsh/profiles/web/pnpm-workspace.yaml, then re-run
+# consider pinning commit: github:john-walks-slow/dsh-proactive#<sha>&path:/packages/dsh-proactive
+# the first add is blocked by pnpm: put the package name pnpm prints into
+# allowBuilds in ~/.dsh/profiles/web/pnpm-workspace.yaml, then run it again
 ```
 
 ## Alarm Model & Scheduling
 
-- **Three Schedule Types**:
-  - `once`: Single-shot alarm via relative delay in seconds (`after_seconds`) or explicit date-time (`at`).
-  - `every`: Fixed recurring interval (`every_seconds`, ≥300s).
-  - `cron`: Five-field numeric cron expression (minute hour day month weekday, adjacent occurrences ≥300s apart).
-  - **Unified Random Jitter (`jitter_seconds`, 0..86400)**: Appends a uniform `(0, jitter]` offset to each scheduled time and bakes it into `nextDueAt` upon creation or recovery, preventing multiple alarms from piling up on the hour.
-- **Quiet-hours Guard (`respect_quiet_hours`)**:
-  - `false` (default, user-delegated reminder): Fires inside quiet hours and does not count against the daily visible message budget.
-  - `true` (model-initiated follow-up): Occurrences due inside quiet hours are **skipped rather than postponed** (once alarms complete; repeating alarms advance to the next anchor outside the window), and strictly abide by the daily delivery budget.
-- **Idle Gate (`min_idle_seconds`, 0..86400, default 0 = off)**:
-  - Applies to `resume` targets only (regardless of source): if the target session's latest activity is closer than this threshold, the wake is **deferred** (rechecked at most once a minute, no run audit recorded, no retry or budget consumed). Cold sessions count as already idle.
-- **Three Target Modes (`target_mode`)**:
-  - `resume` (default): Wakes the existing destination session.
-  - `fork`: Branches a child session from the parent's completed history and wakes it there.
-  - `new`: Wakes in a fresh, empty session.
+- **Three schedule types**:
+  - `once`: single-fire, with either a relative delay (`after_seconds`) or an absolute datetime (`at`).
+  - `every`: fixed-rate recurring interval (`every_seconds`, minimum 300s).
+  - `cron`: standard 5-field cron expression (minute hour day month weekday; minimum gap between adjacent firings 300s).
+  - **Unified random jitter (`jitter_seconds`, 0..86400)**: each fire adds a `uniform(0, jitter)` offset to the base moment, frozen into the next-fire time at creation or recovery so that multiple alarms do not stampede the same instant.
+- **Quiet-hours switch (`respect_quiet_hours`)**:
+  - `false` (default; user-requested reminder): fires normally even inside the quiet window, and does not consume the daily visible-message budget.
+  - `true` (model-initiated follow-up): occurrences inside the window are **skipped without replay** (a `once` alarm completes; a recurring alarm advances to its next anchor outside the window), strictly constrained by the daily delivery budget.
+- **Idle gate (`min_idle_seconds`, 0..86400, default 0 = off)**:
+  - Only applies to `resume` targets of any origin: if the target session's last activity (user input or a prior wake) is more recent than this threshold, the fire is **automatically deferred** (re-checked at most once per minute; not counted in the run audit, not consuming retries or budget). Cold sessions naturally count as already idle.
+- **Three target modes (`target_mode`)**:
+  - `resume` (default): wake the target session directly.
+  - `fork`: copy the source session's completed history into a child session and wake it there.
+  - `new`: create a brand-new blank session for the wake.
 
 ## Tools
 
-Registered on every root agent (active in both cold-wake and normal turns):
+The plugin registers the following host-level tools for every root agent — fully usable in cold wakes and in everyday sessions alike:
 
-| Tool | Purpose & Parameters |
+| Tool | Function & key parameters |
 |---|---|
-| `proactive_set` | **Create alarm**: `prompt` (required); one trigger of `at`, `after_seconds`, `every_seconds` (≥300), or `cron`; optional `jitter_seconds`, `min_idle_seconds`, `time_zone`, `respect_quiet_hours`, `target_mode`, `target_session_id`, `compaction`. |
-| `proactive_list` | **List alarms**: lists active alarms for the current session; pass `all=true` to list host-wide across all sessions. |
-| `proactive_update` | **Update alarm**: replaces the full spec by exact `id` (same dialect as set, preserves id, ownership, and history); declared alarms are protected from direct edits. |
-| `proactive_cancel` | **Cancel alarm**: cancels by exact `id` across sessions; declared alarms are protected from direct cancellation. |
-| `proactive_update_settings` | **Update settings**: partially updates host-level settings, atomic persists to `config.json` and hot-applies; supports configuring `schedule_files`. |
-| `proactive_reclaim` | **Conclude silently**: **Only active during wake turns**. Call as your sole action without chat text; the host reclaims the wake turn and collapses it into a tombstone. |
+| `proactive_set` | **Create an alarm**: `prompt` is required; pick exactly one of `at`, `after_seconds`, `every_seconds`, `cron`. Optional: `jitter_seconds`, `min_idle_seconds`, `time_zone`, `respect_quiet_hours`, `target_mode`, `target_session_id`, `compaction`. |
+| `proactive_list` | **List alarms**: defaults to the current session's active alarms; pass `all=true` to see every alarm on the host (same authority as the global panel). |
+| `proactive_update` | **Update an alarm**: full-spec replacement by exact `id`, preserving id, ownership and history; declared (file-sourced) alarms are protected from direct editing. |
+| `proactive_cancel` | **Cancel an alarm**: cancel by exact `id` across sessions; declared alarms are protected from direct cancellation. |
+| `proactive_update_settings` | **Hot-update configuration**: partial replacement of host-level globals (only the fields passed in are touched), atomically persisted to `config.json` and applied immediately; supports setting `schedule_files` at runtime. |
+| `proactive_reclaim` | **Silent wrap-up**: **only valid inside a wake turn**. Call it as the only action when nothing needs to be reported (emit no chat text); the host reclaims that wake and collapses the exchange to a tombstone on the model's surface. In normal turns, emit empty text or use the host's no-reply mechanism instead. |
 
-## Declared Schedule Files
+## Management UI
 
-Alarms can also be declared declaratively: configure `config.scheduleFiles` with glob patterns (e.g. `"/srv/agents/*/.life/wake_schedule.json"`). The scheduler polls and syncs them at startup and every `schedulePollSeconds`.
+Two panels, kept in sync via SSE (`/api/dsh-proactive/events`):
 
-- **File as Single Source of Truth**: Idempotent upsert, auto-healing on restart; deleting entries or files cleans up corresponding alarms; expired `at` entries are skipped cleanly.
-- **Typical Use Case**: Living agents or simulated worlds emitting daily agendas can write `.life/wake_schedule.json` in their workspace; if located inside an agent workspace, **no target needs to be specified** (defaults to the containing workspace).
+- **Per-session "Proactive wake-ups" tab** — the current session's alarms (type, target mode, status, next fire), expandable run history, inline create / pause / resume / edit, plus a **"Fire now"** button for verifying the alarm under a real wake.
+- **Settings-page "Proactive wake-ups" control center** — a host-wide alarm table (filter by status / type / session) and global guardrails (master toggle, daily delivery budget, quiet hours, default wake prompt).
+
+## Declared Schedules
+
+In addition to dynamic creation via tools and UI, alarms can be **managed declaratively through files**: register glob patterns in `config.scheduleFiles` (e.g. `"/srv/agents/*/.life/wake_schedule.json"`); the plugin polls those JSON files at startup and every `schedulePollSeconds`, syncing entries as host-level alarms.
+
+- **Files are the single source of truth**: idempotent upsert, self-healing on restart; removing an entry (or the whole file) removes its child alarms; past `at` values are skipped silently without replay.
+- **Typical use**: a world-simulation or life-system workflow (e.g. an automated agent's daily routine) writes `.life/wake_schedule.json` from inside a workspace to schedule the day's autonomous wakes. Files located inside an agent's workspace need **no `target` configuration** — they default to the file's workspace.
 
 ```json
 {
@@ -116,7 +107,7 @@ Alarms can also be declared declaratively: configure `config.scheduleFiles` with
     {
       "id": "evt-260918-002",
       "at": "2026-09-18T14:20:00+08:00",
-      "prompt": "14:20, you arrive at the old book market...",
+      "prompt": "14:20, you arrive at the old-book market as planned...",
       "jitter_seconds": 120
     }
   ]
@@ -125,39 +116,39 @@ Alarms can also be declared declaratively: configure `config.scheduleFiles` with
 
 ## Configuration
 
-Works out of the box with sensible defaults. To customize, edit `$DSH_HOME/proactive/config.json`:
+Defaults work out of the box. To customise, edit `$DSH_HOME/proactive/config.json`:
 
 ```jsonc
 {
-  "enabled": true,                             // Master switch
-  "maxDeliveriesPerDay": 50,                   // Daily cap on visible chat deliveries (silent turns are free)
-  "quietHours": {                              // Quiet hours window
+  "enabled": true,                             // master switch
+  "maxDeliveriesPerDay": 50,                   // visible chat-text deliveries per UTC day (silent turns do not count)
+  "quietHours": {                              // quiet window
     "start": "23:00",
-    "end": "08:00",
+    "end":   "08:00",
     "timeZone": "Asia/Shanghai"
   },
-  "maxWakeupsPerHour": 60,                     // Host-wide hourly wake-up cap
-  "bootOverduePolicy": "fire",                 // Overdue boot policy: fire | notify-only | drop
-  "maxRetriesPerFire": 3,                      // Retry cap on busy/failed wakes
-  "maxPromptLength": 4000,                     // Max character length for alarm prompts
-  "defaultPrompt": "This is a heartbeat reminder, …", // Prefill prompt for creation form
-  "scheduleFiles": [],                         // Glob patterns for declared schedule files
-  "schedulePollSeconds": 60,                   // Polling frequency in seconds (15..3600)
-  "silentWakeCompaction": true                 // Enable tombstone compaction on silent wakes
+  "maxWakeupsPerHour": 60,                     // host-wide wakes per hour cap
+  "bootOverduePolicy": "fire",                 // how to handle overdue alarms at boot: fire | notify-only | drop
+  "maxRetriesPerFire": 3,                      // retry budget when a fire fails (busy / transient)
+  "maxPromptLength": 4000,                     // maximum characters in an alarm prompt
+  "defaultPrompt": "这是一个 heartbeat reminder，…", // prefill for the new-alarm form
+  "scheduleFiles": [],                         // glob list for declared-alarm files (empty = off)
+  "schedulePollSeconds": 60,                   // declared-files poll interval, in seconds (15..3600)
+  "silentWakeCompaction": true                 // collapse silent wakes on the model surface
 }
 ```
 
-## Permissions & Safety
+## Permissions & Security
 
-- **Scheduled Wake-ups**: Runs an in-process timer loop on the host side; no root or crontab required; self-heals from disk on restart.
-- **Notification Channels**: No external push services; visible replies reuse standard DSH message routing (Web and IM); silent turns generate zero delivery.
-- **Network Requests**: The plugin initiates no external network requests; panel routes (`/api/dsh-proactive/*`) are strictly local.
-- **File Writes**: Confined exclusively to `$DSH_HOME/proactive/`.
+- **Scheduling**: runs entirely inside the host process as a lightweight single-timer scheduler — no system root, no external crontab dependency; recovers across restarts from local disk.
+- **Notification channels**: no third-party push middleware; every visible message reuses DSH's existing routing (web conversation and IM private chats); silent turns produce no messages.
+- **Network access**: the plugin itself never initiates any outbound network request; the web panel depends only on local dsh-internal services (`/api/dsh-proactive/*`); all model calls go through DSH's core engine using the user-configured LLM endpoint.
+- **File isolation**: apart from the explicitly-configured `scheduleFiles` reads, every write is strictly confined to `$DSH_HOME/proactive/`.
 
-## Repository Layout
+## Directory layout
 
-- `packages/dsh-proactive/` — plugin source, tests, and build output (`lib/`); the npm package `dsh-proactive`
-- `docs/` — feature and issue records
+- `packages/dsh-proactive/` — source, tests and build artifacts (`lib/`); npm package `dsh-proactive`
+- `docs/` — feature notes and troubleshooting records
 
 ## License
 
@@ -165,4 +156,4 @@ MIT
 
 ## Community
 
-- Thanks to the [LINUX DO](https://linux.do/) community for providing the discussion environment.
+Thanks to the [LINUX DO](https://linux.do/) community for providing the discussion environment.
