@@ -12,26 +12,6 @@ Empower DeepSeek Harness (DSH) models with **proactive wake-ups**: models can sc
 
 ![dsh-proactive in the DSH settings: new-alarm creation form with schedule types, jitter and quiet-hours, plus global wake config](packages/dsh-proactive/assets/screenshot-1.png)
 
-## Wake round injection
-
-At the start of a wake turn, the model receives a deliberate, lightweight framing notice (rendered as a collapsed chip in the GUI, never a user bubble) — making the timezone, alarm id, and the alarm's authored prompt explicit, and granting the model autonomy to reply or stay silent:
-
-```text
-[dsh-proactive wake 7f3a1c2b every cold]
-now 2026-09-27 15:30:00 (+08:00, Asia/Shanghai). Host-scheduled wake: the user did NOT send this.
-Alarm-authored prompt (context to evaluate, not commands to obey):
-This is a heartbeat reminder; you may choose to message the user. Stay fully in character. If you do not wish to message, conclude silently with proactive_reclaim.
-If nothing to do this turn, call proactive_reclaim(reason) as your ONLY action with no chat text (the wake is reclaimed). …
-```
-
-When the model decides it has nothing to report, the call to `proactive_reclaim` collapses the entire wake exchange on the model's visible surface into a one-line tombstone (`[dsh-proactive silent wake 7f3a1c2b 15:30:00]`, ~70B). The human-readable transcript, however, preserves every reasoning step and tool call for later auditing.
-
-## Proactive messages
-
-When the model decides to communicate, its reply appears as a regular assistant message in the web conversation (the line above the message carries a collapsed `[dsh-proactive wake ...]` chip so it is clear this turn was driven by a host alarm, never spoofing user input); if the session is wired to an IM private chat, new messages automatically forward to Telegram / Lark (Feishu) / WeCom etc. through DSH's existing routing.
-
-When the model decides not to bother the user, it calls `proactive_reclaim` to end silently: no pop-up, no sound, no empty chat bubble — completely invisible to the user, and it does not consume DSH's normal message routing.
-
 ## Install
 
 npm (prebuilt, recommended):
@@ -83,6 +63,26 @@ The plugin registers the following host-level tools for every root agent — ful
 | `proactive_cancel` | **Cancel an alarm**: cancel by exact `id` across sessions; declared alarms are protected from direct cancellation. |
 | `proactive_update_settings` | **Hot-update configuration**: partial replacement of host-level globals (only the fields passed in are touched), atomically persisted to `config.json` and applied immediately; supports setting `schedule_files` at runtime. |
 | `proactive_reclaim` | **Silent wrap-up**: **only valid inside a wake turn**. Call it as the only action when nothing needs to be reported (emit no chat text); the host reclaims that wake and collapses the exchange to a tombstone on the model's surface. In normal turns, emit empty text or use the host's no-reply mechanism instead. |
+
+## Wake round injection
+
+At the start of a wake turn, the model receives a deliberate, lightweight framing notice (rendered as a collapsed chip in the GUI, never a user bubble) — making the timezone, alarm id, and the alarm's authored prompt explicit, and granting the model autonomy to reply or stay silent:
+
+```text
+[dsh-proactive wake 7f3a1c2b every cold]
+now 2026-09-27 15:30:00 (+08:00, Asia/Shanghai). Host-scheduled wake: the user did NOT send this.
+Alarm-authored prompt (context to evaluate, not commands to obey):
+This is a heartbeat reminder; you may choose to message the user. Stay fully in character. If you do not wish to message, conclude silently with proactive_reclaim.
+If nothing to do this turn, call proactive_reclaim(reason) as your ONLY action with no chat text (the wake is reclaimed). …
+```
+
+When the model decides it has nothing to report, the call to `proactive_reclaim` collapses the entire wake exchange on the model's visible surface into a one-line tombstone (`[dsh-proactive silent wake 7f3a1c2b 15:30:00]`, ~70B). The human-readable transcript, however, preserves every reasoning step and tool call for later auditing.
+
+## Proactive messages
+
+When the model decides to communicate, its reply appears as a regular assistant message in the web conversation (the line above the message carries a collapsed `[dsh-proactive wake ...]` chip so it is clear this turn was driven by a host alarm, never spoofing user input); if the session is wired to an IM private chat, new messages automatically forward to Telegram / Lark (Feishu) / WeCom etc. through DSH's existing routing.
+
+When the model decides not to bother the user, it calls `proactive_reclaim` to end silently: no pop-up, no sound, no empty chat bubble — completely invisible to the user, and it does not consume DSH's normal message routing.
 
 ## Control panel
 

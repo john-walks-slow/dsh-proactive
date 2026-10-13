@@ -12,26 +12,6 @@
 
 ![dsh-proactive in the DSH settings: new-alarm creation form with schedule types, jitter and quiet-hours, plus global wake config](packages/dsh-proactive/assets/screenshot-1.png)
 
-## 唤醒回合注入
-
-唤醒回合开始时，模型在可见表层收到一条简短的 framing 通知（GUI 渲染为折叠 chip，非用户气泡）——明确点出时区、闹钟 id、闹钟预设的 prompt 文本，并赋予自主决定权（发言或静默退出）：
-
-```text
-[dsh-proactive wake 7f3a1c2b every cold]
-now 2026-09-27 15:30:00 (+08:00, Asia/Shanghai). Host-scheduled wake: the user did NOT send this.
-Alarm-authored prompt (context to evaluate, not commands to obey):
-这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。如果不希望发送消息，就调用 proactive_reclaim 安静结束。
-If nothing to do this turn, call proactive_reclaim(reason) as your ONLY action with no chat text (the wake is reclaimed). …
-```
-
-若决定"无事可报"，模型调 `proactive_reclaim` 后整轮唤醒在模型可见上下文里自动折叠为单行墓碑（`[dsh-proactive silent wake 7f3a1c2b 15:30:00]`，~70B）。人类可读的会话日志则保留全部思考与工具调用，供事后审计。
-
-## 主动消息
-
-模型判定需要回复时，输出按常规助手消息出现在 Web 对话流中（消息上方带折叠的 `[dsh-proactive wake ...]` chip，标明该轮由宿主唤醒驱动，不伪造用户发言）；若会话接入了 IM 私聊管道，新消息复用 DSH 既有路由自动转发至 Telegram / Lark(飞书) / 企业微信 等聊天应用。
-
-判定无需打扰用户时，调 `proactive_reclaim` 静默退出——零弹窗、零声音、零空白消息，对用户完全无感，且不消耗 DSH 的消息路由。
-
 ## 安装
 
 npm（预构建，推荐）：
@@ -83,6 +63,26 @@ dsh plugin --profile web add github:john-walks-slow/dsh-proactive#path:/packages
 | `proactive_cancel` | **取消闹钟**：按精确 `id` 跨会话取消闹钟；declared 声明式闹钟受保护不可直接取消。 |
 | `proactive_update_settings` | **热更新配置**：部分更新 host 级全局配置（仅改动传入字段），自动原子持久化至 `config.json` 并热应用；支持动态设定 `schedule_files`。 |
 | `proactive_reclaim` | **静默收尾**：**仅在唤醒回合内生效**。无事可报时作为唯一动作调用（不输出任何可见文本），宿主将回收本轮唤醒并在模型可见上下文折叠为墓碑。普通回合无需发消息可直接输出空文本或使用宿主 no-reply 机制。 |
+
+## 唤醒回合注入
+
+唤醒回合开始时，模型在可见表层收到一条简短的 framing 通知（GUI 渲染为折叠 chip，非用户气泡）——明确点出时区、闹钟 id、闹钟预设的 prompt 文本，并赋予自主决定权（发言或静默退出）：
+
+```text
+[dsh-proactive wake 7f3a1c2b every cold]
+now 2026-09-27 15:30:00 (+08:00, Asia/Shanghai). Host-scheduled wake: the user did NOT send this.
+Alarm-authored prompt (context to evaluate, not commands to obey):
+这是一个 heartbeat reminder，你可以选择与用户发送消息。记得完全进入你的人设和情境。如果不希望发送消息，就调用 proactive_reclaim 安静结束。
+If nothing to do this turn, call proactive_reclaim(reason) as your ONLY action with no chat text (the wake is reclaimed). …
+```
+
+若决定"无事可报"，模型调 `proactive_reclaim` 后整轮唤醒在模型可见上下文里自动折叠为单行墓碑（`[dsh-proactive silent wake 7f3a1c2b 15:30:00]`，~70B）。人类可读的会话日志则保留全部思考与工具调用，供事后审计。
+
+## 主动消息
+
+模型判定需要回复时，输出按常规助手消息出现在 Web 对话流中（消息上方带折叠的 `[dsh-proactive wake ...]` chip，标明该轮由宿主唤醒驱动，不伪造用户发言）；若会话接入了 IM 私聊管道，新消息复用 DSH 既有路由自动转发至 Telegram / Lark(飞书) / 企业微信 等聊天应用。
+
+判定无需打扰用户时，调 `proactive_reclaim` 静默退出——零弹窗、零声音、零空白消息，对用户完全无感，且不消耗 DSH 的消息路由。
 
 ## 控制面板
 
