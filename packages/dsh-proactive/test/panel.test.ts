@@ -618,7 +618,7 @@ test("panel: a file handle stays one row, syncs its children immediately, and fo
     const handle = created.snapshot.alarms[0] as unknown as Record<string, unknown>;
     assert.equal(handle["type"], "file");
     assert.equal(handle["scheduleFile"], canonical);
-    assert.equal(handle["entryCount"], 1);
+    assert.equal(handle["declaredEntries"], 1);
     // The child is real but NOT a row of its own.
     assert.equal(created.snapshot.alarms.length, 1);
     assert.equal(h.store.listAlarms().length, 2);
@@ -641,7 +641,7 @@ test("panel: a file handle stays one row, syncs its children immediately, and fo
     const paused = await h.service.action({ action: { kind: "toggle", id: String(handle["id"]) } });
     assert.equal(paused.ok, true);
     if (!paused.ok) return;
-    assert.equal(paused.snapshot.alarms[0]?.entryCount, 0);
+    assert.equal(paused.snapshot.alarms[0]?.declaredEntries, 0);
     assert.equal(h.store.listAlarms().length, 1);
 
     // A second handle for the same file is refused from the panel too.

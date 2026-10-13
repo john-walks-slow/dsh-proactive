@@ -97,10 +97,10 @@ export function childrenOfHandle(alarms: readonly Alarm[], handleId: string): Al
 }
 
 /** One AlarmView, enriched with the handle's live child count. */
-export function viewWithEntryCount(alarms: readonly Alarm[], alarm: Alarm, now: number): AlarmView {
+export function viewWithDeclaredEntries(alarms: readonly Alarm[], alarm: Alarm, now: number): AlarmView {
   const view = toAlarmView(alarm, now);
   if (alarm.type !== "file") return view;
-  return { ...view, entryCount: childrenOfHandle(alarms, alarm.id).length };
+  return { ...view, declaredEntries: childrenOfHandle(alarms, alarm.id).length };
 }
 
 /**

@@ -154,7 +154,7 @@ proactive_set(
 - **Default target**: when a handle names no `target_*` at all, the host only accepts "the file's **grandparent** directory is a registered workspace" (i.e. `<workspace>/<dir>/<file>`) and otherwise **fails closed**, asking for an explicit `target_workspace_path` / `target_session_id`. Walking up to the nearest registered ancestor is deliberately NOT done: `/root` is itself a workspace on this host, so it would silently route wakes into an unrelated conversation.
 - **Atomic writes are a hard contract**: a missing file means "plan revoked". Always write a temp file and rename; a delete-then-create window really drops an `at` wake (a truncated file is absorbed as broken JSON).
 - **Editing a handle = re-anchoring its entries**: changing the handle's prompt/target changes every entry hash, so `every`/`after` children rebuild their anchors from now and the next planned wake slips.
-- **Protection**: children derived from the file refuse direct edit or cancel (both tools point you at the file); `proactive_list` lists only handles (with `scheduleFile` and `entryCount`), never children. The panel mirrors this: one handle row with its entry count, the children's wake history folded onto that row, and no "fire now" action.
+- **Protection**: children derived from the file refuse direct edit or cancel (both tools point you at the file); `proactive_list` lists only handles (with `scheduleFile` and `declaredEntries`), never children. The panel mirrors this: one handle row with its entry count, the children's wake history folded onto that row, and no "fire now" action.
 
 ```json
 {

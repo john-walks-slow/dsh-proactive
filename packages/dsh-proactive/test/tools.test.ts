@@ -607,7 +607,7 @@ test("proactive_set: schedule_file creates a canonical file handle", async () =>
     assert.equal(code(view), undefined);
     assert.equal(asView(view).type, "file");
     assert.equal((view as { scheduleFile?: string }).scheduleFile, join(realpathSync(dir), "w.json"));
-    assert.equal((view as { entryCount?: number }).entryCount, 0);
+    assert.equal((view as { declaredEntries?: number }).declaredEntries, 0);
     // Same physical file, another spelling → the same-file rule still fires.
     const again = await h.run("proactive_set", { prompt: "p", schedule_file: join(dir, ".", "w.json"), target_session_id: "s1" });
     assert.equal(code(again), "invalid_action");
@@ -643,7 +643,7 @@ test("proactive_list: child alarms are hidden, the handle reports its child coun
   h.store.alarms.push({ ...v2Fixture("decl_child", "s1"), declared: { file: "/ws/.life/w.json", entry: "e1", hash: "h", sourceId: "alarm_handle" } });
   const listed = await h.run("proactive_list", {}) as Array<Record<string, unknown>>;
   assert.deepEqual(listed.map((row) => row["id"]), ["alarm_handle"]);
-  assert.equal(listed[0]["entryCount"], 1);
+  assert.equal(listed[0]["declaredEntries"], 1);
   assert.equal(listed[0]["scheduleFile"], "/ws/.life/w.json");
   // A child is still refused individually: the file is its source of truth.
   const cancelChild = await h.run("proactive_cancel", { id: "decl_child" });

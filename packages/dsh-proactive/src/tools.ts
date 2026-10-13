@@ -40,7 +40,7 @@ import {
 } from "./domain.js";
 import type { ProactiveConfig } from "./config.js";
 import { writeConfigFile } from "./config.js";
-import { canonicalizeScheduleFile, childrenOfHandle, defaultHandleTargetArgs, findScheduleHandle, hasTargetArgs, viewWithEntryCount } from "./schedule-file.js";
+import { canonicalizeScheduleFile, childrenOfHandle, defaultHandleTargetArgs, findScheduleHandle, hasTargetArgs, viewWithDeclaredEntries } from "./schedule-file.js";
 import { liveEventsOf, type LiveSessionLike } from "./workspace.js";
 import type { ProactiveStore } from "./store.js";
 import type { ProactiveScheduler } from "./scheduler.js";
@@ -128,7 +128,7 @@ const ALARM_VIEW_SCHEMA: ValueSchemaSpec = {
     // Present only for "file" alarms (the schedule-file handle): the canonical
     // file path and how many child alarms it currently owns.
     scheduleFile: { type: "string" },
-    entryCount: { type: "integer" }
+    declaredEntries: { type: "integer" }
   }
 };
 
@@ -294,14 +294,14 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             // waiting up to schedulePollSeconds for the next tick.
             if (alarm.type === "file") await services.syncNow?.().catch(() => undefined);
             services.scheduler.requestDrive();
-            return viewWithEntryCount(services.store.listAlarms(), alarm, services.now());
+            return viewWithDeclaredEntries(services.store.listAlarms(), alarm, services.now());
           },
           presentCall: (callArgs) => presentCard("Create proactive alarm", String((callArgs as { prompt?: unknown })["prompt"] ?? ""))
         }),
 
         defineTool({
           name: "proactive_list",
-          description: "List this session's active host-level alarms (scheduled, overdue, in-flight) in creation order with exact ids and states. Pass all=true to list active alarms across ALL sessions, not just this one — useful when the user asks to enumerate every alarm or you need to manage alarms owned by other sessions. Child alarms materialized from a schedule file are NOT listed: a 'file' alarm row carries scheduleFile and entryCount, and the file (not this tool) is their source of truth.",
+          description: "List this session's active host-level alarms (scheduled, overdue, in-flight) in creation order with exact ids and states. Pass all=true to list active alarms across ALL sessions, not just this one — useful when the user asks to enumerate every alarm or you need to manage alarms owned by other sessions. Child alarms materialized from a schedule file are NOT listed: a 'file' alarm row carries scheduleFile and declaredEntries, and the file (not this tool) is their source of truth.",
           parameters: {
             all: { type: "boolean", description: "When true, list active alarms across all sessions instead of only this session's. Default false." }
           },
@@ -317,10 +317,10 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
               .listAlarms()
               .filter((alarm) => (all || alarm.ownerSessionId === agent.session.id) && (alarm.status === "scheduled" || alarm.status === "in-flight"))
               // Child alarms are an implementation detail of a file handle:
-              // the model sees the handle (with scheduleFile / entryCount)
+              // the model sees the handle (with scheduleFile / declaredEntries)
               // and manages the FILE, never the children.
               .filter((alarm) => alarm.declared === undefined)
-              .map((alarm) => viewWithEntryCount(services.store.listAlarms(), alarm, now));
+              .map((alarm) => viewWithDeclaredEntries(services.store.listAlarms(), alarm, now));
             return alarms;
           },
           presentCall: () => presentCard("List proactive alarms", "")
@@ -491,7 +491,7 @@ export function proactiveToolDefinitions(agent: Agent, services: ToolServices): 
             // children now, not on the next poll tick.
             if (updated.type === "file" || current.type === "file") await services.syncNow?.().catch(() => undefined);
             services.scheduler.requestDrive();
-            return viewWithEntryCount(services.store.listAlarms(), updated, services.now());
+            return viewWithDeclaredEntries(services.store.listAlarms(), updated, services.now());
           },
           presentCall: (callArgs) => presentCard("Update proactive alarm", String((callArgs as { id?: unknown })["id"] ?? ""))
         }),

@@ -98,8 +98,8 @@ try {
   // earlier runs point at deleted temp dirs and would poison every check).
   const handle = created.snapshot.alarms.find((a) => a.type === "file" && a.scheduleFile === canonical);
   check("handle row carries type=file, the canonical path and its entry count",
-    handle?.scheduleFile === canonical && handle?.entryCount === 2,
-    `file=${handle?.scheduleFile} entries=${handle?.entryCount}`);
+    handle?.scheduleFile === canonical && handle?.declaredEntries === 2,
+    `file=${handle?.scheduleFile} entries=${handle?.declaredEntries}`);
   const ownRows = created.snapshot.alarms.filter((a) => a.scheduleFile === canonical).length;
   check("children are not separate alarm rows", ownRows === 1, `rows=${ownRows}`);
   if (handle === undefined) throw new Error("no handle row");

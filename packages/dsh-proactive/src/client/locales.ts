@@ -65,7 +65,7 @@ export interface ProactivePanelCopy {
   scheduleFile: string;
   scheduleFilePlaceholder: string;
   scheduleFileHint: string;
-  entryCount: string;
+  declaredEntries: string;
   syncLast: string;
   scheduleFilePathInvalid: string;
   targetResume: string;
@@ -202,7 +202,7 @@ export const zh: ProactivePanelCopy = {
   scheduleFile: "时间表文件",
   scheduleFilePlaceholder: "/绝对路径/wake_schedule.json",
   scheduleFileHint: "该文件里的每条 entry 会同步成一个子闹钟；文件是唯一真源，改条目即改闹钟。",
-  entryCount: "条目",
+  declaredEntries: "条目",
   syncLast: "文件表同步",
   scheduleFilePathInvalid: "需为绝对路径且不含 * 或 ?",
   targetResume: "会话",
@@ -334,7 +334,7 @@ export const en: ProactivePanelCopy = {
   scheduleFile: "Schedule file",
   scheduleFilePlaceholder: "/absolute/path/wake_schedule.json",
   scheduleFileHint: "Every entry in this file becomes a child alarm; the file is the single source of truth.",
-  entryCount: "entries",
+  declaredEntries: "entries",
   syncLast: "File sync",
   scheduleFilePathInvalid: "must be an absolute path without * or ?",
   targetResume: "Session",
