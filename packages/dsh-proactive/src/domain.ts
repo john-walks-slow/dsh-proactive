@@ -319,7 +319,7 @@ export type AlarmView = {
    * File-handle alarms only: how many child alarms this handle currently owns
    * (computed live by the caller from the store, never persisted).
    */
-  declaredEntries?: number;
+  entryCount?: number;
 }
 
 export type ProactiveErrorCode =

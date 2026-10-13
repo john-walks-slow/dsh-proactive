@@ -54,7 +54,7 @@ export interface AlarmRow {
   /** "file" rows: the canonical schedule-file path this handle watches. */
   scheduleFile?: string;
   /** "file" rows: how many child alarms it currently owns. */
-  declaredEntries?: number;
+  entryCount?: number;
 }
 
 export function stateLabel(copy: ProactivePanelCopy, state: string): string {
@@ -305,7 +305,7 @@ export function AlarmTable({ alarms, runsByAlarm, showSession, busy, copy, onTog
                     <span className="dshp-pill dshp-pill-plain">{typeLabel(copy, alarm.type)}</span>
                     {alarm.type === "file" ? (
                       <div className="dshp-cell-dim" style={{ marginTop: 2 }} title={alarm.scheduleFile}>
-                        {alarm.scheduleFile} · {alarm.declaredEntries ?? 0} {copy.declaredEntries}
+                        {alarm.scheduleFile} · {alarm.entryCount ?? 0} {copy.entryCount}
                       </div>
                     ) : null}
                     {alarm.jitterSeconds !== undefined && alarm.jitterSeconds > 0 ? (

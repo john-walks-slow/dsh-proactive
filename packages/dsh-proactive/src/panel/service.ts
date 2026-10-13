@@ -13,7 +13,7 @@
 import { firesAlarm, isRecord, isToolError, isValidSessionId, targetArgsOf, toAlarmView, instantEpoch, nextDriftingOccurrence, jitterDelay, type Alarm, type RunRecord, type ToolError } from "../domain.js";
 import { nextCronOccurrence } from "../cron.js";
 import { buildAlarm, validateCreateArgs, type CreateSpec } from "../alarm-factory.js";
-import { canonicalizeScheduleFile, childrenOfHandle, defaultHandleTargetArgs, findScheduleHandle, hasTargetArgs, viewWithDeclaredEntries } from "../schedule-file.js";
+import { canonicalizeScheduleFile, childrenOfHandle, defaultHandleTargetArgs, findScheduleHandle, hasTargetArgs, viewWithEntryCount } from "../schedule-file.js";
 import { wireTimeZones } from "../zone.js";
 import type { ProactiveConfig } from "../config.js";
 import type { ProactiveStore } from "../store.js";
@@ -134,7 +134,7 @@ export class ProactivePanelService {
 
   private rowFor(alarm: Alarm, now: number, alarms: readonly Alarm[]): AlarmRowView {
     return {
-      ...viewWithDeclaredEntries(alarms, alarm, now),
+      ...viewWithEntryCount(alarms, alarm, now),
       sessionTitle: this.deps.sessionTitle(alarm.ownerSessionId),
       createdAt: alarm.createdAt
     };

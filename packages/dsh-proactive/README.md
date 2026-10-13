@@ -135,7 +135,7 @@ dsh plugin --profile web add file:/absolute/path/to/dsh-proactive/packages/dsh-p
 
 ## 文件表闹钟（第四种类型）
 
-除了 `at / after_seconds / every_seconds / cron` 三种到点触发的闹钟，还有**文件表闹钟**：它本身永远不触发唤醒，而是一个 JSON 时间表文件的**句柄**（第 4 种类型，`type: "file"`），把文件里的条目同步成自己名下的**子闹钟**。
+除了 `at / after_seconds / every_seconds / cron` 三种到点触发的闹钟，还有**文件表闹钟**：它本身永远不触发唤醒，而是一个 JSON 时间表文件的**句柄**（第 4 种类型，`type: "file"`），把文件里的条目同步成自己名下的**子闹钟**。子闹钟就是普通闹钟——同一条调度、计费与重试路径，只是归属这个句柄、spec 由文件维护，因此不在列表里单列、也不能单独改。
 
 创建方式与普通闹钟相同（工具或面板表单），选择器换成 `schedule_file`：
 
@@ -155,7 +155,7 @@ proactive_set(
 - **target 缺省**：句柄未给任何 `target_*` 时，只接受「文件的**祖父目录**恰好是一个已注册 workspace」这一约定（即 `<workspace>/<目录>/<文件>`），否则**闭式报错**并提示显式传 `target_workspace_path` / `target_session_id`。这里刻意不做「向上找最近的已注册 workspace」——`/root` 本身就是工作区，上溯会把未注册的 agent 目录静默指到无关会话。
 - **原子写是硬契约**：文件消失会被判定为撤销计划。请始终「写临时文件 + rename」；直接 delete 再 create 的瞬时窗口会真的丢掉一条 `at` 唤醒（截断中间态由 JSON 损坏兜底）。
 - **编辑句柄 = 重排子条目**：改动句柄的 prompt/target 会改变所有条目的 hash，`every`/`after` 子闹钟会以当前时刻重建锚点，已计划的下一次唤醒会顺延。
-- **保护机制**：子闹钟带 `declared` 标记，`proactive_update` / `proactive_cancel` 会拦截并提示前往源文件维护；`proactive_list` 只列句柄（附 `scheduleFile` 与 `declaredEntries` 子条数），不列子闹钟。面板同理：一行句柄加子条数，子闹钟的唤醒历史折叠显示在该行下，且不提供「立即触发」。
+- **保护机制**：由文件派生的子闹钟不接受单独编辑或取消（`proactive_update` / `proactive_cancel` 拦截并提示改源文件）；`proactive_list` 只列句柄（附 `scheduleFile` 与 `entryCount` 子条数），不列子闹钟。面板同理：一行句柄加子条数，子闹钟的唤醒历史折叠显示在该行下，且不提供「立即触发」。
 
 ```json
 {

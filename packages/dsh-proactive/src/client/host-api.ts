@@ -52,7 +52,7 @@ export interface AlarmRowDto {
   /** Present on "file" rows only: the canonical schedule-file path. */
   scheduleFile?: string;
   /** Present on "file" rows only: how many child alarms it currently owns. */
-  declaredEntries?: number;
+  entryCount?: number;
 }
 
 export interface PanelSnapshotDto {

@@ -13,7 +13,7 @@ import {
   hasTargetArgs,
   parseScheduleFile,
   stableStringify,
-  viewWithDeclaredEntries
+  viewWithEntryCount
 } from "../src/schedule-file.js";
 import { buildAlarm, validateCreateArgs } from "../src/alarm-factory.js";
 import type { Alarm, ToolError } from "../src/domain.js";
@@ -202,15 +202,15 @@ test("flattenTarget/stableStringify: canonical shapes for hashing", () => {
   assert.equal(stableStringify({ b: 1, a: [2, { d: 3, c: 4 }] }), '{"a":[2,{"c":4,"d":3}],"b":1}');
 });
 
-test("viewWithDeclaredEntries: counts children for handles only", () => {
+test("viewWithEntryCount: counts children for handles only", () => {
   const parent = handle("/ws/.life/w.json");
   const child = alarm({ id: "decl_1", declared: { file: "/ws/.life/w.json", entry: "e1", hash: "h", sourceId: parent.id } });
-  const views = viewWithDeclaredEntries([parent, child], parent, NOW);
-  assert.equal(views.declaredEntries, 1);
+  const views = viewWithEntryCount([parent, child], parent, NOW);
+  assert.equal(views.entryCount, 1);
   assert.equal(views.scheduleFile, "/ws/.life/w.json");
   assert.equal(views.state, "scheduled");
-  const plain = viewWithDeclaredEntries([parent, child], alarm({ id: "alarm_regular" }), NOW);
-  assert.equal(plain.declaredEntries, undefined);
+  const plain = viewWithEntryCount([parent, child], alarm({ id: "alarm_regular" }), NOW);
+  assert.equal(plain.entryCount, undefined);
 });
 
 test("client form guard: only absolute, glob-free schedule paths submit", async () => {
