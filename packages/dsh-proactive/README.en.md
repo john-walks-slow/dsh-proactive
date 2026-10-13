@@ -261,3 +261,7 @@ Run `npm run release` before publishing to run tests, bump patch version, and pa
 ## License
 
 MIT
+
+## Community
+
+- Thanks to the [LINUX DO](https://linux.do/) community for providing the discussion environment.

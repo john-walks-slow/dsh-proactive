@@ -162,3 +162,7 @@ Works out of the box with sensible defaults. To customize, edit `$DSH_HOME/proac
 ## License
 
 MIT
+
+## Community
+
+- Thanks to the [LINUX DO](https://linux.do/) community for providing the discussion environment.

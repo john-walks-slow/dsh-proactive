@@ -162,3 +162,7 @@ dsh plugin --profile web add github:john-walks-slow/dsh-proactive#path:/packages
 ## License
 
 MIT
+
+## 社区
+
+- 感谢 [LINUX DO](https://linux.do/) 社区提供的交流环境。
