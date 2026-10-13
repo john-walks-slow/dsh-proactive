@@ -7,7 +7,7 @@
 ## 地图
 
 - `packages/dsh-proactive/` — 插件源码（cordis 4 函数插件；TypeScript + node:test）
-- `README.md` / `README.en.md`（仓库根）是 `packages/dsh-proactive/` 同名文件的**镜像**，只差图片相对路径前缀（`assets/` → `packages/dsh-proactive/assets/`）。GitHub 首页与 npm 页面分别读这两份，**改文档必须两份同步**（261009 只改了包内那份，根 README 落后两个版本，仍在教已被删除的 `scheduleFiles`）。同步：`sed 's|](assets/|](packages/dsh-proactive/assets/|' packages/dsh-proactive/README.md > README.md`（en 同理）
+- `README.md` / `README.en.md`（仓库根）是**独立的门面手册**（GitHub 首页读它），章节结构与包内那份**不同**（唤醒回合注入 / 主动消息 / 控制面板 / 目录结构 等，另有 `packages/dsh-proactive/assets/` 前缀的图片路径）；`packages/dsh-proactive/README(.en).md` 是 **npm 页面**的文档。两份是两份文档，但**功能变化必须两份都改**：261009 只改了包内那份，根 README 落后两个版本——仍在教已被删除的 `config.scheduleFiles`，且完全没提第四种闹钟类型（用户 2026-10-14 就是这么发现的）
 - `docs/features/260829-dsh-proactive/` — 特性文档（research/plan/summary/validation/review）
 - `docs/features/261009-file-alarm-type/` — 文件表闹钟（第 4 种闹钟类型：`schedule_file` 句柄 → 子闹钟幂等同步，取代 260918 的全局 `config.scheduleFiles` glob 机制；world master `.life/wake_schedule.json` 对接，见 plan.md）
 - `docs/features/260918-declared-schedules/` — 旧形态（宿主 glob 自动读取）历史记录，已被 261009 取代
