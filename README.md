@@ -12,7 +12,7 @@
 
 ![dsh-proactive in the DSH settings: new-alarm creation form with schedule types, jitter and quiet-hours, plus global wake config](packages/dsh-proactive/assets/screenshot-1.png)
 
-## 你会看到什么
+## 唤醒回合注入
 
 唤醒回合开始时，模型在可见表层收到一条简短的 framing 通知（GUI 渲染为折叠 chip，非用户气泡）——明确点出时区、闹钟 id、闹钟预设的 prompt 文本，并赋予自主决定权（发言或静默退出）：
 
@@ -26,7 +26,7 @@ If nothing to do this turn, call proactive_reclaim(reason) as your ONLY action w
 
 若决定"无事可报"，模型调 `proactive_reclaim` 后整轮唤醒在模型可见上下文里自动折叠为单行墓碑（`[dsh-proactive silent wake 7f3a1c2b 15:30:00]`，~70B）。人类可读的会话日志则保留全部思考与工具调用，供事后审计。
 
-## 主动消息与静默巡检
+## 主动消息
 
 模型判定需要回复时，输出按常规助手消息出现在 Web 对话流中（消息上方带折叠的 `[dsh-proactive wake ...]` chip，标明该轮由宿主唤醒驱动，不伪造用户发言）；若会话接入了 IM 私聊管道，新消息复用 DSH 既有路由自动转发至 Telegram / Lark(飞书) / 企业微信 等聊天应用。
 
@@ -84,7 +84,7 @@ dsh plugin --profile web add github:john-walks-slow/dsh-proactive#path:/packages
 | `proactive_update_settings` | **热更新配置**：部分更新 host 级全局配置（仅改动传入字段），自动原子持久化至 `config.json` 并热应用；支持动态设定 `schedule_files`。 |
 | `proactive_reclaim` | **静默收尾**：**仅在唤醒回合内生效**。无事可报时作为唯一动作调用（不输出任何可见文本），宿主将回收本轮唤醒并在模型可见上下文折叠为墓碑。普通回合无需发消息可直接输出空文本或使用宿主 no-reply 机制。 |
 
-## 管理界面
+## 控制面板
 
 通过 SSE（`/api/dsh-proactive/events`）实时同步的两端面板：
 
