@@ -48,7 +48,13 @@ export function apply(ctx: ClientContext): void {
     ctx.effect(() => locale.register(NS, { zh, en }), "dsh-proactive: dictionaries");
     bindProactiveLocale(locale);
   } catch (error) {
-    console.error("[dsh-proactive] locale bind failed (falling back to zh)", error);
+    // FORK (INC-006b): locale.register throws on re-apply (duplicate
+    // namespace, e.g. HMR without a clean prior disposer teardown) while the
+    // dicts are ALREADY present in the shared locale runtime — the missing
+    // piece is just the binding. Bind anyway so the panel is not stuck on the
+    // unbound fallback; resolveLanguage's final fallback is "en" (never "zh").
+    console.error("[dsh-proactive] locale register failed (binding anyway, falling back to en)", error);
+    bindProactiveLocale(locale);
   }
   const t = locale.bind(NS);
 

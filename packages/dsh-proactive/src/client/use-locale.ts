@@ -25,7 +25,13 @@ let listeners = new Set<() => void>();
 /** Resolve the active UI language through the live service (zh default). */
 function resolveLanguage(): "zh" | "en" {
   const active = bound?.getSnapshot().active;
-  return typeof active === "string" && (active === "en" || active.startsWith("en")) ? "en" : "zh";
+  // FORK (INC-006a): zh speakers keep Chinese; everyone else gets English.
+  // 0.3.1 mapped ANY non-"en" locale (ru, de, undefined, …) to "zh", so an
+  // English/Russian/German GUI rendered the Chinese dictionary. The panel
+  // ships only zh+en dicts, so the safe fallback for unregistered languages
+  // is "en", never "zh".
+  if (typeof active === "string" && active.startsWith("zh")) return "zh";
+  return "en";
 }
 
 /** Called by the client mount to bind the live locale service (idempotent). */
