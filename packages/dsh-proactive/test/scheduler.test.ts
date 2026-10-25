@@ -397,7 +397,7 @@ test("an occurrence exactly at the quiet window end fires normally", async (tctx
   h.outcomes.push({ outcome: "ok", analysis: { decision: "no_reply", budgetDelta: 0 } });
   h.store.addAlarm(alarm("edge1", { respectQuietHours: true, nextDueAt: "2026-09-01T09:00:00.000Z" }));
   h.scheduler.start();
-  await h.flush(() => h.fired.length >= 1);
+  await h.flush(() => h.store.getAlarm("edge1")?.status === "completed");
   assert.equal(h.fired[0]?.id, "edge1"); // 09:00 is outside (end exclusive)
   assert.equal(h.store.getAlarm("edge1")?.status, "completed");
 });
