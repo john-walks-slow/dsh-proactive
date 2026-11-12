@@ -240,6 +240,8 @@ All runtime state lives in `$DSH_HOME/proactive/`:
 - `state.json` — Daily delivery budget counters and created-session registry
 - `config.json` — Custom configuration
 
+> **Data directory resolution**: `$DSH_HOME/proactive/` (the host exports `DSH_HOME` to plugin subprocesses) → `$HOME/.dsh/proactive/` (the host keeps its DSH home internal, as the desktop app does — it resolves it in-process via `@deepseek-ai/dsh-home-paths` and never writes it into its own `process.env`) → `/root/.dsh/proactive` (legacy fallback). An explicit `DSH_PROACTIVE_DATA_DIR` wins over all of them.
+
 ## Permissions & Safety
 
 - **Scheduled Wake-ups**: Runs an in-process timer loop on the host side; no root or crontab required; self-heals from disk on restart.
