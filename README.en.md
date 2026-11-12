@@ -133,6 +133,8 @@ proactive_set(
 
 Defaults work out of the box. To customise, edit `$DSH_HOME/proactive/config.json`:
 
+> The data directory resolves as `$DSH_HOME/proactive/` → `$HOME/.dsh/proactive/` → `/root/.dsh/proactive` (the desktop host does not export `DSH_HOME`, so it lands on the second arm); an explicit `DSH_PROACTIVE_DATA_DIR` wins.
+
 ```jsonc
 {
   "enabled": true,                             // master switch

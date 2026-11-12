@@ -241,6 +241,8 @@ sv start dsh
 - `state.json` — 每日预算使用计数及插件自建会话登记
 - `config.json` — 插件全局配置文件
 
+> **数据目录解析顺序**：`$DSH_HOME/proactive/`（宿主向插件进程导出了 `DSH_HOME`）→ `$HOME/.dsh/proactive/`（宿主未导出 `DSH_HOME`，桌面端即如此：DSH home 在宿主进程内由 `@deepseek-ai/dsh-home-paths` 解析，不写入自己的 `process.env`）→ `/root/.dsh/proactive`（历史兜底）。显式设置 `DSH_PROACTIVE_DATA_DIR` 时以它为准。
+
 ## 权限与安全声明
 
 - **定时唤醒**：插件完全在宿主进程内部运行轻量单定时器调度器，无需系统 root 或外部 crontab 依赖；服务重启后从本地磁盘自动恢复。

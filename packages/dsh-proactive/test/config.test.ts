@@ -131,3 +131,56 @@ test("defaultPrompt: file value wins (trimmed), blank falls back to the repo def
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Run fn with a temporary process.env patch, restoring every key afterwards. */
+function withEnv(patch: Record<string, string | undefined>, fn: () => void): void {
+  const saved = new Map<string, string | undefined>();
+  for (const key of Object.keys(patch)) {
+    saved.set(key, process.env[key]);
+    const value = patch[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test("default data dir follows $DSH_HOME when the host exports it", () => {
+  withEnv({ DSH_HOME: "/tmp/dsh-home-arm", DSH_PROACTIVE_DATA_DIR: undefined }, () => {
+    assert.equal(resolveConfig().dataDir, "/tmp/dsh-home-arm/proactive");
+  });
+});
+
+test("default data dir falls back to $HOME/.dsh (desktop host does not export DSH_HOME)", () => {
+  // Regression: the desktop host resolves its DSH home in-process and leaves
+  // DSH_HOME unset, so the old chain fell through to the hard-coded Linux path
+  // (/root/.dsh/proactive), which does not exist and cannot be created on macOS
+  // — every persist() failed and alarms were never stored.
+  withEnv({ DSH_HOME: undefined, DSH_PROACTIVE_DATA_DIR: undefined, HOME: "/tmp/dsh-home-user" }, () => {
+    assert.equal(resolveConfig().dataDir, "/tmp/dsh-home-user/.dsh/proactive");
+  });
+});
+
+test("default data dir falls back to USERPROFILE when HOME is unset (Windows)", () => {
+  withEnv({ DSH_HOME: undefined, DSH_PROACTIVE_DATA_DIR: undefined, HOME: undefined, USERPROFILE: "C:\\Users\\dsh" }, () => {
+    assert.equal(resolveConfig().dataDir, "C:\\Users\\dsh/.dsh/proactive");
+  });
+});
+
+test("default data dir keeps the legacy constant when no home variable exists", () => {
+  withEnv({ DSH_HOME: undefined, DSH_PROACTIVE_DATA_DIR: undefined, HOME: undefined, USERPROFILE: undefined }, () => {
+    assert.equal(resolveConfig().dataDir, DEFAULT_CONFIG.dataDir);
+  });
+});
+
+test("DSH_PROACTIVE_DATA_DIR still outranks every home fallback", () => {
+  withEnv({ DSH_HOME: undefined, HOME: "/tmp/dsh-home-user", DSH_PROACTIVE_DATA_DIR: "/tmp/dsh-explicit" }, () => {
+    assert.equal(resolveConfig().dataDir, "/tmp/dsh-explicit");
+  });
+});

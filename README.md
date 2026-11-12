@@ -133,6 +133,8 @@ proactive_set(
 
 默认配置开箱即用。若需自定义，可编辑 `$DSH_HOME/proactive/config.json`：
 
+> 数据目录按 `$DSH_HOME/proactive/` → `$HOME/.dsh/proactive/` → `/root/.dsh/proactive` 依次解析（桌面端宿主不导出 `DSH_HOME`，会落到第二档），显式 `DSH_PROACTIVE_DATA_DIR` 最优先。
+
 ```jsonc
 {
   "enabled": true,                             // 插件全局总开关

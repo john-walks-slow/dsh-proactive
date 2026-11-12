@@ -70,8 +70,24 @@ export const DEFAULT_CONFIG: ProactiveConfig = {
 
 const TIME_PATTERN = /^(?<hour>[01]\d|2[0-3]):(?<minute>[0-5]\d)$/;
 
+/**
+ * Resolve the data directory when no explicit override is in play, in order:
+ *   1. $DSH_HOME/proactive      — the documented layout; the host exports this
+ *      to tool subprocesses.
+ *   2. $HOME/.dsh/proactive     — same layout derived from the user home. The
+ *      desktop host resolves its DSH home in-process (@deepseek-ai/dsh-home-paths)
+ *      and does NOT export DSH_HOME to its own process.env, so without this arm
+ *      a macOS/Windows host fell through to the hard-coded Linux default and
+ *      every persist() failed (no /root to mkdir → alarms were silently never
+ *      stored; proactive_set answered persistence_uncertain).
+ *   3. DEFAULT_CONFIG.dataDir   — last resort, the legacy Linux location.
+ */
 function defaultDataDir(): string {
-  if (typeof process !== "undefined" && process.env["DSH_HOME"]) return process.env["DSH_HOME"] + "/proactive";
+  const env = typeof process !== "undefined" ? process.env : undefined;
+  const dshHome = env?.["DSH_HOME"];
+  if (dshHome) return dshHome + "/proactive";
+  const home = env?.["HOME"] ?? env?.["USERPROFILE"];
+  if (home) return home + "/.dsh/proactive";
   return DEFAULT_CONFIG.dataDir;
 }
 
